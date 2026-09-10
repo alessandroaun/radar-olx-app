@@ -133,15 +133,20 @@ function RadarProvider({ children }) {
   pushTokenRef.current = pushToken;
   const userRef = useRef(user);
   userRef.current = user;
+  const monitoresRef = useRef(monitores);
+  monitoresRef.current = monitores;
+  const hasLoadedRef = useRef(false);
 
   // O dono dos radares é o ID da conta conectada ou o ID anônimo do aparelho
   const currentOwnerId = user?.id || deviceId;
 
-  const fetchData = useCallback(async (targetOwnerId = null) => {
+  const fetchData = useCallback(async (targetOwnerId = null, silent = false) => {
     const ownerId = targetOwnerId || userRef.current?.id || deviceIdRef.current;
     if (!ownerId) return;
     try {
-      setLoading(true);
+      if (!silent && !hasLoadedRef.current) {
+        setLoading(true);
+      }
       const dadosMonitores = await RadarAPI.getMonitors(ownerId);
       const monitorIds = (dadosMonitores || []).map(m => m.id);
 
@@ -150,10 +155,10 @@ function RadarProvider({ children }) {
         RadarAPI.getLogs(8, monitorIds)
       ]);
 
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setMonitores(dadosMonitores || []);
       setResultados(dadosResultados || []);
       setAtividades(dadosAtividades || []);
+      hasLoadedRef.current = true;
     } catch (e) {
       console.log("Erro ao sincronizar com Supabase:", e);
     } finally {
@@ -235,6 +240,7 @@ function RadarProvider({ children }) {
       setMonitores([]);
       setResultados([]);
       setAtividades([]);
+      hasLoadedRef.current = false;
 
       // 4. Busca dados para o novo ID limpo (inicia zerado)
       await fetchData(newDevId);
@@ -339,20 +345,56 @@ function RadarProvider({ children }) {
   useEffect(() => {
     if (!currentOwnerId) return;
 
+    let debounceTimer = null;
+    const debouncedSilentFetch = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchData(null, true);
+      }, 1200);
+    };
+
     const channel = supabase
       .channel(`realtime-radar-${currentOwnerId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'monitores' }, () => {
-        fetchData();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'monitores' }, (payload) => {
+        if (payload?.eventType === 'UPDATE' && payload.new) {
+          setMonitores(prev => prev.map(m => m.id === payload.new.id ? { ...m, ...payload.new } : m));
+        } else if (payload?.eventType === 'INSERT' && payload.new) {
+          if (payload.new.usuario_id === currentOwnerId) {
+            setMonitores(prev => [payload.new, ...prev.filter(m => m.id !== payload.new.id)]);
+          }
+        } else if (payload?.eventType === 'DELETE' && payload.old) {
+          setMonitores(prev => prev.filter(m => m.id !== payload.old.id));
+        }
+        debouncedSilentFetch();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'resultados' }, () => {
-        fetchData();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'resultados' }, (payload) => {
+        if (payload?.eventType === 'INSERT' && payload.new) {
+          const currentMonitorIds = (monitoresRef.current || []).map(m => m.id);
+          if (!payload.new.monitor_id || currentMonitorIds.length === 0 || currentMonitorIds.includes(payload.new.monitor_id)) {
+            setResultados(prev => {
+              if (prev.some(r => r.id === payload.new.id)) return prev;
+              return [payload.new, ...prev].slice(0, 40);
+            });
+          }
+        }
+        debouncedSilentFetch();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'logs' }, () => {
-        fetchData();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'logs' }, (payload) => {
+        if (payload?.eventType === 'INSERT' && payload.new) {
+          const currentMonitorIds = (monitoresRef.current || []).map(m => m.id);
+          if (!payload.new.monitor_id || currentMonitorIds.length === 0 || currentMonitorIds.includes(payload.new.monitor_id)) {
+            setAtividades(prev => {
+              if (prev.some(l => l.id === payload.new.id)) return prev;
+              return [payload.new, ...prev].slice(0, 8);
+            });
+          }
+        }
+        debouncedSilentFetch();
       })
       .subscribe();
 
     return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
       supabase.removeChannel(channel);
     };
   }, [currentOwnerId, fetchData]);
@@ -556,7 +598,7 @@ function DashboardScreen({ navigation }) {
   }, []);
 
   useEffect(() => {
-    const unsub = navigation.addListener('focus', () => { fetchData(); });
+    const unsub = navigation.addListener('focus', () => { fetchData(null, true); });
     return unsub;
   }, [navigation, fetchData]);
 
@@ -663,7 +705,7 @@ function DashboardScreen({ navigation }) {
           <Text style={styles.sectionTitle}>HISTÓRICO DE VARREDURAS</Text>
         </View>
         <Card style={styles.logCard}>
-          {loading ? (
+          {loading && atividades.length === 0 ? (
             <ActivityIndicator size="small" color={THEME.primary} style={{ padding: 20 }} />
           ) : atividades.length === 0 ? (
             <Text style={styles.emptyCardSub}>Aguardando ciclo de varredura...</Text>
@@ -703,7 +745,7 @@ function MonitorListScreen({ navigation }) {
   const alternarStatus = async (id, atual) => {
     try {
       await RadarAPI.toggleMonitor(id, !atual);
-      fetchData();
+      fetchData(null, true);
     } catch (e) {
       Alert.alert("Erro", "Não foi possível atualizar o radar.");
     }
@@ -717,7 +759,7 @@ function MonitorListScreen({ navigation }) {
         "⚡ Varredura Acionada!", 
         "Comando enviado com sucesso! O robô iniciará a varredura em instantes."
       );
-      fetchData();
+      fetchData(null, true);
     } catch (e) {
       Alert.alert("Erro", "Falha ao enviar comando de varredura.");
     } finally {
@@ -736,7 +778,7 @@ function MonitorListScreen({ navigation }) {
           style: "destructive", 
           onPress: async () => {
             await RadarAPI.deleteMonitor(id);
-            fetchData();
+            fetchData(null, true);
           } 
         }
       ]
@@ -762,7 +804,7 @@ function MonitorListScreen({ navigation }) {
         contentContainerStyle={styles.scrollArea}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
       >
-        {loading ? (
+        {loading && monitores.length === 0 ? (
           <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 50 }} />
         ) : monitores.length === 0 ? (
           <View style={styles.emptyStateContainer}>
@@ -953,7 +995,7 @@ function AlertsScreen({ navigation }) {
   const { resultados, loading, refreshing, onRefresh, fetchData } = useContext(RadarContext);
 
   useEffect(() => {
-    const unsub = navigation.addListener('focus', () => { fetchData(); });
+    const unsub = navigation.addListener('focus', () => { fetchData(null, true); });
     return unsub;
   }, [navigation, fetchData]);
 
@@ -970,7 +1012,7 @@ function AlertsScreen({ navigation }) {
         contentContainerStyle={styles.scrollArea}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
       >
-        {loading ? (
+        {loading && resultados.length === 0 ? (
           <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 50 }} />
         ) : resultados.length === 0 ? (
           <View style={styles.emptyStateContainer}>
@@ -1122,7 +1164,7 @@ function CreateMonitorScreen({ navigation, route }) {
       setSalvando(true);
       if (editando) {
         await RadarAPI.updateMonitor(editando.id, payload);
-        fetchData();
+        fetchData(null, true);
         Alert.alert(
           "✅ Radar Atualizado!",
           `As configurações de "${nome.trim()}" foram atualizadas com sucesso.`,
@@ -1130,7 +1172,7 @@ function CreateMonitorScreen({ navigation, route }) {
         );
       } else {
         await RadarAPI.createMonitor(payload);
-        fetchData();
+        fetchData(null, true);
         Alert.alert(
           "✅ Radar Ativado!",
           "Monitor cadastrado com sucesso! As varreduras ocorrerão conforme a frequência agendada ou ao tocar no botão 'Varrer Agora'.",
@@ -1857,7 +1899,7 @@ function SettingsScreen() {
           /* CONTA CONECTADA */
           <Card style={styles.authCard}>
             <View style={styles.rowBetween}>
-              <View style={styles.row}>
+              <View style={[styles.row, { flex: 1, marginRight: 10 }]}>
                 <View style={styles.userAvatarBadge}>
                   <Ionicons name="person" size={20} color={THEME.primary} />
                 </View>
@@ -1868,7 +1910,7 @@ function SettingsScreen() {
                   </Text>
                 </View>
               </View>
-              <View style={styles.badgeSuccess}>
+              <View style={[styles.badgeSuccess, { flexShrink: 0 }]}>
                 <Text style={styles.badgeSuccessText}>CONECTADO</Text>
               </View>
             </View>
