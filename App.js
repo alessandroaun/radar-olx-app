@@ -1,10 +1,10 @@
-import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
+import React, { useState, useEffect, createContext, useContext, useCallback, useRef, useMemo } from 'react';
 import { 
   View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, 
-  Alert, Platform, LayoutAnimation, StatusBar, 
-  ActivityIndicator, Switch, Dimensions, Linking, RefreshControl,
-  Modal, FlatList
+  Alert, Platform, StatusBar, ActivityIndicator, Switch, Dimensions, 
+  Linking, RefreshControl, Modal, FlatList, Image, Vibration 
 } from 'react-native';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -17,33 +17,16 @@ import { supabase, supabaseAuth } from './supabase';
 import { setupNotifications, registerPushToken, testLocalNotification, subscribeNotificationEvents, checkIsExpoGo } from './notificationService';
 import { OLX_ESTADOS, LISTA_ESTADOS, gerarUrlOlx } from './olxData';
 import { getOrCreateDeviceId, registerDeviceInSupabase, migrateDeviceMonitorsToAccount, resetDeviceOnLogout } from './deviceService';
+import { THEME } from './theme';
+import { 
+  Surface, PrimaryButton, IconButton, StatusBadge, PlatformBadge, 
+  StrategyBadge, SectionHeader, MetricBox 
+} from './components';
 
 WebBrowser.maybeCompleteAuthSession();
 
 // =====================================================================
-// 1. CONFIGURAÇÕES VISUAIS E TEMA MODERNO ANDROID
-// =====================================================================
-const THEME = {
-  bg: '#07090E',
-  cardBg: '#11141D',
-  cardBorder: '#1E2333',
-  primary: '#FF9500', 
-  primaryGlow: 'rgba(255, 149, 0, 0.2)',
-  primaryHover: '#FFA726',
-  secondary: '#0A84FF', 
-  text: '#F5F7FA',
-  textMuted: '#8A93A6',
-  textSubtle: '#4E5669',
-  success: '#30D158',
-  successBg: 'rgba(48, 209, 88, 0.15)',
-  danger: '#FF453A',
-  dangerBg: 'rgba(255, 69, 58, 0.15)',
-  warning: '#FFD60A',
-  badgeBg: '#191E2B'
-};
-
-// =====================================================================
-// 2. API SERVICE (SUPABASE)
+// 1. API SERVICE (SUPABASE) - CONTRATOS 100% PRESERVADOS
 // =====================================================================
 class RadarAPI {
   static async getMonitors(ownerId = null) {
@@ -83,27 +66,27 @@ class RadarAPI {
     if (error) throw error;
   }
 
-  static async getLogs(limit = 8, monitorIds = null) {
+  static async getLogs(limit = 8, monitorIds = []) {
     try {
-      if (monitorIds !== null && monitorIds.length === 0) return [];
-      let query = supabase.from('logs').select('*').order('created_at', { ascending: false }).limit(limit);
-      if (monitorIds !== null) {
-        query = query.in('monitor_id', monitorIds);
-      }
-      const { data, error } = await query;
+      if (!monitorIds || monitorIds.length === 0) return [];
+      const { data, error } = await supabase.from('logs')
+        .select('*')
+        .in('monitor_id', monitorIds)
+        .order('created_at', { ascending: false })
+        .limit(limit);
       if (error) return [];
       return data || [];
     } catch (e) { return []; }
   }
 
-  static async getAllResults(limit = 40, monitorIds = null) {
+  static async getAllResults(limit = 40, monitorIds = []) {
     try {
-      let query = supabase.from('resultados').select('*').order('created_at', { ascending: false }).limit(limit);
-      if (monitorIds !== null) {
-        if (monitorIds.length === 0) return [];
-        query = query.in('monitor_id', monitorIds);
-      }
-      const { data, error } = await query;
+      if (!monitorIds || monitorIds.length === 0) return [];
+      const { data, error } = await supabase.from('resultados')
+        .select('*')
+        .in('monitor_id', monitorIds)
+        .order('created_at', { ascending: false })
+        .limit(limit);
       if (error) return [];
       return data || [];
     } catch (e) { return []; }
@@ -111,7 +94,7 @@ class RadarAPI {
 }
 
 // =====================================================================
-// 3. CONTEXTO GLOBAL (STATE MANAGEMENT)
+// 2. CONTEXTO GLOBAL (STATE MANAGEMENT)
 // =====================================================================
 const RadarContext = createContext({});
 
@@ -126,7 +109,6 @@ function RadarProvider({ children }) {
   const [refreshing, setRefreshing] = useState(false);
   const [notificacoesAtivas, setNotificacoesAtivas] = useState(true);
 
-  // Refs para manter valores atualizados sem disparar recriação de callbacks
   const deviceIdRef = useRef(deviceId);
   deviceIdRef.current = deviceId;
   const pushTokenRef = useRef(pushToken);
@@ -136,8 +118,8 @@ function RadarProvider({ children }) {
   const monitoresRef = useRef(monitores);
   monitoresRef.current = monitores;
   const hasLoadedRef = useRef(false);
+  const lastResultsCountRef = useRef(0);
 
-  // O dono dos radares é o ID da conta conectada ou o ID anônimo do aparelho
   const currentOwnerId = user?.id || deviceId;
 
   const fetchData = useCallback(async (targetOwnerId = null, silent = false) => {
@@ -155,6 +137,13 @@ function RadarProvider({ children }) {
         RadarAPI.getLogs(8, monitorIds)
       ]);
 
+      if (dadosResultados && dadosResultados.length > lastResultsCountRef.current && hasLoadedRef.current) {
+        try {
+          Vibration.vibrate(Platform.OS === 'android' ? [0, 80, 50, 100] : 100);
+        } catch (e) {}
+      }
+      lastResultsCountRef.current = (dadosResultados || []).length;
+
       setMonitores(dadosMonitores || []);
       setResultados(dadosResultados || []);
       setAtividades(dadosAtividades || []);
@@ -169,10 +158,9 @@ function RadarProvider({ children }) {
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    fetchData();
+    fetchData(null, true);
   }, [fetchData]);
 
-  // Função centralizada para alternar estado de notificações do aparelho
   const alternarNotificacoes = useCallback(async (novoValor) => {
     setNotificacoesAtivas(novoValor);
     await AsyncStorage.setItem('@radar_notificacoes_ativas', String(novoValor));
@@ -183,7 +171,6 @@ function RadarProvider({ children }) {
       if (currentDevId) {
         await supabase.from('usuarios').update({ expo_push_token: null }).eq('id', currentDevId);
       }
-      console.log('[Radar] Notificações desativadas: token limpo no contexto e Supabase.');
     } else {
       if (currentDevId) {
         const token = await registerPushToken(currentDevId, userRef.current?.id);
@@ -192,11 +179,9 @@ function RadarProvider({ children }) {
           pushTokenRef.current = token;
         }
       }
-      console.log('[Radar] Notificações ativadas pelo usuário.');
     }
   }, []);
 
-  // Função centralizada para vincular conta ao aparelho e migrar dados
   const linkAccount = useCallback(async (authUser) => {
     if (!authUser) return;
     try {
@@ -218,17 +203,14 @@ function RadarProvider({ children }) {
     }
   }, [fetchData]);
 
-  // Função centralizada para logout limpo com desvinculação completa
   const logoutUser = useCallback(async () => {
     try {
       setLoading(true);
       const oldDevId = deviceIdRef.current;
       const currentToken = pushTokenRef.current;
 
-      // 1. Encerra a sessão Auth
       await supabaseAuth.auth.signOut();
 
-      // 2. Desvincula o aparelho antigo no banco e gera novo ID limpo
       const newDevId = await resetDeviceOnLogout(oldDevId, currentToken);
       setDeviceId(newDevId);
       deviceIdRef.current = newDevId;
@@ -236,13 +218,11 @@ function RadarProvider({ children }) {
       setUser(null);
       userRef.current = null;
 
-      // 3. Limpa completamente todos os dados do estado local
       setMonitores([]);
       setResultados([]);
       setAtividades([]);
       hasLoadedRef.current = false;
 
-      // 4. Busca dados para o novo ID limpo (inicia zerado)
       await fetchData(newDevId);
     } catch (e) {
       console.log("[Radar] Erro ao efetuar logout:", e);
@@ -251,7 +231,6 @@ function RadarProvider({ children }) {
     }
   }, [fetchData]);
 
-  // Inicialização do Aparelho, Push e Sessão Auth (executa no mount)
   useEffect(() => {
     let mounted = true;
 
@@ -270,22 +249,18 @@ function RadarProvider({ children }) {
         userRef.current = currentUser;
       }
 
-      // Registra aparelho no Supabase
       await registerDeviceInSupabase(devId, null, currentUser?.id);
 
-      // Se já estava autenticado ao abrir o app, garante migração de eventuais dados órfãos
       if (currentUser) {
         await migrateDeviceMonitorsToAccount(devId, currentUser.id, null);
       }
 
       fetchData(currentUser?.id || devId);
 
-      // Verifica preferência de notificações
       const savedNotif = await AsyncStorage.getItem('@radar_notificacoes_ativas');
       const isNotifActive = savedNotif !== null ? savedNotif === 'true' : true;
       if (mounted) setNotificacoesAtivas(isNotifActive);
 
-      // Registra push token apenas se o usuário permitiu nas configurações
       if (isNotifActive) {
         try {
           const token = await registerPushToken(devId, currentUser?.id);
@@ -304,7 +279,6 @@ function RadarProvider({ children }) {
 
     init();
 
-    // Listener de eventos Auth do Supabase
     const { data: { subscription } } = supabaseAuth.auth.onAuthStateChange(async (event, session) => {
       const authUser = session?.user ?? null;
       const currentDevId = deviceIdRef.current;
@@ -325,7 +299,7 @@ function RadarProvider({ children }) {
     });
 
     const unsubscribeEvents = subscribeNotificationEvents(
-      () => { fetchData(); },
+      () => { fetchData(null, true); },
       (response) => {
         const data = response?.notification?.request?.content?.data;
         if (data?.url) {
@@ -341,7 +315,7 @@ function RadarProvider({ children }) {
     };
   }, [fetchData]);
 
-  // Inscrição em canais Realtime do Supabase para atualização instantânea
+  // Realtime Supabase
   useEffect(() => {
     if (!currentOwnerId) return;
 
@@ -370,11 +344,15 @@ function RadarProvider({ children }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'resultados' }, (payload) => {
         if (payload?.eventType === 'INSERT' && payload.new) {
           const currentMonitorIds = (monitoresRef.current || []).map(m => m.id);
-          if (!payload.new.monitor_id || currentMonitorIds.length === 0 || currentMonitorIds.includes(payload.new.monitor_id)) {
+          // ISOLAMENTO RIGOROSO: Só processa se o resultado pertencer a um monitor deste usuário
+          if (payload.new.monitor_id && currentMonitorIds.includes(payload.new.monitor_id)) {
             setResultados(prev => {
               if (prev.some(r => r.id === payload.new.id)) return prev;
               return [payload.new, ...prev].slice(0, 40);
             });
+            try {
+              Vibration.vibrate(Platform.OS === 'android' ? [0, 80, 50, 100] : 100);
+            } catch (e) {}
           }
         }
         debouncedSilentFetch();
@@ -382,7 +360,8 @@ function RadarProvider({ children }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'logs' }, (payload) => {
         if (payload?.eventType === 'INSERT' && payload.new) {
           const currentMonitorIds = (monitoresRef.current || []).map(m => m.id);
-          if (!payload.new.monitor_id || currentMonitorIds.length === 0 || currentMonitorIds.includes(payload.new.monitor_id)) {
+          // ISOLAMENTO RIGOROSO: Só processa se o log pertencer a um monitor deste usuário
+          if (payload.new.monitor_id && currentMonitorIds.includes(payload.new.monitor_id)) {
             setAtividades(prev => {
               if (prev.some(l => l.id === payload.new.id)) return prev;
               return [payload.new, ...prev].slice(0, 8);
@@ -411,35 +390,9 @@ function RadarProvider({ children }) {
 }
 
 // =====================================================================
-// 4. COMPONENTES VISUAIS REUTILIZÁVEIS
+// 3. AUXILIARES E COMPONENTES DE ESTRATÉGIA
 // =====================================================================
-const Card = ({ children, style }) => (
-  <View style={[styles.card, style]}>
-    {children}
-  </View>
-);
 
-const PrimaryButton = ({ title, onPress, icon, loading: btnLoading }) => (
-  <TouchableOpacity 
-    style={[styles.btnPrimary, btnLoading && { opacity: 0.7 }]} 
-    onPress={onPress} 
-    activeOpacity={0.8}
-    disabled={btnLoading}
-  >
-    {btnLoading ? (
-      <ActivityIndicator size="small" color="#000" />
-    ) : (
-      <>
-        {icon && <Ionicons name={icon} size={18} color="#000" style={{ marginRight: 8 }} />}
-        <Text style={styles.btnPrimaryText}>{title}</Text>
-      </>
-    )}
-  </TouchableOpacity>
-);
-
-// =====================================================================
-// 4.1. COMPONENTES E AUXILIARES DE PLATAFORMAS E ESTRATÉGIAS
-// =====================================================================
 function identificarPlataforma(url) {
   const u = (url || '').toLowerCase();
   if (u.includes('zoom.com.br')) return 'ZOOM';
@@ -462,7 +415,13 @@ function extrairInfoOlx(url) {
   let regiaoEncontrada = '';
   if (!url) return { uf: ufEncontrada, regiaoSlug: regiaoEncontrada };
 
+  const u = url.toLowerCase();
+  if (u.includes('/brasil?') || u.includes('/brasil/') || u.endsWith('/brasil')) {
+    return { uf: 'BR', regiaoSlug: '' };
+  }
+
   for (const [uf, dados] of Object.entries(OLX_ESTADOS)) {
+    if (uf === 'BR') continue;
     if (url.includes(`/${dados.slug}/`) || url.includes(`/${dados.slug}?`) || url.endsWith(`/${dados.slug}`)) {
       ufEncontrada = uf;
       for (const reg of dados.regioes) {
@@ -477,7 +436,6 @@ function extrairInfoOlx(url) {
   return { uf: ufEncontrada, regiaoSlug: regiaoEncontrada };
 }
 
-// Formata o contador regressivo ignorando horas e minutos se forem zero
 function formatarTempoRegressivo(proximaDataStr, now) {
   if (!proximaDataStr) return 'Aguardando agendamento';
   const diffMs = new Date(proximaDataStr).getTime() - now;
@@ -488,16 +446,11 @@ function formatarTempoRegressivo(proximaDataStr, now) {
   const minutos = Math.floor((totalSegundos % 3600) / 60);
   const segundos = totalSegundos % 60;
 
-  if (horas > 0) {
-    return `${horas}h ${minutos}m ${segundos}s`;
-  }
-  if (minutos > 0) {
-    return `${minutos}m ${segundos}s`;
-  }
+  if (horas > 0) return `${horas}h ${minutos}m ${segundos}s`;
+  if (minutos > 0) return `${minutos}m ${segundos}s`;
   return `${segundos}s`;
 }
 
-// Calcula os segundos restantes para o radar ativo mais próximo
 function calcularSegundosProximaVarredura(monitores, now) {
   const ativos = (monitores || []).filter(m => m.ativo && m.proxima_execucao);
   if (ativos.length === 0) return null;
@@ -505,9 +458,7 @@ function calcularSegundosProximaVarredura(monitores, now) {
   let menorDiff = Infinity;
   for (const m of ativos) {
     const diff = Math.floor((new Date(m.proxima_execucao).getTime() - now) / 1000);
-    if (diff < menorDiff) {
-      menorDiff = diff;
-    }
+    if (diff < menorDiff) menorDiff = diff;
   }
   if (menorDiff === Infinity) return null;
   return menorDiff <= 0 ? 0 : menorDiff;
@@ -533,7 +484,7 @@ function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>{title}</Text>
             <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-              <Ionicons name="close" size={22} color={THEME.text} />
+              <Ionicons name="close" size={20} color={THEME.textMuted} />
             </TouchableOpacity>
           </View>
 
@@ -570,11 +521,11 @@ function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }
                   <Text style={[styles.modalItemText, isSelected && styles.modalItemTextSelected]}>
                     {item.nome} {item.uf ? `(${item.uf})` : ''}
                   </Text>
-                  {isSelected && <Ionicons name="checkmark-circle" size={20} color={THEME.primary} />}
+                  {isSelected && <Ionicons name="checkmark-circle" size={18} color={THEME.primary} />}
                 </TouchableOpacity>
               );
             }}
-            style={{ maxHeight: 350 }}
+            style={{ maxHeight: 340 }}
           />
         </View>
       </View>
@@ -583,10 +534,10 @@ function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }
 }
 
 // =====================================================================
-// 5. TELAS (SCREENS)
+// 4. TELAS DO APLICATIVO
 // =====================================================================
 
-// --- TELA 1: HOME / DASHBOARD ---
+// --- TELA 1: HOME / DASHBOARD (VISÃO GERAL OPERACIONAL) ---
 function DashboardScreen({ navigation }) {
   const { monitores, resultados, atividades, loading, refreshing, onRefresh, fetchData } = useContext(RadarContext);
   const ativos = monitores.filter(m => m.ativo).length;
@@ -603,135 +554,179 @@ function DashboardScreen({ navigation }) {
   }, [navigation, fetchData]);
 
   const segProx = calcularSegundosProximaVarredura(monitores, now);
+  const segProxFormatado = useMemo(() => {
+    if (segProx === null) return '--';
+    if (segProx <= 0) return 'Agora';
+    if (segProx > 60) return `${Math.ceil(segProx / 60)}m`;
+    return `${segProx}s`;
+  }, [segProx]);
 
   return (
     <View style={styles.screen}>
       <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
       
-      <View style={styles.topHeader}>
-        <View>
-          <Text style={styles.headerTitle}>AchôAI</Text>
-          <Text style={styles.headerSubtitle}>Monitoramento de anúncios e notícias relevantes</Text>
-          <View style={[styles.serverPill, { marginTop: 6 }]}>
-            <View style={styles.serverDot} />
-            <Text style={styles.serverText}>Servidor de Varredura Online</Text>
+      {/* BRAND BAR SUPERIOR COM LOGO 3D REAL (TRANSPARENTE) */}
+      <View style={styles.brandHeader}>
+        <View style={styles.brandGroup}>
+          <Image 
+            source={require('./assets/android-icon-foreground.png')} 
+            style={styles.brandLogoImage} 
+            resizeMode="contain" 
+          />
+          <View style={styles.brandTextGroup}>
+            <Text style={styles.brandName}>AchôAI</Text>
+            <View style={styles.livePulseRow}>
+              <View style={styles.livePulseDot} />
+              <Text style={styles.livePulseText}>Robô Online</Text>
+            </View>
           </View>
         </View>
+
         <TouchableOpacity 
-          style={styles.headerBtn} 
+          style={styles.btnHeaderAction}
           onPress={() => navigation.navigate('Criar')}
-          activeOpacity={0.7}
+          activeOpacity={0.8}
         >
-          <Ionicons name="add" size={24} color={THEME.primary} />
+          <Ionicons name="add" size={17} color="#08090D" style={{ marginRight: 2 }} />
+          <Text style={styles.btnHeaderActionText}>Novo Radar</Text>
         </TouchableOpacity>
       </View>
 
       <ScrollView 
         contentContainerStyle={styles.scrollArea}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.statsRow}>
-          <Card style={styles.statBox}>
-            <View style={styles.statIconBadge}>
-              <Ionicons name="pulse" size={20} color={THEME.primary} />
-            </View>
-            <Text style={styles.statNumber}>{ativos}</Text>
-            <Text style={styles.statLabel}>Radares Ativos</Text>
-          </Card>
-
-          <Card style={styles.statBox}>
-            <View style={[styles.statIconBadge, { backgroundColor: THEME.successBg }]}>
-              <Ionicons name="pricetag" size={20} color={THEME.success} />
-            </View>
-            <Text style={styles.statNumber}>{resultados.length}</Text>
-            <Text style={styles.statLabel}>Oportunidades Totais</Text>
-          </Card>
-
-          <Card style={styles.statBox}>
-            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(10, 132, 255, 0.15)' }]}>
-              <Ionicons name="timer-outline" size={20} color={THEME.secondary} />
-            </View>
-            <Text style={styles.statNumber}>
-              {segProx === null ? '--' : segProx === 0 ? 'Agora' : `${segProx}s`}
-            </Text>
-            <Text style={styles.statLabel}>Próxima Varredura</Text>
-          </Card>
+        {/* MÉTRICAS OPERACIONAIS */}
+        <View style={styles.metricsRow}>
+          <MetricBox 
+            icon="pulse"
+            value={ativos}
+            label="Radares Ativos"
+            sublabel="Em monitoramento"
+            color={THEME.primary}
+            bg={THEME.primaryGlow}
+          />
+          <MetricBox 
+            icon="pricetag"
+            value={resultados.length}
+            label="Oportunidades"
+            sublabel="Itens capturados"
+            color={THEME.success}
+            bg={THEME.successBg}
+          />
+          <MetricBox 
+            icon="timer-outline"
+            value={segProxFormatado}
+            label="Próxima Busca"
+            sublabel="Ciclo do robô"
+            color={THEME.info}
+            bg={THEME.infoBg}
+          />
         </View>
 
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>ÚLTIMAS OPORTUNIDADES CAPTURADAS</Text>
-          <TouchableOpacity onPress={() => navigation.navigate('Alertas')}>
-            <Text style={styles.sectionLink}>Ver Todas</Text>
-          </TouchableOpacity>
-        </View>
+        {/* SEÇÃO: ÚLTIMAS OPORTUNIDADES */}
+        <SectionHeader 
+          title="Últimas Oportunidades" 
+          icon="sparkles"
+          actionText={resultados.length > 0 ? `Ver Todas (${resultados.length})` : null}
+          onAction={() => navigation.navigate('Alertas')}
+        />
 
         {resultados.length === 0 ? (
-          <Card style={styles.emptyCard}>
-            <Ionicons name="scan-outline" size={36} color={THEME.textSubtle} />
-            <Text style={styles.emptyCardText}>Nenhum anúncio detectado ainda.</Text>
-            <Text style={styles.emptyCardSub}>O robô de busca monitora ofertas nos intervalos configurados.</Text>
-          </Card>
+          <Surface style={styles.emptyCard}>
+            <View style={styles.emptyIconCircle}>
+              <Ionicons name="scan-outline" size={28} color={THEME.primary} />
+            </View>
+            <Text style={styles.emptyCardTitle}>Nenhuma oportunidade capturada ainda</Text>
+            <Text style={styles.emptyCardSub}>
+              O robô de busca analisa as plataformas nos intervalos configurados e avisará com vibração e alerta assim que encontrar novidades.
+            </Text>
+          </Surface>
         ) : (
-          resultados.slice(0, 3).map(item => (
-            <Card key={item.id} style={styles.resultCard}>
-              <View style={styles.rowBetween}>
-                <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={styles.resultTitle} numberOfLines={2}>{item.title}</Text>
-                  <Text style={styles.resultDate}>
-                    {new Date(item.created_at).toLocaleDateString('pt-BR')} às {new Date(item.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+          resultados.slice(0, 3).map(item => {
+            const plat = identificarPlataforma(item.url);
+            return (
+              <Surface key={item.id} style={styles.opportunityCard}>
+                <View style={styles.opportunityHeader}>
+                  <PlatformBadge platformKey={plat} />
+                  <Text style={styles.opportunityDate}>
+                    {new Date(item.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} • Hoje
                   </Text>
                 </View>
-                {item.price !== null && (
-                  <View style={styles.priceBadge}>
-                    <Text style={styles.priceText}>R$ {Number(item.price).toFixed(2)}</Text>
-                  </View>
-                )}
-              </View>
-              <TouchableOpacity 
-                style={styles.openBtn} 
-                onPress={() => Linking.openURL(item.url).catch(() => Alert.alert("Erro", "Não foi possível abrir o link."))}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.openBtnText}>
-                  {item.url.includes('zoom.com.br') ? 'Ver Oferta no Zoom' : item.url.includes('buscape.com.br') ? 'Ver Oferta no Buscapé' : item.url.includes('olx.com.br') ? 'Ver Anúncio na OLX' : 'Abrir Link do Anúncio'}
-                </Text>
-                <Ionicons name="open-outline" size={14} color={THEME.primary} style={{ marginLeft: 4 }} />
-              </TouchableOpacity>
-            </Card>
-          ))
+
+                <Text style={styles.opportunityTitle} numberOfLines={2}>{item.title}</Text>
+
+                <View style={styles.opportunityFooter}>
+                  {item.price !== null ? (
+                    <View style={styles.priceContainer}>
+                      <Text style={styles.pricePrefix}>R$</Text>
+                      <Text style={styles.priceNumber}>{Number(item.price).toFixed(2)}</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.priceConsult}>Sob Consulta</Text>
+                  )}
+
+                  <TouchableOpacity 
+                    style={styles.btnOpenOffer}
+                    onPress={() => Linking.openURL(item.url).catch(() => Alert.alert("Erro", "Não foi possível abrir o link."))}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.btnOpenOfferText}>
+                      {plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'BUSCAPE' ? 'Ver no Buscapé' : plat === 'OLX' ? 'Ver na OLX' : 'Abrir Oferta'}
+                    </Text>
+                    <Ionicons name="arrow-forward" size={13} color={THEME.primary} style={{ marginLeft: 5 }} />
+                  </TouchableOpacity>
+                </View>
+              </Surface>
+            );
+          })
         )}
 
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>HISTÓRICO DE VARREDURAS</Text>
-        </View>
-        <Card style={styles.logCard}>
-          {loading && atividades.length === 0 ? (
-            <ActivityIndicator size="small" color={THEME.primary} style={{ padding: 20 }} />
-          ) : atividades.length === 0 ? (
-            <Text style={styles.emptyCardSub}>Aguardando ciclo de varredura...</Text>
-          ) : (
-            atividades.map((at, idx) => (
-              <View key={at.id || idx} style={[styles.logRow, idx === atividades.length - 1 && { borderBottomWidth: 0 }]}>
-                <View style={[
-                  styles.logDot, 
-                  { backgroundColor: at.level === 'SUCCESS' ? THEME.success : at.level === 'ERROR' ? THEME.danger : at.level === 'WARNING' ? THEME.warning : THEME.secondary }
-                ]} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.logMessage}>{at.message}</Text>
-                  <Text style={styles.logTime}>{new Date(at.created_at).toLocaleTimeString()} • Servidor do Robô</Text>
-                </View>
-              </View>
-            ))
-          )}
-        </Card>
+        {/* SEÇÃO: HISTÓRICO DE VARREDURAS (TELEMETRIA EM TEMPO REAL) */}
+        <SectionHeader 
+          title="Histórico de Varreduras" 
+          icon="hardware-chip-outline"
+        />
 
-        <View style={{ height: 100 }} />
+        <Surface style={styles.telemetryCard}>
+          {loading && atividades.length === 0 ? (
+            <ActivityIndicator size="small" color={THEME.primary} style={{ padding: 25 }} />
+          ) : atividades.length === 0 ? (
+            <View style={styles.telemetryEmpty}>
+              <Ionicons name="time-outline" size={22} color={THEME.textSubtle} style={{ marginBottom: 6 }} />
+              <Text style={styles.emptyCardSub}>Aguardando primeiro ciclo de varredura...</Text>
+            </View>
+          ) : (
+            atividades.map((at, idx) => {
+              const dotColor = at.level === 'SUCCESS' ? THEME.success 
+                             : at.level === 'ERROR' ? THEME.danger 
+                             : at.level === 'WARNING' ? THEME.warning 
+                             : THEME.info;
+              return (
+                <View key={at.id || idx} style={[styles.telemetryRow, idx === atividades.length - 1 && { borderBottomWidth: 0 }]}>
+                  <View style={[styles.telemetryDot, { backgroundColor: dotColor }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.telemetryMessage}>{at.message}</Text>
+                    <View style={styles.telemetryMetaRow}>
+                      <Text style={styles.telemetryTime}>{new Date(at.created_at).toLocaleTimeString()}</Text>
+                      <Text style={styles.telemetrySeparator}>•</Text>
+                      <Text style={styles.telemetrySource}>Robô AchôAI</Text>
+                    </View>
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </Surface>
+
+        <View style={{ height: 80 }} />
       </ScrollView>
     </View>
   );
 }
 
-// --- TELA 2: RADARES (MONITORES) ---
+// --- TELA 2: RADARES ATIVOS ---
 function MonitorListScreen({ navigation }) {
   const { monitores, loading, refreshing, onRefresh, fetchData } = useContext(RadarContext);
   const [testandoId, setTestandoId] = useState(null);
@@ -787,39 +782,45 @@ function MonitorListScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
-      <View style={styles.topHeader}>
+      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
+
+      {/* TOP HEADER */}
+      <View style={styles.screenHeader}>
         <View>
-          <Text style={styles.headerTitle}>Radares Ativos</Text>
-          <Text style={styles.headerSubtitle}>{monitores.length} tarefas cadastradas</Text>
+          <Text style={styles.screenHeaderTitle}>Radares Ativos</Text>
+          <Text style={styles.screenHeaderSub}>{monitores.length} tarefas de busca configuradas</Text>
         </View>
         <TouchableOpacity 
-          style={styles.headerBtn} 
+          style={styles.headerBtnSquare}
           onPress={() => navigation.navigate('Criar')}
+          activeOpacity={0.8}
         >
-          <Ionicons name="add" size={24} color={THEME.primary} />
+          <Ionicons name="add" size={22} color={THEME.primary} />
         </TouchableOpacity>
       </View>
 
       <ScrollView 
         contentContainerStyle={styles.scrollArea}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
+        showsVerticalScrollIndicator={false}
       >
         {loading && monitores.length === 0 ? (
-          <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 50 }} />
+          <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 60 }} />
         ) : monitores.length === 0 ? (
-          <View style={styles.emptyStateContainer}>
-            <Ionicons name="radio-outline" size={70} color={THEME.textSubtle} />
-            <Text style={styles.emptyStateTitle}>Nenhum Radar Criado</Text>
+          <View style={styles.emptyFullState}>
+            <View style={styles.emptyIconPulseCircle}>
+              <Ionicons name="radio-outline" size={42} color={THEME.primary} />
+            </View>
+            <Text style={styles.emptyStateTitle}>Nenhum Radar Configurado</Text>
             <Text style={styles.emptyStateSub}>
-              Crie seu primeiro radar no AchôAI para monitorar anúncios na OLX, Zoom, Buscapé ou notícias importantes.
+              Crie seu primeiro radar para monitorar anúncios na OLX, Zoom, Buscapé ou páginas de notícias com inteligência.
             </Text>
-            <TouchableOpacity 
-              style={[styles.btnPrimary, { marginTop: 25, width: '100%' }]} 
+            <PrimaryButton 
+              title="Criar Primeiro Radar"
+              icon="add-circle-outline"
               onPress={() => navigation.navigate('Criar')}
-            >
-              <Ionicons name="add-circle-outline" size={20} color="#000" style={{ marginRight: 6 }} />
-              <Text style={styles.btnPrimaryText}>Criar Primeiro Radar</Text>
-            </TouchableOpacity>
+              style={{ marginTop: 24, width: '100%', maxWidth: 260 }}
+            />
           </View>
         ) : (
           monitores.map(m => {
@@ -829,21 +830,6 @@ function MonitorListScreen({ navigation }) {
             const temAlvo = m.preco_alvo !== null && m.preco_alvo !== undefined && Number(m.preco_alvo) > 0;
             const alvo = temAlvo ? Number(m.preco_alvo) : 0;
             const margem = Number(m.margem) || 15;
-            const min = alvo - (alvo * (margem / 100));
-            const max = alvo + (alvo * (margem / 100));
-
-            let platNome = 'OLX';
-            let platCor = THEME.primary;
-            if (plataforma === 'ZOOM') {
-              platNome = 'ZOOM';
-              platCor = THEME.warning;
-            } else if (plataforma === 'BUSCAPE') {
-              platNome = 'Buscapé';
-              platCor = THEME.success;
-            } else if (plataforma === 'OUTROS') {
-              platNome = isProd ? 'Web' : 'Notícia';
-              platCor = THEME.secondary;
-            }
 
             let estratDesc = 'Mais Recentes';
             if (m.modo === 'noticia') {
@@ -853,209 +839,256 @@ function MonitorListScreen({ navigation }) {
             } else if (modoEstrat === 'por_preco' && temAlvo) {
               estratDesc = `Alvo R$ ${alvo.toFixed(0)} (±${margem}%)`;
             } else if (m.palavras && m.palavras.includes('ordenar_menor_preco')) {
-              estratDesc = 'Recentes (Menor > Maior)';
+              estratDesc = 'Recentes (Menor Valor)';
             }
 
+            const infoLocal = plataforma === 'OLX' ? extrairInfoOlx(m.urls) : null;
+            const estadoNome = infoLocal ? OLX_ESTADOS[infoLocal.uf]?.nome || infoLocal.uf : null;
+
             return (
-              <Card key={m.id} style={styles.radarCard}>
-                {/* CABEÇALHO DO CARD COM ALINHAMENTO CORRETO DO SWITCH */}
+              <Surface key={m.id} style={styles.radarCard} elevated={m.ativo}>
+                {/* CABEÇALHO DO RADAR */}
                 <View style={styles.radarCardHeader}>
-                  <View style={styles.radarTitleGroup}>
-                    <View style={[styles.modeBadge, { backgroundColor: isProd ? THEME.primaryGlow : 'rgba(10, 132, 255, 0.15)' }]}>
-                      <Ionicons name={isProd ? "cart-outline" : "newspaper-outline"} size={16} color={isProd ? THEME.primary : THEME.secondary} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.radarTitle} numberOfLines={1}>{m.nome}</Text>
-                      <View style={[styles.row, { marginTop: 3 }]}>
-                        <View style={[styles.platformBadge, { borderColor: platCor }]}>
-                          <Text style={[styles.platformBadgeText, { color: platCor }]}>{platNome}</Text>
+                  <View style={[styles.radarModeIcon, { backgroundColor: isProd ? THEME.primaryGlow : THEME.infoBg }]}>
+                    <Ionicons name={isProd ? "cart-outline" : "newspaper-outline"} size={16} color={isProd ? THEME.primary : THEME.info} />
+                  </View>
+                  <View style={{ flex: 1, marginHorizontal: 10 }}>
+                    <Text style={styles.radarTitle} numberOfLines={1}>{m.nome}</Text>
+                    <View style={styles.radarTagsRow}>
+                      <PlatformBadge platformKey={plataforma} />
+                      <StrategyBadge text={estratDesc} />
+                      {estadoNome && (
+                        <View style={styles.locationChip}>
+                          <Ionicons name="location-outline" size={10} color={THEME.textMuted} style={{ marginRight: 2 }} />
+                          <Text style={styles.locationChipText}>{infoLocal.uf}</Text>
                         </View>
-                        <Text style={styles.strategyBadgeText} numberOfLines={1}>{estratDesc}</Text>
-                      </View>
+                      )}
                     </View>
                   </View>
-
-                  <View style={styles.switchWrapper}>
-                    <Switch 
-                      value={m.ativo}
-                      onValueChange={() => alternarStatus(m.id, m.ativo)}
-                      trackColor={{ false: '#2C3040', true: THEME.primary }}
-                      thumbColor="#FFF"
-                    />
-                  </View>
+                  <Switch 
+                    value={m.ativo}
+                    onValueChange={() => alternarStatus(m.id, m.ativo)}
+                    trackColor={{ false: '#1E2333', true: THEME.primary }}
+                    thumbColor="#FFF"
+                  />
                 </View>
 
-                {/* CORPO DO CARD COM DETALHES DA ESTRATÉGIA */}
-                <View style={styles.radarBody}>
-                  {isProd ? (
-                    <>
-                      <Text style={styles.radarParam}>
-                        Termo: <Text style={{ color: THEME.text, fontWeight: 'bold' }}>{m.produto || 'Todos'}</Text>
-                      </Text>
-                      {modoEstrat === 'menor_preco' ? (
-                        <Text style={styles.radarParamSub}>
-                          🎯 Capturando automaticamente o menor valor disponível
-                        </Text>
-                      ) : modoEstrat === 'por_preco' && temAlvo ? (
-                        <>
-                          <Text style={styles.radarParam}>
-                            Alvo: <Text style={{ color: THEME.success, fontWeight: 'bold' }}>R$ {alvo.toFixed(2)}</Text> (±{margem}%)
-                          </Text>
-                          <Text style={styles.radarParamSub}>
-                            Faixa aceita: R$ {min.toFixed(2)} até R$ {max.toFixed(2)}
-                          </Text>
-                        </>
-                      ) : (
-                        <Text style={styles.radarParam}>
-                          Preço: <Text style={{ color: THEME.secondary, fontWeight: 'bold' }}>
-                            {m.palavras && m.palavras.includes('ordenar_menor_preco') ? 'Todos (Ordenado Menor > Maior)' : 'Todos os anúncios mais recentes'}
-                          </Text>
-                        </Text>
-                      )}
-                    </>
-                  ) : (
-                    <Text style={styles.radarParam}>
-                      Palavras: <Text style={{ color: THEME.text, fontWeight: 'bold' }}>{m.palavras || 'Nenhuma'}</Text>
-                    </Text>
-                  )}
-                  <Text style={styles.radarUrl} numberOfLines={1}>🔗 {m.urls}</Text>
+                {/* TERMO DE BUSCA EM DESTAQUE */}
+                <View style={styles.radarSearchTermBox}>
+                  <Ionicons name="search" size={13} color={THEME.primary} style={{ marginRight: 6 }} />
+                  <Text style={styles.radarSearchTermText} numberOfLines={1}>
+                    {m.produto || m.palavras || 'Termo não especificado'}
+                  </Text>
                 </View>
 
-                {/* RODAPÉ DO CARD HARMONIOSO E EQUILIBRADO */}
-                <View style={styles.radarFooterHarmonious}>
-                  <View style={{ flex: 1, paddingRight: 8 }}>
-                    <Text style={styles.radarFrequencyText}>
+                {/* RODAPÉ DO RADAR */}
+                <View style={styles.radarCardFooter}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.radarFrequencyLabel}>
                       Varredura a cada {m.intervalo_valor} min
                     </Text>
-                    <View style={[styles.row, { marginTop: 2 }]}>
+                    <View style={styles.radarCountdownRow}>
                       <Ionicons name="time-outline" size={12} color={m.ativo ? THEME.primary : THEME.textSubtle} style={{ marginRight: 4 }} />
                       <Text style={[styles.radarCountdownText, !m.ativo && { color: THEME.textSubtle }]}>
-                        {!m.ativo ? 'Radar pausado' : formatarTempoRegressivo(m.proxima_execucao, now)}
+                        {!m.ativo ? 'Pausado' : formatarTempoRegressivo(m.proxima_execucao, now)}
                       </Text>
                     </View>
                   </View>
 
-                  <View style={styles.row}>
-                    {/* Botão Varrer com tamanho proporcional e harmônico */}
+                  <View style={styles.radarActionsGroup}>
                     <TouchableOpacity 
-                      style={styles.btnVarrerCompact} 
+                      style={[styles.btnScanNow, (!m.ativo || testandoId === m.id) && { opacity: 0.7 }]}
                       onPress={() => dispararTeste(m.id)}
                       disabled={testandoId === m.id || !m.ativo}
                       activeOpacity={0.8}
                     >
                       {testandoId === m.id ? (
-                        <ActivityIndicator size="small" color="#000" />
+                        <ActivityIndicator size="small" color="#08090D" />
                       ) : (
                         <>
-                          <Ionicons name="radio-outline" size={13} color="#000" style={{ marginRight: 5 }} />
-                          <Text style={styles.btnVarrerCompactText}>Varrer Agora</Text>
+                          <Ionicons name="radio-outline" size={13} color="#08090D" style={{ marginRight: 4 }} />
+                          <Text style={styles.btnScanNowText}>Varrer</Text>
                         </>
                       )}
                     </TouchableOpacity>
 
-                    {/* Botão Editar discreto ao lado da lixeira */}
-                    <TouchableOpacity 
-                      style={[styles.btnIconAction, { marginLeft: 6 }]} 
-                      onPress={() => navigation.navigate('Criar', { monitor: m })}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="create-outline" size={16} color={THEME.textMuted} />
-                    </TouchableOpacity>
-
-                    {/* Botão Excluir */}
-                    <TouchableOpacity 
-                      style={[styles.btnIconAction, { marginLeft: 6 }]} 
-                      onPress={() => removerRadar(m.id, m.nome)}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="trash-outline" size={16} color={THEME.danger} />
-                    </TouchableOpacity>
+                    <IconButton 
+                      icon="create-outline" 
+                      onPress={() => navigation.navigate('Criar', { monitor: m })} 
+                      size={34}
+                      iconSize={15}
+                      style={{ marginLeft: 6 }}
+                    />
+                    <IconButton 
+                      icon="trash-outline" 
+                      onPress={() => removerRadar(m.id, m.nome)} 
+                      color={THEME.danger}
+                      size={34}
+                      iconSize={15}
+                      style={{ marginLeft: 6 }}
+                    />
                   </View>
                 </View>
-              </Card>
+              </Surface>
             );
           })
         )}
-        <View style={{ height: 100 }} />
+        <View style={{ height: 90 }} />
       </ScrollView>
 
+      {/* BOTÃO FLUTUANTE ADICIONAR */}
       <TouchableOpacity 
-        style={styles.fab} 
+        style={styles.fabGlow}
         onPress={() => navigation.navigate('Criar')}
-        activeOpacity={0.8}
+        activeOpacity={0.85}
       >
-        <Ionicons name="add" size={32} color="#000" />
+        <Ionicons name="add" size={28} color="#08090D" />
       </TouchableOpacity>
     </View>
   );
 }
 
-// --- TELA 3: ALERTAS / HISTÓRICO COMPLETO ---
+// --- TELA 3: ALERTAS / OPORTUNIDADES CAPTURADAS ---
 function AlertsScreen({ navigation }) {
   const { resultados, loading, refreshing, onRefresh, fetchData } = useContext(RadarContext);
+  const [filtroPlataforma, setFiltroPlataforma] = useState('TODAS');
+  const [buscaTexto, setBuscaTexto] = useState('');
 
   useEffect(() => {
     const unsub = navigation.addListener('focus', () => { fetchData(null, true); });
     return unsub;
   }, [navigation, fetchData]);
 
+  const resultadosFiltrados = useMemo(() => {
+    return resultados.filter(res => {
+      const plat = identificarPlataforma(res.url);
+      if (filtroPlataforma !== 'TODAS' && plat !== filtroPlataforma) return false;
+      if (buscaTexto.trim()) {
+        const query = buscaTexto.toLowerCase();
+        const matchTitle = (res.title || '').toLowerCase().includes(query);
+        const matchPrice = String(res.price || '').includes(query);
+        if (!matchTitle && !matchPrice) return false;
+      }
+      return true;
+    });
+  }, [resultados, filtroPlataforma, buscaTexto]);
+
   return (
     <View style={styles.screen}>
-      <View style={styles.topHeader}>
+      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
+
+      {/* TOP HEADER */}
+      <View style={styles.screenHeader}>
         <View>
-          <Text style={styles.headerTitle}>Oportunidades</Text>
-          <Text style={styles.headerSubtitle}>{resultados.length} itens capturados</Text>
+          <Text style={styles.screenHeaderTitle}>Oportunidades</Text>
+          <Text style={styles.screenHeaderSub}>{resultados.length} anúncios e ofertas detectados</Text>
         </View>
+      </View>
+
+      {/* BARRA DE PESQUISA */}
+      <View style={styles.searchBarContainer}>
+        <View style={styles.searchInputWrap}>
+          <Ionicons name="search-outline" size={16} color={THEME.textSubtle} style={{ marginRight: 8 }} />
+          <TextInput 
+            style={styles.searchInput}
+            placeholder="Pesquisar por produto ou valor..."
+            placeholderTextColor={THEME.textSubtle}
+            value={buscaTexto}
+            onChangeText={setBuscaTexto}
+          />
+          {buscaTexto.length > 0 && (
+            <TouchableOpacity onPress={() => setBuscaTexto('')}>
+              <Ionicons name="close-circle" size={16} color={THEME.textSubtle} />
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      {/* CHIPS DE FILTRO POR PLATAFORMA */}
+      <View style={styles.filterChipRow}>
+        {['TODAS', 'OLX', 'ZOOM', 'BUSCAPE', 'OUTROS'].map(k => {
+          const isSelected = filtroPlataforma === k;
+          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'BUSCAPE' ? 'Buscapé' : k === 'ZOOM' ? 'Zoom' : 'OLX';
+          return (
+            <TouchableOpacity 
+              key={k}
+              style={[styles.filterChip, isSelected && styles.filterChipActive]}
+              onPress={() => setFiltroPlataforma(k)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.filterChipText, isSelected && styles.filterChipTextActive]}>
+                {label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
       <ScrollView 
         contentContainerStyle={styles.scrollArea}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
+        showsVerticalScrollIndicator={false}
       >
         {loading && resultados.length === 0 ? (
           <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 50 }} />
-        ) : resultados.length === 0 ? (
-          <View style={styles.emptyStateContainer}>
-            <Ionicons name="notifications-off-outline" size={70} color={THEME.textSubtle} />
-            <Text style={styles.emptyStateTitle}>Nenhum Alerta no Momento</Text>
+        ) : resultadosFiltrados.length === 0 ? (
+          <View style={styles.emptyFullState}>
+            <View style={styles.emptyIconPulseCircle}>
+              <Ionicons name="notifications-off-outline" size={38} color={THEME.textSubtle} />
+            </View>
+            <Text style={styles.emptyStateTitle}>
+              {buscaTexto.length > 0 ? 'Nenhum resultado encontrado' : 'Nenhuma oportunidade no momento'}
+            </Text>
             <Text style={styles.emptyStateSub}>
-              Quando o robô encontrar um anúncio compatível, ele aparecerá aqui com o valor destacado.
+              {buscaTexto.length > 0 
+                ? 'Tente ajustar os termos de pesquisa ou remover os filtros de plataforma.' 
+                : 'Quando o robô detectar um anúncio dentro das suas configurações, ele aparecerá aqui imediatamente.'}
             </Text>
           </View>
         ) : (
-          resultados.map(res => (
-            <Card key={res.id} style={styles.resultCardFull}>
-              <View style={styles.rowBetween}>
-                <View style={styles.row}>
-                  <Ionicons name="checkmark-circle" size={18} color={THEME.success} style={{ marginRight: 6 }} />
-                  <Text style={styles.resultTag}>Capturado pelo Robô</Text>
+          resultadosFiltrados.map(res => {
+            const plat = identificarPlataforma(res.url);
+            return (
+              <Surface key={res.id} style={styles.alertCardFull} elevated>
+                <View style={styles.alertHeaderRow}>
+                  <View style={styles.row}>
+                    <PlatformBadge platformKey={plat} />
+                    <View style={styles.robotTag}>
+                      <Ionicons name="checkmark-circle" size={13} color={THEME.success} style={{ marginRight: 4 }} />
+                      <Text style={styles.robotTagText}>Capturado pelo Robô</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.alertTime}>
+                    {new Date(res.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                  </Text>
                 </View>
-                <Text style={styles.resultTimeAgo}>
-                  {new Date(res.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-                </Text>
-              </View>
 
-              <Text style={styles.resultTitleFull}>{res.title}</Text>
+                <Text style={styles.alertTitleFull}>{res.title}</Text>
 
-              {res.price !== null && (
-                <View style={styles.priceRow}>
-                  <Text style={styles.priceLabel}>VALOR IDENTIFICADO</Text>
-                  <Text style={styles.priceValue}>R$ {Number(res.price).toFixed(2)}</Text>
+                <View style={styles.alertPriceRow}>
+                  <View>
+                    <Text style={styles.alertPriceLabel}>VALOR CAPTURADO</Text>
+                    {res.price !== null ? (
+                      <Text style={styles.alertPriceValue}>R$ {Number(res.price).toFixed(2)}</Text>
+                    ) : (
+                      <Text style={styles.priceConsult}>Sob Consulta</Text>
+                    )}
+                  </View>
+                  
+                  <TouchableOpacity 
+                    style={styles.btnAlertAction}
+                    onPress={() => Linking.openURL(res.url).catch(() => Alert.alert("Erro", "Não foi possível abrir o link."))}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.btnAlertActionText}>Acessar Oferta</Text>
+                    <Ionicons name="open-outline" size={14} color="#08090D" style={{ marginLeft: 5 }} />
+                  </TouchableOpacity>
                 </View>
-              )}
-
-              <TouchableOpacity 
-                style={styles.btnOpenFull} 
-                onPress={() => Linking.openURL(res.url).catch(() => Alert.alert("Erro", "Não foi possível abrir o link."))}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="open-outline" size={18} color="#000" style={{ marginRight: 8 }} />
-                <Text style={styles.btnOpenFullText}>Abrir Página do Anúncio</Text>
-              </TouchableOpacity>
-            </Card>
-          ))
+              </Surface>
+            );
+          })
         )}
-        <View style={{ height: 100 }} />
+        <View style={{ height: 80 }} />
       </ScrollView>
     </View>
   );
@@ -1069,11 +1102,9 @@ function CreateMonitorScreen({ navigation, route }) {
   } = useContext(RadarContext);
   const editando = route?.params?.monitor;
 
-  // Plataforma inicial
   const platInicial = editando ? identificarPlataforma(editando.urls) : 'OLX';
   const [plataforma, setPlataforma] = useState(platInicial);
 
-  // OLX Estado e Região
   const infoOlx = editando && platInicial === 'OLX' ? extrairInfoOlx(editando.urls) : { uf: 'CE', regiaoSlug: 'fortaleza-e-regiao' };
   const [estadoUf, setEstadoUf] = useState(infoOlx.uf);
   const [regiaoSlug, setRegiaoSlug] = useState(infoOlx.regiaoSlug);
@@ -1082,17 +1113,13 @@ function CreateMonitorScreen({ navigation, route }) {
   const [modalAvisoNotifVisivel, setModalAvisoNotifVisivel] = useState(false);
   const [ativandoNotif, setAtivandoNotif] = useState(false);
 
-  // Modo básico (produto ou noticia)
   const [modo, setModo] = useState(editando?.modo === 'noticia' ? 'noticia' : 'produto');
-
-  // Estratégia de captura
   const estratInicial = editando ? identificarEstrategia(editando) : 'mais_recentes';
   const [estrategia, setEstrategia] = useState(estratInicial);
   const [ordenarMenorPreco, setOrdenarMenorPreco] = useState(
     editando?.palavras ? editando.palavras.includes('ordenar_menor_preco') : false
   );
 
-  // Campos de formulário
   const [nome, setNome] = useState(editando?.nome || '');
   const [produto, setProduto] = useState(editando?.produto || '');
   const [urls, setUrls] = useState(editando?.urls || '');
@@ -1102,14 +1129,12 @@ function CreateMonitorScreen({ navigation, route }) {
   const [intervalo, setIntervalo] = useState(String(editando?.intervalo_valor || '30'));
   const [salvando, setSalvando] = useState(false);
 
-  // Atualizar título da barra de navegação se estiver editando
   useEffect(() => {
     navigation.setOptions({
       title: editando ? 'Editar Radar de Varredura' : 'Novo Radar de Varredura'
     });
   }, [navigation, editando]);
 
-  // Regiões do estado selecionado
   const regioesDoEstado = (OLX_ESTADOS[estadoUf]?.regioes) || [{ nome: 'Todo o Estado', slug: '' }];
   const regiaoAtual = regioesDoEstado.find(r => r.slug === regiaoSlug) || regioesDoEstado[0];
 
@@ -1119,7 +1144,6 @@ function CreateMonitorScreen({ navigation, route }) {
   const maxEstimado = alvoNum + (alvoNum * (margemNum / 100));
 
   const executarSalvamento = async () => {
-    // Composição da URL final
     let urlFinal = '';
     if (plataforma === 'OLX') {
       urlFinal = gerarUrlOlx(estadoUf, regiaoSlug, produto);
@@ -1131,7 +1155,6 @@ function CreateMonitorScreen({ navigation, route }) {
       urlFinal = urls.trim();
     }
 
-    // Composição do Modo e Palavras
     let modoFinal = 'mais_recentes';
     let palavrasFinal = '';
 
@@ -1175,7 +1198,7 @@ function CreateMonitorScreen({ navigation, route }) {
         fetchData(null, true);
         Alert.alert(
           "✅ Radar Ativado!",
-          "Monitor cadastrado com sucesso! As varreduras ocorrerão conforme a frequência agendada ou ao tocar no botão 'Varrer Agora'.",
+          "Monitor cadastrado com sucesso! As varreduras ocorrerão conforme a frequência agendada ou ao tocar no botão 'Varrer'.",
           [{ text: "OK", onPress: () => navigation.goBack() }]
         );
       }
@@ -1199,7 +1222,7 @@ function CreateMonitorScreen({ navigation, route }) {
       } else {
         Alert.alert(
           "Permissão Necessária",
-          "Não será possível receber as notificações dos alertas. Certifique-se de habilitar as notificações nas configurações do seu celular.",
+          "Não será possível receber as notificações dos alertas. Habilite as notificações nas configurações do seu celular.",
           [
             { text: "Salvar sem Notificações", onPress: () => { setModalAvisoNotifVisivel(false); executarSalvamento(); } },
             { text: "Cancelar", style: "cancel" }
@@ -1230,7 +1253,7 @@ function CreateMonitorScreen({ navigation, route }) {
       }
     } else {
       if (!produto.trim()) {
-        return Alert.alert("Campos Obrigatórios", "Informe o termo do anúncio (ex: iPhone 15, S24 Ultra, Cadeiras Coral).");
+        return Alert.alert("Campos Obrigatórios", "Informe o termo do anúncio (ex: iPhone 15, Notebook Dell, Cadeira Gamer).");
       }
     }
 
@@ -1240,7 +1263,6 @@ function CreateMonitorScreen({ navigation, route }) {
       }
     }
 
-    // Se o usuário desativou as notificações nas Configurações ou o aparelho não possui token push ativo
     const temPushToken = Boolean(pushToken && String(pushToken).startsWith('ExponentPushToken'));
     const notificacoesProntas = Boolean(notificacoesAtivas && temPushToken);
     if (!notificacoesProntas && !editando) {
@@ -1253,45 +1275,43 @@ function CreateMonitorScreen({ navigation, route }) {
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" />
-      <ScrollView contentContainerStyle={styles.scrollArea}>
+      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
+      <ScrollView contentContainerStyle={styles.scrollArea} showsVerticalScrollIndicator={false}>
         
-        {/* Banner de Edição */}
         {editando && (
           <View style={styles.editNoticeBanner}>
-            <Ionicons name="create" size={16} color={THEME.secondary} style={{ marginRight: 8 }} />
-            <Text style={styles.editNoticeText}>Modo de Edição do Radar Ativo</Text>
+            <Ionicons name="create" size={15} color={THEME.primary} style={{ marginRight: 8 }} />
+            <Text style={styles.editNoticeText}>Editando parâmetros do radar existente</Text>
           </View>
         )}
 
-        {/* 1. SELEÇÃO DA PLATAFORMA DE PESQUISA */}
-        <Text style={styles.formSectionTitle}>ESCOLHA A PLATAFORMA DE PESQUISA</Text>
-        <View style={styles.platformChipRow}>
+        {/* 1. SELEÇÃO DA PLATAFORMA */}
+        <Text style={styles.formSectionTitle}>1. ONDE O ROBÔ DEVE BUSCAR</Text>
+        <View style={styles.platformGrid}>
           {[
-            { key: 'OLX', nome: 'OLX', icon: 'cart-outline' },
-            { key: 'ZOOM', nome: 'ZOOM', icon: 'search-outline' },
-            { key: 'BUSCAPE', nome: 'Buscapé', icon: 'pricetag-outline' },
-            { key: 'OUTROS', nome: 'Outros Sites', icon: 'globe-outline' }
+            { key: 'OLX', nome: 'OLX', icon: 'cart-outline', color: '#A855F7' },
+            { key: 'ZOOM', nome: 'Zoom', icon: 'search-outline', color: '#F59E0B' },
+            { key: 'BUSCAPE', nome: 'Buscapé', icon: 'pricetag-outline', color: '#10B981' },
+            { key: 'OUTROS', nome: 'Outros Sites', icon: 'globe-outline', color: '#06B6D4' }
           ].map(p => {
             const isActive = plataforma === p.key;
             return (
               <TouchableOpacity 
                 key={p.key}
-                style={[styles.platformChip, isActive && styles.platformChipActive]}
+                style={[styles.platformCardBtn, isActive && styles.platformCardBtnActive]}
                 onPress={() => {
-                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                   setPlataforma(p.key);
                   if (p.key === 'ZOOM' || p.key === 'BUSCAPE') {
-                    if (estrategia === 'mais_recentes') {
-                      setEstrategia('menor_preco');
-                    }
+                    if (estrategia === 'mais_recentes') setEstrategia('menor_preco');
                   }
                   if (p.key !== 'OUTROS') setModo('produto');
                 }}
                 activeOpacity={0.7}
               >
-                <Ionicons name={p.icon} size={20} color={isActive ? THEME.primary : THEME.textMuted} />
-                <Text style={[styles.platformChipText, isActive && styles.platformChipTextActive]}>
+                <View style={[styles.platformIconCircle, { backgroundColor: isActive ? THEME.primaryGlow : 'rgba(255,255,255,0.05)' }]}>
+                  <Ionicons name={p.icon} size={18} color={isActive ? THEME.primary : p.color} />
+                </View>
+                <Text style={[styles.platformCardBtnText, isActive && styles.platformCardBtnTextActive]}>
                   {p.nome}
                 </Text>
               </TouchableOpacity>
@@ -1299,25 +1319,23 @@ function CreateMonitorScreen({ navigation, route }) {
           })}
         </View>
 
-        {/* Banners Explicativos de Plataforma */}
         {(plataforma === 'ZOOM' || plataforma === 'BUSCAPE') && (
           <View style={styles.comparatorBanner}>
-            <Ionicons name="information-circle-outline" size={18} color={THEME.primary} style={{ marginRight: 8 }} />
+            <Ionicons name="information-circle-outline" size={16} color={THEME.primary} style={{ marginRight: 8 }} />
             <Text style={styles.comparatorBannerText}>
               {plataforma === 'ZOOM' 
-                ? "O Zoom compara preços em grandes lojas (Magazine Luiza, Amazon, Casas Bahia, etc.) em todo o Brasil e extrai o link direto para a compra."
-                : "O Buscapé compara ofertas no comércio eletrônico nacional com redirecionamento direto para a loja parceira."}
+                ? "O Zoom compara preços em lojas como Amazon, Magazine Luiza e Mercado Livre em todo o Brasil."
+                : "O Buscapé compara ofertas no comércio eletrônico com link direto para a compra na loja parceira."}
             </Text>
           </View>
         )}
 
-        {/* 2. LOCALIZAÇÃO DO ANÚNCIO (OLX) */}
+        {/* SE FOR OLX: ESTADO E REGIÃO */}
         {plataforma === 'OLX' && (
           <>
-            <Text style={[styles.formSectionTitle, { marginTop: 15 }]}>LOCALIZAÇÃO DO ANÚNCIO (OLX)</Text>
-            <Card style={styles.formCard}>
+            <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>LOCALIZAÇÃO GEOGRÁFICA (OLX)</Text>
+            <Surface style={styles.formSurface}>
               <View style={styles.row}>
-                {/* ESTADO */}
                 <TouchableOpacity 
                   style={[styles.selectBtn, { marginRight: 8 }]} 
                   onPress={() => setModalEstadoVisivel(true)}
@@ -1326,81 +1344,86 @@ function CreateMonitorScreen({ navigation, route }) {
                   <View style={{ flex: 1 }}>
                     <Text style={styles.selectBtnLabel}>ESTADO (UF)</Text>
                     <Text style={styles.selectBtnValue} numberOfLines={1}>
-                      {OLX_ESTADOS[estadoUf]?.nome} ({estadoUf})
+                      {estadoUf === 'BR' ? 'Brasil Inteiro' : `${OLX_ESTADOS[estadoUf]?.nome} (${estadoUf})`}
                     </Text>
                   </View>
-                  <Ionicons name="chevron-down" size={16} color={THEME.primary} />
+                  <Ionicons name="chevron-down" size={15} color={THEME.primary} />
                 </TouchableOpacity>
 
-                {/* REGIÃO */}
                 <TouchableOpacity 
-                  style={styles.selectBtn} 
-                  onPress={() => setModalRegiaoVisivel(true)}
+                  style={[styles.selectBtn, estadoUf === 'BR' && { opacity: 0.85 }]} 
+                  onPress={() => {
+                    if (estadoUf === 'BR') {
+                      Alert.alert("Brasil Inteiro", "A opção Brasil abrange automaticamente todas as regiões do país.");
+                    } else {
+                      setModalRegiaoVisivel(true);
+                    }
+                  }}
                   activeOpacity={0.7}
                 >
                   <View style={{ flex: 1 }}>
                     <Text style={styles.selectBtnLabel}>REGIÃO</Text>
                     <Text style={styles.selectBtnValue} numberOfLines={1}>
-                      {regiaoAtual.nome}
+                      {estadoUf === 'BR' ? 'Todas as Regiões' : regiaoAtual.nome}
                     </Text>
                   </View>
-                  <Ionicons name="chevron-down" size={16} color={THEME.primary} />
+                  <Ionicons name={estadoUf === 'BR' ? "checkmark-circle" : "chevron-down"} size={15} color={THEME.primary} />
                 </TouchableOpacity>
               </View>
 
               <View style={styles.urlPreviewBox}>
-                <Ionicons name="link-outline" size={14} color={THEME.success} style={{ marginRight: 6 }} />
+                <Ionicons name="link-outline" size={13} color={THEME.success} style={{ marginRight: 6 }} />
                 <Text style={styles.urlPreviewText} numberOfLines={1}>
                   {gerarUrlOlx(estadoUf, regiaoSlug, produto)}
                 </Text>
               </View>
-            </Card>
+            </Surface>
           </>
         )}
 
-        {/* SE FOR OUTROS SITES: SELETOR DE MODO E URL MANUAL */}
+        {/* SE FOR OUTROS SITES */}
         {plataforma === 'OUTROS' && (
           <>
-            <View style={[styles.segmentWrap, { marginTop: 10 }]}>
+            <View style={[styles.segmentWrap, { marginTop: 14 }]}>
               <TouchableOpacity 
                 style={[styles.segmentOption, modo === 'produto' && styles.segmentOptionActive]}
-                onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setModo('produto'); }}
+                onPress={() => setModo('produto')}
               >
-                <Ionicons name="cart" size={18} color={modo === 'produto' ? '#000' : THEME.textMuted} style={{ marginRight: 6 }} />
-                <Text style={[styles.segmentLabel, modo === 'produto' && { color: '#000', fontWeight: 'bold' }]}>Página de Anúncio</Text>
+                <Ionicons name="cart" size={16} color={modo === 'produto' ? '#08090D' : THEME.textMuted} style={{ marginRight: 6 }} />
+                <Text style={[styles.segmentLabel, modo === 'produto' && styles.segmentLabelActive]}>Página de Anúncio</Text>
               </TouchableOpacity>
 
               <TouchableOpacity 
                 style={[styles.segmentOption, modo === 'noticia' && styles.segmentOptionActive]}
-                onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setModo('noticia'); }}
+                onPress={() => setModo('noticia')}
               >
-                <Ionicons name="newspaper" size={18} color={modo === 'noticia' ? '#000' : THEME.textMuted} style={{ marginRight: 6 }} />
-                <Text style={[styles.segmentLabel, modo === 'noticia' && { color: '#000', fontWeight: 'bold' }]}>Sites de Notícias)</Text>
+                <Ionicons name="newspaper" size={16} color={modo === 'noticia' ? '#08090D' : THEME.textMuted} style={{ marginRight: 6 }} />
+                <Text style={[styles.segmentLabel, modo === 'noticia' && styles.segmentLabelActive]}>Portal de Notícias</Text>
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.formSectionTitle, { marginTop: 10 }]}>URL DO SITE OU PÁGINA</Text>
-            <Card style={styles.formCard}>
-              <Text style={styles.inputTitle}>ENDEREÇO DA PÁGINA (HTTPS://...)</Text>
+            <Text style={[styles.formSectionTitle, { marginTop: 14 }]}>URL DA PÁGINA</Text>
+            <Surface style={styles.formSurface}>
+              <Text style={styles.inputTitle}>ENDEREÇO COMPLETO (HTTPS://...)</Text>
               <TextInput 
                 style={styles.inputField} 
-                placeholder="Ex: https://g1.globo.com/ ou URL customizada" 
+                placeholder="Ex: https://g1.globo.com/ ou URL do anúncio" 
                 placeholderTextColor={THEME.textSubtle} 
                 value={urls} 
                 onChangeText={setUrls}
                 autoCapitalize="none"
               />
-            </Card>
+            </Surface>
           </>
         )}
 
-        {/* 3. IDENTIFICAÇÃO DO RADAR */}
-        <Text style={[styles.formSectionTitle, { marginTop: 15 }]}>IDENTIFICAÇÃO DO RADAR</Text>
-        <Card style={styles.formCard}>
+        {/* 2. IDENTIFICAÇÃO DO RADAR */}
+        <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>2. O QUE VOCÊ PROCURA</Text>
+        <Surface style={styles.formSurface}>
           <Text style={styles.inputTitle}>NOME DO RADAR</Text>
           <TextInput 
             style={styles.inputField} 
-            placeholder="Ex: Anuncio de Iphone" 
+            placeholder="Ex: iPhone 15 Pro Max 256GB" 
             placeholderTextColor={THEME.textSubtle} 
             value={nome} 
             onChangeText={setNome} 
@@ -1408,9 +1431,7 @@ function CreateMonitorScreen({ navigation, route }) {
 
           {modo !== 'noticia' ? (
             <>
-              <Text style={[styles.inputTitle, { marginTop: 15 }]}>
-                PALAVRAS PARA USAR NA PESQUISA
-              </Text>
+              <Text style={[styles.inputTitle, { marginTop: 14 }]}>TERMO DE PESQUISA</Text>
               <TextInput 
                 style={styles.inputField} 
                 placeholder="Ex: iphone 15 256gb" 
@@ -1420,15 +1441,15 @@ function CreateMonitorScreen({ navigation, route }) {
               />
               <Text style={styles.helperText}>
                 {plataforma === 'OLX'
-                  ? "O robô busca este termo na OLX da região escolhida e valida os anúncios encontrados."
+                  ? "O robô buscará exatamente este termo nos anúncios da região definida."
                   : plataforma === 'ZOOM' || plataforma === 'BUSCAPE'
-                  ? "O comparador buscará este produto em lojas parceiras de todo o Brasil."
-                  : "O robô buscará este termo nos anúncios da página cadastrada."}
+                  ? "O comparador filtrará os preços de lojas confiáveis com este termo."
+                  : "O robô buscará este produto na página cadastrada."}
               </Text>
             </>
           ) : (
             <>
-              <Text style={[styles.inputTitle, { marginTop: 15 }]}>PALAVRAS-CHAVE DA NOTÍCIA</Text>
+              <Text style={[styles.inputTitle, { marginTop: 14 }]}>PALAVRAS-CHAVE DA MATÉRIA</Text>
               <TextInput 
                 style={styles.inputField} 
                 placeholder="concurso, edital, vaga (separadas por vírgula)" 
@@ -1436,79 +1457,79 @@ function CreateMonitorScreen({ navigation, route }) {
                 value={palavras} 
                 onChangeText={setPalavras} 
               />
-              <Text style={styles.helperText}>Dispara se todas as palavras forem encontradas juntas no texto da matéria.</Text>
+              <Text style={styles.helperText}>Dispara alerta sempre que todas as palavras forem localizadas juntas.</Text>
             </>
           )}
-        </Card>
+        </Surface>
 
-        {/* 4. FILTROS E ESTRATÉGIA DE CAPTURA (MODO PRODUTO) */}
+        {/* 3. ESTRATÉGIA DE CAPTURA */}
         {modo !== 'noticia' && (
           <>
-            <Text style={[styles.formSectionTitle, { marginTop: 20 }]}>ESTRATÉGIA DE CAPTURA</Text>
+            <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>3. ESTRATÉGIA INTELIGENTE DE CAPTURA</Text>
             
-            {/* CARD 1: MENOR VALOR */}
+            {/* ESTRATÉGIA: MENOR PREÇO */}
             <TouchableOpacity 
               style={[styles.strategyCard, estrategia === 'menor_preco' && styles.strategyCardActive]}
-              onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setEstrategia('menor_preco'); }}
+              onPress={() => setEstrategia('menor_preco')}
               activeOpacity={0.8}
             >
               <View style={styles.strategyHeader}>
-                <View style={[styles.strategyIconWrap, estrategia === 'menor_preco' && styles.strategyIconWrapActive]}>
-                  <Ionicons name="trending-down-outline" size={18} color={estrategia === 'menor_preco' ? THEME.primary : THEME.textMuted} />
+                <View style={[styles.strategyIconCircle, estrategia === 'menor_preco' && styles.strategyIconCircleActive]}>
+                  <Ionicons name="trending-down" size={17} color={estrategia === 'menor_preco' ? THEME.primary : THEME.textMuted} />
                 </View>
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, marginHorizontal: 10 }}>
                   <Text style={[styles.strategyTitle, estrategia === 'menor_preco' && styles.strategyTitleActive]}>
-                    Rastrear o Menor Valor Disponível
+                    Rastrear Menor Preço Disponível
                   </Text>
                   <Text style={styles.strategyDesc}>
-                    Captura exclusivamente a oferta de menor preço dentre todos os resultados encontrados.
+                    Captura exclusivamente a melhor oferta de menor preço dentre os resultados encontrados.
                   </Text>
                 </View>
                 <Ionicons 
                   name={estrategia === 'menor_preco' ? "radio-button-on" : "radio-button-off"} 
-                  size={20} 
+                  size={19} 
                   color={estrategia === 'menor_preco' ? THEME.primary : THEME.textSubtle} 
                 />
               </View>
             </TouchableOpacity>
 
-            {/* CARD 2: MAIS RECENTES COM OPÇÃO DE ORDENAR (Disponível apenas em OLX e Outros Sites) */}
+            {/* ESTRATÉGIA: MAIS RECENTES */}
             {!(plataforma === 'ZOOM' || plataforma === 'BUSCAPE') && (
               <TouchableOpacity 
                 style={[styles.strategyCard, estrategia === 'mais_recentes' && styles.strategyCardActive]}
-                onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setEstrategia('mais_recentes'); }}
+                onPress={() => setEstrategia('mais_recentes')}
                 activeOpacity={0.8}
               >
                 <View style={styles.strategyHeader}>
-                  <View style={[styles.strategyIconWrap, estrategia === 'mais_recentes' && styles.strategyIconWrapActive]}>
-                    <Ionicons name="time-outline" size={18} color={estrategia === 'mais_recentes' ? THEME.primary : THEME.textMuted} />
+                  <View style={[styles.strategyIconCircle, estrategia === 'mais_recentes' && styles.strategyIconCircleActive]}>
+                    <Ionicons name="time-outline" size={17} color={estrategia === 'mais_recentes' ? THEME.primary : THEME.textMuted} />
                   </View>
-                  <View style={{ flex: 1 }}>
+                  <View style={{ flex: 1, marginHorizontal: 10 }}>
                     <Text style={[styles.strategyTitle, estrategia === 'mais_recentes' && styles.strategyTitleActive]}>
                       Rastrear Todos os Anúncios Mais Recentes
                     </Text>
                     <Text style={styles.strategyDesc}>
-                      Retorna todos os anúncios compatíveis recém-publicados.
+                      Notifica todos os novos anúncios recém-publicados na plataforma.
                     </Text>
                   </View>
                   <Ionicons 
                     name={estrategia === 'mais_recentes' ? "radio-button-on" : "radio-button-off"} 
-                    size={20} 
+                    size={19} 
                     color={estrategia === 'mais_recentes' ? THEME.primary : THEME.textSubtle} 
                   />
                 </View>
 
                 {estrategia === 'mais_recentes' && (
-                  <View style={styles.strategyExtra}>
+                  <View style={styles.strategyExtraBox}>
                     <View style={styles.rowBetween}>
                       <View style={{ flex: 1, paddingRight: 10 }}>
-                        <Text style={styles.sortToggleText}>Ordenar do Menor para o Maior Valor</Text>
-                        <Text style={styles.sortToggleSub}>Receba as notificações priorizando as opções mais em conta</Text>
+                        <Text style={styles.sortToggleTitle}>Priorizar Menor Preço</Text>
+                        <Text style={styles.sortToggleDesc}>Ordena a captura do menor para o maior valor</Text>
                       </View>
                       <Switch 
                         value={ordenarMenorPreco}
                         onValueChange={setOrdenarMenorPreco}
-                        trackColor={{ false: '#2C3040', true: THEME.primary }}
+                        trackColor={{ false: '#1E2333', true: THEME.primary }}
                         thumbColor="#FFF"
                       />
                     </View>
@@ -1517,36 +1538,36 @@ function CreateMonitorScreen({ navigation, route }) {
               </TouchableOpacity>
             )}
 
-            {/* CARD 3: POR PREÇO ALVO */}
+            {/* ESTRATÉGIA: POR PREÇO ALVO */}
             <TouchableOpacity 
               style={[styles.strategyCard, estrategia === 'por_preco' && styles.strategyCardActive]}
-              onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setEstrategia('por_preco'); }}
+              onPress={() => setEstrategia('por_preco')}
               activeOpacity={0.8}
             >
               <View style={styles.strategyHeader}>
-                <View style={[styles.strategyIconWrap, estrategia === 'por_preco' && styles.strategyIconWrapActive]}>
-                  <Ionicons name="pricetag-outline" size={18} color={estrategia === 'por_preco' ? THEME.primary : THEME.textMuted} />
+                <View style={[styles.strategyIconCircle, estrategia === 'por_preco' && styles.strategyIconCircleActive]}>
+                  <Ionicons name="pricetag-outline" size={17} color={estrategia === 'por_preco' ? THEME.primary : THEME.textMuted} />
                 </View>
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, marginHorizontal: 10 }}>
                   <Text style={[styles.strategyTitle, estrategia === 'por_preco' && styles.strategyTitleActive]}>
-                    Rastrear Anúncio pelo Preço (Alvo)
+                    Rastrear por Preço Alvo (Faixa Orçamentária)
                   </Text>
                   <Text style={styles.strategyDesc}>
-                    Filtra anúncios dentro de uma margem em torno do seu orçamento desejado.
+                    Filtra ofertas com margem de tolerância em torno do seu valor desejado.
                   </Text>
                 </View>
                 <Ionicons 
                   name={estrategia === 'por_preco' ? "radio-button-on" : "radio-button-off"} 
-                  size={20} 
+                  size={19} 
                   color={estrategia === 'por_preco' ? THEME.primary : THEME.textSubtle} 
                 />
               </View>
 
               {estrategia === 'por_preco' && (
-                <View style={styles.strategyExtra}>
+                <View style={styles.strategyExtraBox}>
                   <View style={styles.row}>
-                    <View style={{ flex: 1, marginRight: 10 }}>
-                      <Text style={styles.inputTitle}>PREÇO ALVO (R$) *</Text>
+                    <View style={{ flex: 1, marginRight: 8 }}>
+                      <Text style={styles.inputTitle}>VALOR ALVO (R$) *</Text>
                       <TextInput 
                         style={styles.inputField} 
                         placeholder="Ex: 1500" 
@@ -1570,15 +1591,15 @@ function CreateMonitorScreen({ navigation, route }) {
                   </View>
 
                   {alvoNum > 0 ? (
-                    <View style={styles.previewBox}>
-                      <Text style={styles.previewTitle}>🎯 FAIXA ACEITA PELO ROBÔ:</Text>
-                      <Text style={styles.previewRange}>
-                        R$ {minEstimado.toFixed(2)} até R$ {maxEstimado.toFixed(2)}
+                    <View style={styles.targetPreviewCard}>
+                      <Ionicons name="filter" size={14} color={THEME.primary} style={{ marginRight: 6 }} />
+                      <Text style={styles.targetPreviewText}>
+                        Faixa aceita: <Text style={{ color: THEME.success, fontWeight: 'bold' }}>R$ {minEstimado.toFixed(2)}</Text> até <Text style={{ color: THEME.success, fontWeight: 'bold' }}>R$ {maxEstimado.toFixed(2)}</Text>
                       </Text>
                     </View>
                   ) : (
                     <Text style={[styles.helperText, { color: THEME.warning, marginTop: 8 }]}>
-                      ⚠️ Digite o valor alvo desejado para calcular a faixa aceita.
+                      ⚠️ Digite o valor alvo desejado para calcular a faixa orçamentária.
                     </Text>
                   )}
                 </View>
@@ -1587,10 +1608,29 @@ function CreateMonitorScreen({ navigation, route }) {
           </>
         )}
 
-        {/* 5. FREQUÊNCIA DE VARREDURA */}
-        <Text style={[styles.formSectionTitle, { marginTop: 20 }]}>FREQUÊNCIA DE VARREDURA</Text>
-        <Card style={styles.formCard}>
-          <Text style={styles.inputTitle}>INTERVALO ENTRE CONSULTAS (MINUTOS)</Text>
+        {/* 4. FREQUÊNCIA DE VARREDURA */}
+        <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>4. FREQUÊNCIA DE VARREDURA</Text>
+        <Surface style={styles.formSurface}>
+          <Text style={styles.inputTitle}>PRESETS RÁPIDOS</Text>
+          <View style={styles.presetsRow}>
+            {['15', '30', '60', '120'].map(p => {
+              const isSelected = String(intervalo) === p;
+              const label = p === '60' ? '1 hora' : p === '120' ? '2 horas' : `${p} min`;
+              return (
+                <TouchableOpacity 
+                  key={p}
+                  style={[styles.presetPill, isSelected && styles.presetPillActive]}
+                  onPress={() => setIntervalo(p)}
+                >
+                  <Text style={[styles.presetPillText, isSelected && styles.presetPillTextActive]}>
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <Text style={[styles.inputTitle, { marginTop: 12 }]}>INTERVALO MANUAL (MINUTOS)</Text>
           <TextInput 
             style={styles.inputField} 
             placeholder="30" 
@@ -1599,22 +1639,23 @@ function CreateMonitorScreen({ navigation, route }) {
             value={intervalo} 
             onChangeText={setIntervalo} 
           />
-        </Card>
+        </Surface>
 
-        {/* BOTÃO SALVAR / ATUALIZAR */}
-        <View style={{ marginTop: 25 }}>
+        {/* BOTÃO SALVAR */}
+        <View style={{ marginTop: 22 }}>
           <PrimaryButton 
             title={editando ? "Atualizar Radar" : "Salvar e Ativar Radar"} 
-            onPress={salvar} 
-            icon={editando ? "save-outline" : "rocket-outline"} 
-            loading={salvando} 
+            icon={editando ? "save-outline" : "rocket-outline"}
+            onPress={salvar}
+            loading={salvando}
+            size="lg"
           />
         </View>
 
         <View style={{ height: 60 }} />
       </ScrollView>
 
-      {/* MODAL ESTADO */}
+      {/* MODAIS DE SUPORTE */}
       <SelectionModal 
         visible={modalEstadoVisivel}
         title="Selecione o Estado (UF)"
@@ -1622,13 +1663,16 @@ function CreateMonitorScreen({ navigation, route }) {
         selectedId={estadoUf}
         onSelect={(item) => {
           setEstadoUf(item.uf);
-          const regs = OLX_ESTADOS[item.uf]?.regioes || [];
-          setRegiaoSlug(regs.length > 1 ? regs[1].slug : regs[0]?.slug || '');
+          if (item.uf === 'BR') {
+            setRegiaoSlug('');
+          } else {
+            const regs = OLX_ESTADOS[item.uf]?.regioes || [];
+            setRegiaoSlug(regs.length > 1 ? regs[1].slug : regs[0]?.slug || '');
+          }
         }}
         onClose={() => setModalEstadoVisivel(false)}
       />
 
-      {/* MODAL REGIÃO */}
       <SelectionModal 
         visible={modalRegiaoVisivel}
         title={`Regiões de ${OLX_ESTADOS[estadoUf]?.nome}`}
@@ -1638,52 +1682,42 @@ function CreateMonitorScreen({ navigation, route }) {
         onClose={() => setModalRegiaoVisivel(false)}
       />
 
-      {/* MODAL DE AVISO DE NOTIFICAÇÕES DESATIVADAS */}
       <Modal visible={modalAvisoNotifVisivel} animationType="fade" transparent={true} onRequestClose={() => setModalAvisoNotifVisivel(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={{ alignItems: 'center', marginVertical: 10 }}>
-              <View style={[styles.statIconBadge, { width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255, 149, 0, 0.15)', marginBottom: 12 }]}>
-                <Ionicons name="notifications-off-outline" size={30} color={THEME.primary} />
+              <View style={[styles.emptyIconPulseCircle, { marginBottom: 12 }]}>
+                <Ionicons name="notifications-off-outline" size={28} color={THEME.primary} />
               </View>
-              <Text style={[styles.modalTitle, { textAlign: 'center', fontSize: 18 }]}>Notificações Desativadas</Text>
-              <Text style={{ fontSize: 13, color: THEME.textMuted, textAlign: 'center', marginTop: 10, lineHeight: 19 }}>
-                Este aparelho ainda não possui as notificações ativadas para o Radar Inteligente.
+              <Text style={[styles.modalTitle, { textAlign: 'center' }]}>Notificações Desativadas</Text>
+              <Text style={styles.modalBodyText}>
+                Este aparelho ainda não possui as notificações ativadas para o AchôAI.
               </Text>
-              <Text style={{ fontSize: 13, color: THEME.text, textAlign: 'center', marginTop: 8, lineHeight: 19, fontWeight: '500' }}>
-                O robô fará as varreduras e salvará as oportunidades normalmente, mas você <Text style={{ color: THEME.warning, fontWeight: 'bold' }}>não receberá alertas sonoros ou na barra de status</Text> do celular quando um anúncio for encontrado.
+              <Text style={[styles.modalBodyText, { color: THEME.text, fontWeight: '500', marginTop: 8 }]}>
+                O robô fará as varreduras e salvará as oportunidades, mas você não receberá avisos sonoros na barra de status do celular.
               </Text>
             </View>
 
-            <TouchableOpacity 
-              style={[styles.btnPrimary, { marginTop: 15 }]}
+            <PrimaryButton 
+              title="Ativar Notificações no Aparelho"
+              icon="notifications"
               onPress={tentarAtivarNotificacoes}
-              disabled={ativandoNotif}
-              activeOpacity={0.8}
-            >
-              {ativandoNotif ? (
-                <ActivityIndicator size="small" color="#000" />
-              ) : (
-                <>
-                  <Ionicons name="notifications" size={18} color="#000" style={{ marginRight: 6 }} />
-                  <Text style={styles.btnPrimaryText}>Ativar Notificações no Aparelho</Text>
-                </>
-              )}
-            </TouchableOpacity>
+              loading={ativandoNotif}
+              style={{ marginTop: 12 }}
+            />
 
             <TouchableOpacity 
-              style={[styles.btnAction, { marginTop: 10, justifyContent: 'center', paddingVertical: 12 }]}
+              style={[styles.btnSecondaryTextOnly, { marginTop: 10 }]}
               onPress={() => {
                 setModalAvisoNotifVisivel(false);
                 executarSalvamento();
               }}
-              activeOpacity={0.7}
             >
-              <Text style={[styles.btnActionText, { color: THEME.textMuted }]}>Salvar Mesmo Assim (Sem Avisos Push)</Text>
+              <Text style={styles.btnSecondaryTextOnlyLabel}>Salvar Mesmo Assim (Sem Avisos Push)</Text>
             </TouchableOpacity>
 
             <TouchableOpacity 
-              style={{ marginTop: 12, alignItems: 'center', paddingVertical: 6 }}
+              style={{ marginTop: 10, alignItems: 'center', paddingVertical: 6 }}
               onPress={() => setModalAvisoNotifVisivel(false)}
             >
               <Text style={{ color: THEME.textSubtle, fontSize: 12 }}>Voltar ao Formulário</Text>
@@ -1695,14 +1729,14 @@ function CreateMonitorScreen({ navigation, route }) {
   );
 }
 
-// --- TELA 5: CONFIGURAÇÕES & DIAGNÓSTICO ---
+// --- TELA 5: CONFIGURAÇÕES & IDENTIDADE ---
 function SettingsScreen() {
   const { 
     pushToken, deviceId, user, fetchData, linkAccount, logoutUser,
     notificacoesAtivas, alternarNotificacoes 
   } = useContext(RadarContext);
 
-  const [authTab, setAuthTab] = useState('login'); // 'login' | 'cadastro'
+  const [authTab, setAuthTab] = useState('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authSenha, setAuthSenha] = useState('');
   const [authConfirmaSenha, setAuthConfirmaSenha] = useState('');
@@ -1883,99 +1917,92 @@ function SettingsScreen() {
 
   return (
     <View style={styles.screen}>
-      <View style={styles.topHeader}>
+      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
+
+      {/* TOP HEADER */}
+      <View style={styles.screenHeader}>
         <View>
-          <Text style={styles.headerTitle}>Configurações</Text>
-          <Text style={styles.headerSubtitle}>Identidade, Nuvem e Servidor</Text>
+          <Text style={styles.screenHeaderTitle}>Configurações</Text>
+          <Text style={styles.screenHeaderSub}>Identidade, Nuvem e Servidor</Text>
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollArea}>
+      <ScrollView contentContainerStyle={styles.scrollArea} showsVerticalScrollIndicator={false}>
         
-        {/* SEÇÃO 1: CONTA & IDENTIFICAÇÃO DO USUÁRIO */}
-        <Text style={styles.formSectionTitle}>IDENTIDADE DO USUÁRIO</Text>
-        
+        {/* SEÇÃO 1: IDENTIDADE DO USUÁRIO */}
+        <SectionHeader title="IDENTIDADE DO USUÁRIO" icon="person-circle-outline" />
+
         {user ? (
-          /* CONTA CONECTADA */
-          <Card style={styles.authCard}>
+          <Surface style={styles.settingsCard} elevated>
             <View style={styles.rowBetween}>
               <View style={[styles.row, { flex: 1, marginRight: 10 }]}>
-                <View style={styles.userAvatarBadge}>
-                  <Ionicons name="person" size={20} color={THEME.primary} />
+                <View style={styles.userAvatarBox}>
+                  <Ionicons name="person" size={18} color={THEME.primary} />
                 </View>
                 <View style={{ flex: 1, marginLeft: 10 }}>
                   <Text style={styles.userEmailText} numberOfLines={1}>{user.email}</Text>
-                  <Text style={styles.userProviderSub}>
+                  <Text style={styles.userProviderText}>
                     {user.app_metadata?.provider === 'google' ? 'Conectado via Google' : 'Conectado via Email/Senha'}
                   </Text>
                 </View>
               </View>
-              <View style={[styles.badgeSuccess, { flexShrink: 0 }]}>
-                <Text style={styles.badgeSuccessText}>CONECTADO</Text>
+              <View style={[styles.badgeSuccessPill, { flexShrink: 0 }]}>
+                <View style={styles.badgeSuccessDot} />
+                <Text style={styles.badgeSuccessPillText}>CONECTADO</Text>
               </View>
             </View>
 
             <View style={styles.divider} />
-            <Text style={styles.authSyncDesc}>
-              Seus radares e alertas estão salvos e sincronizados com a sua conta. Qualquer outro aparelho conectado com este email terá acesso instantâneo às mesmas configurações.
+            <Text style={styles.syncDescText}>
+              Seus radares e alertas estão sincronizados em nuvem. Qualquer outro aparelho conectado com este email terá acesso instantâneo.
             </Text>
 
             <TouchableOpacity 
-              style={[styles.btnLogout, { marginTop: 10 }]} 
+              style={styles.btnLogoutModern}
               onPress={handleLogout}
               activeOpacity={0.8}
             >
-              <Ionicons name="log-out-outline" size={16} color={THEME.danger} style={{ marginRight: 6 }} />
-              <Text style={styles.btnLogoutText}>Desconectar Conta</Text>
+              <Ionicons name="log-out-outline" size={15} color={THEME.danger} style={{ marginRight: 6 }} />
+              <Text style={styles.btnLogoutModernText}>Desconectar Conta</Text>
             </TouchableOpacity>
-          </Card>
+          </Surface>
         ) : (
-          /* MODO DISPOSITIVO + FORMULÁRIO DE LOGIN / CADASTRO */
-          <Card style={styles.authCard}>
-            <View style={{ marginBottom: 14 }}>
-              <Text style={{ fontSize: 13, color: THEME.textMuted, lineHeight: 19 }}>
-                Faça login ou crie sua conta para sincronizar seus radares e alertas entre vários dispositivos. Se preferir continuar sem conta, seus dados ficam salvos de forma segura e privada neste aparelho.
-              </Text>
-            </View>
+          <Surface style={styles.settingsCard} elevated>
+            <Text style={styles.syncDescText}>
+              Crie ou acesse sua conta para sincronizar seus radares entre vários aparelhos. Se preferir continuar sem conta, seus dados ficam salvos de forma segura e privada neste aparelho.
+            </Text>
 
-            {/* BOTÃO GOOGLE SIGN-IN */}
             <TouchableOpacity 
-              style={styles.btnGoogle} 
+              style={styles.btnGoogleModern}
               onPress={handleLoginGoogle}
-              activeOpacity={0.8}
+              activeOpacity={0.85}
               disabled={authLoading}
             >
-              <Ionicons name="logo-google" size={18} color="#000" style={{ marginRight: 8 }} />
-              <Text style={styles.btnGoogleText}>Continuar com o Google</Text>
+              <Ionicons name="logo-google" size={17} color="#08090D" style={{ marginRight: 8 }} />
+              <Text style={styles.btnGoogleModernText}>Continuar com o Google</Text>
             </TouchableOpacity>
 
-            <View style={styles.authOrRow}>
-              <View style={styles.authOrLine} />
-              <Text style={styles.authOrText}>ou com email e senha</Text>
-              <View style={styles.authOrLine} />
+            <View style={styles.authDividerRow}>
+              <View style={styles.authDividerLine} />
+              <Text style={styles.authDividerText}>ou email e senha</Text>
+              <View style={styles.authDividerLine} />
             </View>
 
-            {/* ABAS: ENTRAR / CRIAR CONTA */}
-            <View style={styles.authTabWrap}>
+            <View style={styles.authTabPillWrap}>
               <TouchableOpacity 
-                style={[styles.authTabBtn, authTab === 'login' && styles.authTabBtnActive]}
+                style={[styles.authTabPill, authTab === 'login' && styles.authTabPillActive]}
                 onPress={() => setAuthTab('login')}
               >
-                <Text style={[styles.authTabBtnText, authTab === 'login' && styles.authTabBtnTextActive]}>
-                  Entrar
-                </Text>
+                <Text style={[styles.authTabPillText, authTab === 'login' && styles.authTabPillTextActive]}>Entrar</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                style={[styles.authTabBtn, authTab === 'cadastro' && styles.authTabBtnActive]}
+                style={[styles.authTabPill, authTab === 'cadastro' && styles.authTabPillActive]}
                 onPress={() => setAuthTab('cadastro')}
               >
-                <Text style={[styles.authTabBtnText, authTab === 'cadastro' && styles.authTabBtnTextActive]}>
-                  Criar Conta
-                </Text>
+                <Text style={[styles.authTabPillText, authTab === 'cadastro' && styles.authTabPillTextActive]}>Criar Conta</Text>
               </TouchableOpacity>
             </View>
 
-            {/* FORMULÁRIO ENTRAR */}
             {authTab === 'login' ? (
               <View style={{ marginTop: 12 }}>
                 <Text style={styles.inputTitle}>EMAIL</Text>
@@ -2003,23 +2030,17 @@ function SettingsScreen() {
                   onPress={() => { setEmailRecuperacao(authEmail); setModalRecuperacaoVisivel(true); }}
                   style={{ alignSelf: 'flex-end', marginTop: 8 }}
                 >
-                  <Text style={styles.forgotPasswordText}>Esqueceu sua senha?</Text>
+                  <Text style={styles.forgotPasswordText}>Esqueceu a senha?</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={[styles.btnAuthSubmit, { marginTop: 15 }]} 
+                <PrimaryButton 
+                  title="Entrar na Conta"
                   onPress={handleLoginEmail}
-                  disabled={authLoading}
-                >
-                  {authLoading ? (
-                    <ActivityIndicator size="small" color="#000" />
-                  ) : (
-                    <Text style={styles.btnAuthSubmitText}>Entrar na Conta</Text>
-                  )}
-                </TouchableOpacity>
+                  loading={authLoading}
+                  style={{ marginTop: 14 }}
+                />
               </View>
             ) : (
-              /* FORMULÁRIO CRIAR CONTA */
               <View style={{ marginTop: 12 }}>
                 <Text style={styles.inputTitle}>SEU EMAIL</Text>
                 <TextInput 
@@ -2032,7 +2053,7 @@ function SettingsScreen() {
                   autoCapitalize="none"
                 />
 
-                <Text style={[styles.inputTitle, { marginTop: 10 }]}>CRIAR UMA SENHA</Text>
+                <Text style={[styles.inputTitle, { marginTop: 10 }]}>CRIAR SENHA</Text>
                 <TextInput 
                   style={styles.inputField}
                   placeholder="Mínimo 6 caracteres"
@@ -2052,117 +2073,116 @@ function SettingsScreen() {
                   secureTextEntry
                 />
 
-                <TouchableOpacity 
-                  style={[styles.btnAuthSubmit, { marginTop: 15 }]} 
+                <PrimaryButton 
+                  title="Cadastrar e Vincular"
                   onPress={handleSignupEmail}
-                  disabled={authLoading}
-                >
-                  {authLoading ? (
-                    <ActivityIndicator size="small" color="#000" />
-                  ) : (
-                    <Text style={styles.btnAuthSubmitText}>Cadastrar e Vincular Aparelho</Text>
-                  )}
-                </TouchableOpacity>
+                  loading={authLoading}
+                  style={{ marginTop: 14 }}
+                />
               </View>
             )}
-          </Card>
+          </Surface>
         )}
 
         {/* SEÇÃO 2: SERVIDOR DO ROBÔ */}
-        <Text style={[styles.formSectionTitle, { marginTop: 20 }]}>SERVIDOR DO ROBÔ</Text>
-        <Card style={styles.configCard}>
+        <SectionHeader title="MOTOR DE VARREDURA" icon="hardware-chip-outline" />
+        <Surface style={styles.settingsCard}>
           <View style={styles.rowBetween}>
             <View>
-              <Text style={styles.configTitle}>Servidor do Robô</Text>
-              <Text style={styles.configSub}>Online e Operante</Text>
+              <Text style={styles.settingsItemTitle}>Servidor de Varredura</Text>
+              <Text style={styles.settingsItemSub}>Online e Operante</Text>
             </View>
-            <View style={styles.badgeSuccess}>
-              <Text style={styles.badgeSuccessText}>ONLINE</Text>
+            <View style={styles.badgeSuccessPill}>
+              <View style={styles.badgeSuccessDot} />
+              <Text style={styles.badgeSuccessPillText}>ONLINE</Text>
             </View>
           </View>
           <View style={styles.divider} />
-          <Text style={styles.configItem}>• Responsável pelo processamento e varredura periódica de anúncios e ofertas em tempo real.</Text>
-        </Card>
+          <Text style={styles.helperText}>
+            • Responsável pelo processamento e varredura periódica de anúncios e ofertas na internet.
+          </Text>
+        </Surface>
 
-        {/* SEÇÃO 3: NOTIFICAÇÕES DO DISPOSITIVO */}
-        <Text style={[styles.formSectionTitle, { marginTop: 20 }]}>NOTIFICAÇÕES DO DISPOSITIVO</Text>
-        <Card style={styles.configCard}>
+        {/* SEÇÃO 3: NOTIFICAÇÕES */}
+        <SectionHeader title="NOTIFICAÇÕES DO DISPOSITIVO" icon="notifications-outline" />
+        <Surface style={styles.settingsCard}>
           <View style={styles.rowBetween}>
-            <View style={{ flex: 1, paddingRight: 12 }}>
-              <Text style={styles.configTitle}>Ativar as Notificações do App</Text>
+            <View style={{ flex: 1, paddingRight: 10 }}>
+              <Text style={styles.settingsItemTitle}>Alertas na Barra de Status</Text>
               <Text style={styles.helperText}>
-                Notificar na barra de status sempre que um novo anúncio ou oportunidade for capturado.
+                Notificar imediatamente sempre que uma nova oportunidade for capturada.
               </Text>
             </View>
             <Switch 
               value={notificacoesAtivas}
               onValueChange={alternarNotificacoes}
-              trackColor={{ false: '#2C3040', true: THEME.primary }}
+              trackColor={{ false: '#1E2333', true: THEME.primary }}
               thumbColor="#FFF"
             />
           </View>
 
           {checkIsExpoGo() && (
-            <View style={[styles.infoBanner, { marginTop: 12 }]}>
-              <Ionicons name="information-circle-outline" size={16} color={THEME.warning} style={{ marginRight: 6 }} />
-              <Text style={styles.infoBannerText}>
-                Em ambiente Expo Go, notificações push em segundo plano possuem limitações no Android 13+. No APK compilado, funcionam integralmente.
+            <View style={styles.infoNoticeBanner}>
+              <Ionicons name="information-circle" size={16} color={THEME.warning} style={{ marginRight: 6 }} />
+              <Text style={styles.infoNoticeText}>
+                Em ambiente Expo Go, notificações em segundo plano têm restrições no Android 13+. No APK final, operam 100%.
               </Text>
             </View>
           )}
 
           <TouchableOpacity 
-            style={[styles.btnAction, { marginTop: 15, alignSelf: 'flex-start', paddingHorizontal: 15 }]} 
+            style={styles.btnTestNotification}
             onPress={dispararTesteLocal}
+            activeOpacity={0.8}
           >
-            <Ionicons name="notifications-outline" size={16} color={THEME.primary} style={{ marginRight: 6 }} />
-            <Text style={styles.btnActionText}>Testar Notificação Local</Text>
+            <Ionicons name="notifications-outline" size={15} color={THEME.primary} style={{ marginRight: 6 }} />
+            <Text style={styles.btnTestNotificationText}>Testar Notificação Local</Text>
           </TouchableOpacity>
-        </Card>
+        </Surface>
 
-        {/* SEÇÃO 4: SOBRE O APLICATIVO */}
-        <Text style={[styles.formSectionTitle, { marginTop: 20 }]}>SOBRE O APLICATIVO</Text>
-        <Card style={styles.configCard}>
+        {/* SEÇÃO 4: SOBRE O ACHÔAI */}
+        <SectionHeader title="SOBRE O ACHÔAI" icon="information-circle-outline" />
+        <Surface style={styles.settingsCard}>
           <View style={styles.rowBetween}>
             <View>
-              <Text style={[styles.configTitle, { fontSize: 18, fontWeight: 'bold' }]}>AchôAI</Text>
-              <Text style={[styles.helperText, { marginTop: 2 }]}>Monitoramento de anúncios e notícias relevantes</Text>
+              <Text style={[styles.settingsItemTitle, { fontSize: 16, fontWeight: 'bold' }]}>AchôAI</Text>
+              <Text style={styles.helperText}>Monitoramento inteligente de anúncios e ofertas</Text>
             </View>
-            <View style={[styles.badgeSuccess, { backgroundColor: THEME.primaryGlow }]}>
-              <Text style={[styles.badgeSuccessText, { color: THEME.primary, fontWeight: 'bold' }]}>PRODUÇÃO</Text>
+            <View style={[styles.badgeSuccessPill, { backgroundColor: THEME.primaryGlow }]}>
+              <Text style={[styles.badgeSuccessPillText, { color: THEME.primary }]}>PRODUÇÃO</Text>
             </View>
           </View>
           <View style={styles.divider} />
           <View style={styles.rowBetween}>
-            <Text style={{ color: THEME.textMuted, fontSize: 13 }}>Versão Oficial</Text>
-            <Text style={{ color: THEME.text, fontWeight: 'bold', fontSize: 13 }}>1.0.0 (Play Store)</Text>
+            <Text style={styles.aboutMetaLabel}>Versão do App</Text>
+            <Text style={styles.aboutMetaValue}>1.0.0 (Build 2026)</Text>
           </View>
-          <View style={[styles.rowBetween, { marginTop: 8 }]}>
-            <Text style={{ color: THEME.textMuted, fontSize: 13 }}>Plataformas Integradas</Text>
-            <Text style={{ color: THEME.text, fontSize: 13 }}>OLX, Zoom, Buscapé & Web</Text>
+          <View style={[styles.rowBetween, { marginTop: 6 }]}>
+            <Text style={styles.aboutMetaLabel}>Fontes Integradas</Text>
+            <Text style={styles.aboutMetaValue}>OLX, Zoom, Buscapé & Web</Text>
           </View>
           <View style={styles.divider} />
-          <Text style={styles.aboutFooterText}>
-            AchôAI © 2026. Todos os direitos reservados.
+          <Text style={styles.aboutCopyrightText}>
+            A11 Digital © 2026. Todos os direitos reservados.
           </Text>
-        </Card>
+        </Surface>
 
-        <View style={{ height: 100 }} />
+        <View style={{ height: 90 }} />
       </ScrollView>
 
-      {/* MODAL DE RECUPERAÇÃO DE SENHA */}
+      {/* MODAL RECUPERAÇÃO DE SENHA */}
       <Modal visible={modalRecuperacaoVisivel} animationType="fade" transparent={true} onRequestClose={() => setModalRecuperacaoVisivel(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Recuperar Senha</Text>
               <TouchableOpacity onPress={() => setModalRecuperacaoVisivel(false)} style={styles.modalCloseBtn}>
-                <Ionicons name="close" size={22} color={THEME.text} />
+                <Ionicons name="close" size={20} color={THEME.textMuted} />
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.authSyncDesc}>
-              Informe seu email cadastrado para enviarmos um link de redefinição de senha com segurança.
+            <Text style={styles.syncDescText}>
+              Informe seu email para enviarmos instruções seguras de recuperação de acesso.
             </Text>
 
             <Text style={[styles.inputTitle, { marginTop: 12 }]}>EMAIL</Text>
@@ -2176,17 +2196,12 @@ function SettingsScreen() {
               autoCapitalize="none"
             />
 
-            <TouchableOpacity 
-              style={[styles.btnAuthSubmit, { marginTop: 16 }]} 
+            <PrimaryButton 
+              title="Enviar Link de Recuperação"
               onPress={handleResetPassword}
-              disabled={recuperandoSenha}
-            >
-              {recuperandoSenha ? (
-                <ActivityIndicator size="small" color="#000" />
-              ) : (
-                <Text style={styles.btnAuthSubmitText}>Enviar Link de Recuperação</Text>
-              )}
-            </TouchableOpacity>
+              loading={recuperandoSenha}
+              style={{ marginTop: 14 }}
+            />
           </View>
         </View>
       </Modal>
@@ -2195,41 +2210,59 @@ function SettingsScreen() {
 }
 
 // =====================================================================
-// 6. NAVEGAÇÃO E ROTAS
+// 5. NAVEGAÇÃO MODERNA 2026 (BOTTOM TABS & STACK)
 // =====================================================================
+
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
 function MainTabs() {
+  const { resultados } = useContext(RadarContext);
+  const insets = useSafeAreaInsets();
+  const bottomInset = Math.max(insets.bottom, Platform.OS === 'android' ? 20 : 24);
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarStyle: {
-          backgroundColor: THEME.cardBg,
-          borderTopColor: THEME.cardBorder,
-          borderTopWidth: 1,
-          elevation: 8,
-          height: 65,
-          paddingBottom: 10,
-          paddingTop: 8,
-        },
+        tabBarStyle: [
+          styles.bottomTabBar,
+          {
+            height: 58 + bottomInset,
+            paddingBottom: bottomInset,
+          }
+        ],
         tabBarActiveTintColor: THEME.primary,
         tabBarInactiveTintColor: THEME.textSubtle,
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+        tabBarLabelStyle: styles.bottomTabLabel,
+        tabBarItemStyle: {
+          paddingTop: 6,
+          paddingBottom: 2,
+        },
         tabBarIcon: ({ color, focused }) => {
           let iconName;
           if (route.name === 'Home') iconName = focused ? 'grid' : 'grid-outline';
           else if (route.name === 'Radares') iconName = focused ? 'radio' : 'radio-outline';
           else if (route.name === 'Alertas') iconName = focused ? 'notifications' : 'notifications-outline';
           else if (route.name === 'Config') iconName = focused ? 'settings' : 'settings-outline';
-          return <Ionicons name={iconName} size={22} color={color} />;
+          return (
+            <View style={[styles.tabIconWrap, focused && styles.tabIconWrapFocused]}>
+              <Ionicons name={iconName} size={20} color={color} />
+            </View>
+          );
         },
       })}
     >
       <Tab.Screen name="Home" component={DashboardScreen} />
       <Tab.Screen name="Radares" component={MonitorListScreen} />
-      <Tab.Screen name="Alertas" component={AlertsScreen} />
+      <Tab.Screen 
+        name="Alertas" 
+        component={AlertsScreen} 
+        options={{
+          tabBarBadge: resultados.length > 0 ? (resultados.length > 99 ? '99+' : resultados.length) : undefined,
+          tabBarBadgeStyle: styles.tabBadgeStyle
+        }}
+      />
       <Tab.Screen name="Config" component={SettingsScreen} />
     </Tab.Navigator>
   );
@@ -2249,535 +2282,535 @@ export default function App() {
   };
 
   return (
-    <RadarProvider>
-      <NavigationContainer theme={customTheme}>
-        <Stack.Navigator screenOptions={{ 
-          headerStyle: { backgroundColor: THEME.cardBg }, 
-          headerTintColor: THEME.primary,
-          headerShadowVisible: false,
-          headerTitleStyle: { fontWeight: 'bold' }
-        }}>
-          <Stack.Screen name="Main" component={MainTabs} options={{ headerShown: false }} />
-          <Stack.Screen 
-            name="Criar" 
-            component={CreateMonitorScreen} 
-            options={{ 
-              title: 'Novo Radar de Varredura',
-              presentation: 'modal',
-              animation: 'slide_from_bottom' 
-            }} 
-          />
-        </Stack.Navigator>
-      </NavigationContainer>
-    </RadarProvider>
+    <SafeAreaProvider>
+      <RadarProvider>
+        <NavigationContainer theme={customTheme}>
+          <Stack.Navigator screenOptions={{ 
+            headerStyle: { backgroundColor: THEME.bgSecondary }, 
+            headerTintColor: THEME.primary,
+            headerShadowVisible: false,
+            headerTitleStyle: { fontWeight: 'bold', fontSize: 16 }
+          }}>
+            <Stack.Screen name="Main" component={MainTabs} options={{ headerShown: false }} />
+            <Stack.Screen 
+              name="Criar" 
+              component={CreateMonitorScreen} 
+              options={{ 
+                title: 'Configurar Radar',
+                presentation: 'modal',
+                animation: 'slide_from_bottom' 
+              }} 
+            />
+          </Stack.Navigator>
+        </NavigationContainer>
+      </RadarProvider>
+    </SafeAreaProvider>
   );
 }
 
 // =====================================================================
-// 7. ESTILOS OTIMIZADOS
+// 6. ESTILOS MODERNOS (EDITION 2026)
 // =====================================================================
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: THEME.bg },
-  scrollArea: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 60 },
+  scrollArea: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 60 },
   row: { flexDirection: 'row', alignItems: 'center' },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
 
-  topHeader: { 
-    paddingTop: Platform.OS === 'android' ? 45 : 55, 
-    paddingHorizontal: 16, 
-    paddingBottom: 15,
+  // Brand Header (Home)
+  brandHeader: {
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: THEME.cardBg,
+    backgroundColor: THEME.bgSecondary,
     borderBottomWidth: 1,
     borderBottomColor: THEME.cardBorder
   },
-  headerTitle: { fontSize: 22, fontWeight: 'bold', color: THEME.text },
-  headerSubtitle: { fontSize: 13, color: THEME.textMuted, marginTop: 2 },
-  headerBtn: { 
-    width: 40, height: 40, borderRadius: 20, 
-    backgroundColor: THEME.badgeBg, 
-    justifyContent: 'center', alignItems: 'center',
-    borderWidth: 1, borderColor: THEME.cardBorder
+  brandGroup: { flexDirection: 'row', alignItems: 'center' },
+  brandLogoImage: {
+    width: 44,
+    height: 44,
+    marginRight: 10
+  },
+  brandTextGroup: { justifyContent: 'center' },
+  brandName: { fontSize: 20, fontWeight: '900', color: THEME.text, letterSpacing: 0.4 },
+  livePulseRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  livePulseDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: THEME.success, marginRight: 5 },
+  livePulseText: { fontSize: 10, fontWeight: '600', color: THEME.success, letterSpacing: 0.3 },
+  btnHeaderAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: THEME.radius.sm
+  },
+  btnHeaderActionText: { fontSize: 12, fontWeight: '800', color: '#08090D' },
+
+  // Screen Headers (Telas Secundárias)
+  screenHeader: {
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: THEME.bgSecondary,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.cardBorder
+  },
+  screenHeaderTitle: { fontSize: 20, fontWeight: '900', color: THEME.text, letterSpacing: 0.3 },
+  screenHeaderSub: { fontSize: 12, color: THEME.textMuted, marginTop: 2 },
+  headerBtnSquare: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: THEME.cardBgElevated,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder,
+    alignItems: 'center',
+    justifyContent: 'center'
   },
 
-  serverPill: { 
-    flexDirection: 'row', alignItems: 'center', 
-    backgroundColor: THEME.badgeBg, 
-    paddingHorizontal: 8, paddingVertical: 3, 
-    borderRadius: 12, marginTop: 4, alignSelf: 'flex-start' 
-  },
-  serverDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: THEME.success, marginRight: 6 },
-  serverText: { fontSize: 11, color: THEME.textMuted, fontWeight: '600' },
+  // Métricas
+  metricsRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 12 },
 
-  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 15 },
-  statBox: { flex: 1, marginHorizontal: 4, padding: 12, alignItems: 'center' },
-  statIconBadge: { 
-    width: 36, height: 36, borderRadius: 18, 
-    backgroundColor: THEME.primaryGlow, 
-    justifyContent: 'center', alignItems: 'center', marginBottom: 8 
+  // Oportunidades (Home)
+  opportunityCard: { padding: 14, marginBottom: 10 },
+  opportunityHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  opportunityDate: { fontSize: 11, color: THEME.textSubtle },
+  opportunityTitle: { fontSize: 14, fontWeight: '700', color: THEME.text, lineHeight: 19 },
+  opportunityFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
+  priceContainer: { flexDirection: 'row', alignItems: 'baseline' },
+  pricePrefix: { fontSize: 11, fontWeight: '700', color: THEME.success, marginRight: 3 },
+  priceNumber: { fontSize: 17, fontWeight: '900', color: THEME.success },
+  priceConsult: { fontSize: 13, fontWeight: '600', color: THEME.textMuted },
+  btnOpenOffer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.primaryGlow,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: THEME.radius.sm,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 122, 0, 0.3)'
   },
-  statNumber: { fontSize: 20, fontWeight: 'bold', color: THEME.text },
-  statLabel: { fontSize: 11, color: THEME.textMuted, marginTop: 2, textAlign: 'center' },
+  btnOpenOfferText: { fontSize: 11, fontWeight: '700', color: THEME.primary },
 
-  card: { 
-    backgroundColor: THEME.cardBg, 
-    borderRadius: 16, 
-    borderWidth: 1, 
-    borderColor: THEME.cardBorder, 
-    padding: 16,
-    marginBottom: 12
-  },
+  // Telemetria (Logs)
+  telemetryCard: { padding: 14 },
+  telemetryEmpty: { alignItems: 'center', paddingVertical: 15 },
+  telemetryRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: THEME.cardBorder },
+  telemetryDot: { width: 7, height: 7, borderRadius: 3.5, marginTop: 5, marginRight: 10 },
+  telemetryMessage: { fontSize: 12, color: THEME.textSecondary, lineHeight: 17 },
+  telemetryMetaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
+  telemetryTime: { fontSize: 10, color: THEME.textSubtle },
+  telemetrySeparator: { fontSize: 10, color: THEME.textSubtle, marginHorizontal: 5 },
+  telemetrySource: { fontSize: 10, color: THEME.textMuted },
 
-  sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 15, marginBottom: 10 },
-  sectionTitle: { fontSize: 12, color: THEME.textMuted, fontWeight: 'bold', letterSpacing: 1 },
-  sectionLink: { fontSize: 12, color: THEME.primary, fontWeight: 'bold' },
-
-  resultCard: { padding: 14 },
-  resultTitle: { fontSize: 15, fontWeight: '600', color: THEME.text },
-  resultDate: { fontSize: 11, color: THEME.textMuted, marginTop: 4 },
-  priceBadge: { backgroundColor: THEME.successBg, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
-  priceText: { color: THEME.success, fontWeight: 'bold', fontSize: 14 },
-  openBtn: { 
-    flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', 
-    marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: THEME.cardBorder, width: '100%' 
-  },
-  openBtnText: { color: THEME.primary, fontSize: 12, fontWeight: 'bold' },
-
-  logCard: { padding: 12 },
-  logRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: THEME.cardBorder },
-  logDot: { width: 8, height: 8, borderRadius: 4, marginTop: 4, marginRight: 10 },
-  logMessage: { fontSize: 13, color: THEME.text, lineHeight: 18 },
-  logTime: { fontSize: 10, color: THEME.textMuted, marginTop: 2 },
-
-  radarCard: { padding: 16 },
-  radarCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  radarTitleGroup: { flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 8 },
-  switchWrapper: { paddingRight: 4, justifyContent: 'center', alignItems: 'flex-end' },
-  platformBadge: { borderWidth: 1, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginRight: 6 },
-  platformBadgeText: { fontSize: 10, fontWeight: 'bold' },
-  strategyBadgeText: { fontSize: 11, color: THEME.textMuted, flexShrink: 1 },
-  modeBadge: { width: 32, height: 32, borderRadius: 16, justifyContent: 'center', alignItems: 'center', marginRight: 10 },
-  radarTitle: { fontSize: 16, fontWeight: 'bold', color: THEME.text, flex: 1 },
-  radarBody: { marginVertical: 12, paddingVertical: 10, borderTopWidth: 1, borderBottomWidth: 1, borderColor: THEME.cardBorder },
-  radarParam: { fontSize: 13, color: THEME.textMuted, marginBottom: 4 },
-  radarParamSub: { fontSize: 12, color: THEME.primary, fontWeight: '500', marginBottom: 4 },
-  radarUrl: { fontSize: 11, color: THEME.textSubtle, marginTop: 4 },
-  radarFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  radarMeta: { fontSize: 12, color: THEME.textMuted, fontWeight: '500' },
-  btnAction: { 
-    flexDirection: 'row', alignItems: 'center', 
-    backgroundColor: THEME.badgeBg, 
-    borderWidth: 1, borderColor: THEME.cardBorder, 
-    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8 
-  },
-  btnActionText: { color: THEME.primary, fontSize: 12, fontWeight: 'bold', marginLeft: 4 },
-
-  fab: { 
-    position: 'absolute', bottom: 20, right: 20, 
-    width: 58, height: 58, borderRadius: 29, 
-    backgroundColor: THEME.primary, 
-    justifyContent: 'center', alignItems: 'center', 
-    elevation: 8, shadowColor: THEME.primary, shadowOpacity: 0.4, shadowRadius: 6 
-  },
-
-  emptyStateContainer: { alignItems: 'center', justifyContent: 'center', marginTop: 60, paddingHorizontal: 30 },
-  emptyStateTitle: { fontSize: 18, fontWeight: 'bold', color: THEME.text, marginTop: 15, marginBottom: 8 },
-  emptyStateSub: { fontSize: 14, color: THEME.textMuted, textAlign: 'center', lineHeight: 20 },
-  emptyCard: { alignItems: 'center', padding: 25 },
-  emptyCardText: { fontSize: 15, fontWeight: '600', color: THEME.textMuted, marginTop: 8 },
-  emptyCardSub: { fontSize: 12, color: THEME.textSubtle, textAlign: 'center', marginTop: 4 },
-
-  resultCardFull: { padding: 16, marginBottom: 12 },
-  resultTag: { fontSize: 11, color: THEME.success, fontWeight: '600' },
-  resultTimeAgo: { fontSize: 11, color: THEME.textMuted },
-  resultTitleFull: { fontSize: 17, fontWeight: 'bold', color: THEME.text, marginVertical: 10, lineHeight: 22 },
-  priceRow: { 
-    backgroundColor: THEME.badgeBg, padding: 12, borderRadius: 10, 
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 8 
-  },
-  priceLabel: { fontSize: 11, color: THEME.textMuted, fontWeight: 'bold' },
-  priceValue: { fontSize: 18, fontWeight: 'bold', color: THEME.success },
-  btnOpenFull: { 
-    backgroundColor: THEME.primary, flexDirection: 'row', 
-    justifyContent: 'center', alignItems: 'center', paddingVertical: 12, borderRadius: 10, marginTop: 10 
-  },
-  btnOpenFullText: { color: '#000', fontWeight: 'bold', fontSize: 14 },
-
-  segmentWrap: { flexDirection: 'row', backgroundColor: THEME.cardBg, borderRadius: 12, padding: 4, marginBottom: 20, borderWidth: 1, borderColor: THEME.cardBorder },
-  segmentOption: { flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 12, borderRadius: 8 },
-  segmentOptionActive: { backgroundColor: THEME.primary },
-  segmentLabel: { fontSize: 14, color: THEME.textMuted, fontWeight: '600' },
-
-  formSectionTitle: { fontSize: 11, color: THEME.textMuted, fontWeight: 'bold', letterSpacing: 1, marginBottom: 8 },
-  formCard: { padding: 16 },
-  inputTitle: { fontSize: 11, color: THEME.textMuted, fontWeight: 'bold', marginBottom: 6 },
-  inputField: { 
-    backgroundColor: THEME.badgeBg, color: THEME.text, 
-    fontSize: 15, paddingHorizontal: 14, paddingVertical: 12, borderRadius: 10,
-    borderWidth: 1, borderColor: THEME.cardBorder
-  },
-  helperText: { fontSize: 11, color: THEME.textSubtle, marginTop: 6, fontStyle: 'italic' },
-  previewBox: { backgroundColor: 'rgba(48, 209, 88, 0.1)', padding: 12, borderRadius: 10, marginTop: 15, borderWidth: 1, borderColor: 'rgba(48, 209, 88, 0.25)' },
-  previewTitle: { fontSize: 11, color: THEME.success, fontWeight: 'bold' },
-  previewRange: { fontSize: 16, color: THEME.text, fontWeight: 'bold', marginTop: 4 },
-
-  btnPrimary: { 
-    backgroundColor: THEME.primary, paddingVertical: 15, borderRadius: 12, 
-    flexDirection: 'row', justifyContent: 'center', alignItems: 'center',
-    elevation: 4, shadowColor: THEME.primary, shadowOpacity: 0.3, shadowRadius: 6
-  },
-  btnPrimaryText: { color: '#000', fontSize: 15, fontWeight: 'bold' },
-
-  configCard: { padding: 16 },
-  configTitle: { fontSize: 15, fontWeight: 'bold', color: THEME.text },
-  configSub: { fontSize: 12, color: THEME.textMuted, marginTop: 2 },
-  badgeSuccess: { backgroundColor: THEME.successBg, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  badgeSuccessText: { color: THEME.success, fontSize: 11, fontWeight: 'bold' },
-  divider: { height: 1, backgroundColor: THEME.cardBorder, marginVertical: 12 },
-  configItem: { fontSize: 13, color: THEME.textMuted, marginBottom: 6 },
-  tokenBox: { 
-    backgroundColor: THEME.badgeBg, padding: 10, borderRadius: 8, 
-    color: THEME.primary, fontSize: 11, fontFamily: Platform.OS === 'android' ? 'monospace' : 'Courier',
-    marginVertical: 8, borderWidth: 1, borderColor: THEME.cardBorder
-  },
-
-  // Estilos de Edição
-  editNoticeBanner: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(10, 132, 255, 0.12)',
-    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, marginBottom: 15,
-    borderWidth: 1, borderColor: 'rgba(10, 132, 255, 0.3)'
-  },
-  editNoticeText: { color: THEME.secondary, fontSize: 13, fontWeight: 'bold' },
-
-  // Estilos de Plataformas
-  platformChipRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
-  platformChip: { 
-    flex: 1, marginHorizontal: 3, paddingVertical: 10, paddingHorizontal: 4, 
-    borderRadius: 10, borderWidth: 1, borderColor: THEME.cardBorder, 
-    backgroundColor: THEME.badgeBg, alignItems: 'center', justifyContent: 'center' 
-  },
-  platformChipActive: { backgroundColor: THEME.primaryGlow, borderColor: THEME.primary },
-  platformChipText: { fontSize: 11, fontWeight: 'bold', color: THEME.textMuted, marginTop: 4, textAlign: 'center' },
-  platformChipTextActive: { color: THEME.primary },
-
-  // Banner comparador
-  comparatorBanner: {
-    flexDirection: 'row', alignItems: 'flex-start', backgroundColor: THEME.badgeBg,
-    padding: 12, borderRadius: 10, borderWidth: 1, borderColor: THEME.cardBorder, marginBottom: 15
-  },
-  comparatorBannerText: { flex: 1, fontSize: 12, color: THEME.textMuted, lineHeight: 17 },
-
-  // Seletores Estado / Região
-  selectBtn: { 
-    flex: 1, backgroundColor: THEME.badgeBg, borderRadius: 10, 
-    paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, 
-    borderColor: THEME.cardBorder, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' 
-  },
-  selectBtnLabel: { fontSize: 10, color: THEME.textSubtle, fontWeight: 'bold' },
-  selectBtnValue: { fontSize: 13, color: THEME.text, fontWeight: '600', marginTop: 2 },
-  urlPreviewBox: { 
-    flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(48, 209, 88, 0.08)', 
-    padding: 10, borderRadius: 8, marginTop: 12, borderWidth: 1, borderColor: 'rgba(48, 209, 88, 0.2)' 
-  },
-  urlPreviewText: { flex: 1, fontSize: 11, color: THEME.success, fontFamily: Platform.OS === 'android' ? 'monospace' : 'Courier' },
-
-  // Estilos de Estratégia de Captura
-  strategyCard: { 
-    borderRadius: 12, borderWidth: 1, borderColor: THEME.cardBorder, 
-    backgroundColor: THEME.cardBg, padding: 14, marginBottom: 10 
-  },
-  strategyCardActive: { borderColor: THEME.primary, backgroundColor: 'rgba(255, 149, 0, 0.06)' },
-  strategyHeader: { flexDirection: 'row', alignItems: 'center' },
-  strategyIconWrap: { 
-    width: 32, height: 32, borderRadius: 16, 
-    backgroundColor: THEME.badgeBg, justifyContent: 'center', alignItems: 'center', marginRight: 10 
-  },
-  strategyIconWrapActive: { backgroundColor: THEME.primaryGlow },
-  strategyTitle: { fontSize: 14, fontWeight: 'bold', color: THEME.textMuted },
-  strategyTitleActive: { color: THEME.primary },
-  strategyDesc: { fontSize: 11, color: THEME.textSubtle, marginTop: 3 },
-  strategyExtra: { marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
-  sortToggleText: { fontSize: 13, fontWeight: '600', color: THEME.text },
-  sortToggleSub: { fontSize: 11, color: THEME.textSubtle, marginTop: 2 },
-
-  // Estilos do Modal de Seleção
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  modalContent: { 
-    backgroundColor: THEME.cardBg, borderRadius: 16, width: '100%', maxWidth: 400, 
-    borderWidth: 1, borderColor: THEME.cardBorder, padding: 18 
-  },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  modalTitle: { fontSize: 16, fontWeight: 'bold', color: THEME.text },
-  modalCloseBtn: { padding: 4 },
-  modalSearchBox: { 
-    flexDirection: 'row', alignItems: 'center', backgroundColor: THEME.badgeBg, 
-    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, marginBottom: 10, 
-    borderWidth: 1, borderColor: THEME.cardBorder 
-  },
-  modalSearchInput: { flex: 1, color: THEME.text, fontSize: 13, padding: 0 },
-  modalItem: { 
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', 
-    paddingVertical: 12, paddingHorizontal: 8, borderBottomWidth: 1, borderBottomColor: THEME.cardBorder 
-  },
-  modalItemSelected: { backgroundColor: THEME.badgeBg, borderRadius: 8 },
-  modalItemText: { fontSize: 14, color: THEME.textMuted },
-  modalItemTextSelected: { color: THEME.primary, fontWeight: 'bold' },
-
-  // Estilos de Autenticação e Gestão de Contas
-  authCard: {
-    padding: 18,
-    marginBottom: 16,
+  // Cards de Radar (Aba 2)
+  radarCard: { padding: 15, marginBottom: 12 },
+  radarCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  radarModeIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  radarTitle: { fontSize: 15, fontWeight: '800', color: THEME.text },
+  radarTagsRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, flexWrap: 'wrap' },
+  locationChip: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.04)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  locationChipText: { fontSize: 10, color: THEME.textMuted, fontWeight: '600' },
+  radarSearchTermBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    borderRadius: THEME.radius.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 10,
     borderWidth: 1,
     borderColor: THEME.cardBorder
   },
-  userAvatarBadge: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: THEME.primaryGlow,
-    justifyContent: 'center',
+  radarSearchTermText: { fontSize: 12, color: THEME.textSecondary, fontWeight: '600' },
+  radarCardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
+  radarFrequencyLabel: { fontSize: 11, color: THEME.textMuted },
+  radarCountdownRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  radarCountdownText: { fontSize: 12, fontWeight: '700', color: THEME.primary },
+  radarActionsGroup: { flexDirection: 'row', alignItems: 'center' },
+  btnScanNow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: THEME.radius.sm
+  },
+  btnScanNowText: { fontSize: 11, fontWeight: '900', color: '#08090D' },
+  fabGlow: {
+    position: 'absolute',
+    bottom: 22,
+    right: 20,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: THEME.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 8,
+    shadowColor: THEME.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10
+  },
+
+  // Busca e Filtros (Aba Alertas)
+  searchBarContainer: { paddingHorizontal: 16, paddingTop: 10 },
+  searchInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.cardBgElevated,
+    borderRadius: THEME.radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     borderWidth: 1,
-    borderColor: 'rgba(255, 149, 0, 0.3)'
+    borderColor: THEME.cardBorder
   },
-  userEmailText: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: THEME.text
+  searchInput: { flex: 1, fontSize: 13, color: THEME.text, padding: 0 },
+  filterChipRow: { flexDirection: 'row', paddingHorizontal: 16, paddingVertical: 10 },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: THEME.radius.pill,
+    backgroundColor: THEME.cardBgElevated,
+    marginRight: 6,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder
   },
-  userProviderSub: {
-    fontSize: 12,
-    color: THEME.textMuted,
-    marginTop: 2
+  filterChipActive: { backgroundColor: THEME.primary, borderColor: THEME.primary },
+  filterChipText: { fontSize: 11, fontWeight: '700', color: THEME.textMuted },
+  filterChipTextActive: { color: '#08090D' },
+
+  // Cards de Alerta Completo (Aba Alertas)
+  alertCardFull: { padding: 15, marginBottom: 12 },
+  alertHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  robotTag: { flexDirection: 'row', alignItems: 'center', marginLeft: 6 },
+  robotTagText: { fontSize: 10, color: THEME.success, fontWeight: '700' },
+  alertTime: { fontSize: 11, color: THEME.textSubtle },
+  alertTitleFull: { fontSize: 15, fontWeight: '700', color: THEME.text, marginVertical: 8, lineHeight: 21 },
+  alertPriceRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
+  alertPriceLabel: { fontSize: 9, fontWeight: '800', color: THEME.textSubtle, letterSpacing: 0.5 },
+  alertPriceValue: { fontSize: 19, fontWeight: '900', color: THEME.success, marginTop: 2 },
+  btnAlertAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: THEME.radius.sm
   },
-  authSyncDesc: {
-    fontSize: 13,
-    color: THEME.textMuted,
-    lineHeight: 18,
+  btnAlertActionText: { fontSize: 11, fontWeight: '900', color: '#08090D' },
+
+  // Formulário de Criação (Aba Criar)
+  editNoticeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.primaryGlow,
+    padding: 10,
+    borderRadius: THEME.radius.sm,
+    borderWidth: 1,
+    borderColor: THEME.cardBorderActive,
+    marginBottom: 12
+  },
+  editNoticeText: { fontSize: 12, fontWeight: '700', color: THEME.primary },
+  formSectionTitle: { fontSize: 11, fontWeight: '800', color: THEME.textMuted, letterSpacing: 1, marginBottom: 8 },
+  platformGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 10 },
+  platformCardBtn: {
+    width: '48%',
+    backgroundColor: THEME.cardBg,
+    borderRadius: THEME.radius.md,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder,
+    padding: 12,
+    alignItems: 'center',
+    marginBottom: 8
+  },
+  platformCardBtnActive: { borderColor: THEME.primary, backgroundColor: THEME.primaryGlow },
+  platformIconCircle: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  platformCardBtnText: { fontSize: 12, fontWeight: '700', color: THEME.textSecondary },
+  platformCardBtnTextActive: { color: THEME.primary, fontWeight: '800' },
+  comparatorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.primaryGlow,
+    padding: 10,
+    borderRadius: THEME.radius.sm,
+    borderWidth: 1,
+    borderColor: 'rgba(255,122,0,0.2)',
     marginBottom: 10
   },
-  deviceMetaText: {
-    fontSize: 12,
-    color: THEME.textSubtle,
-    marginTop: 4
+  comparatorBannerText: { flex: 1, fontSize: 11, color: THEME.textSecondary, lineHeight: 16 },
+  formSurface: { padding: 14, marginBottom: 14 },
+  selectBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.cardBgElevated,
+    borderRadius: THEME.radius.sm,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder
   },
-  btnLogout: {
+  selectBtnLabel: { fontSize: 9, fontWeight: '800', color: THEME.textSubtle, letterSpacing: 0.5 },
+  selectBtnValue: { fontSize: 12, fontWeight: '700', color: THEME.text, marginTop: 2 },
+  urlPreviewBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: THEME.radius.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder
+  },
+  urlPreviewText: { fontSize: 11, color: THEME.textSubtle, flex: 1 },
+  segmentWrap: { flexDirection: 'row', backgroundColor: THEME.cardBgElevated, borderRadius: THEME.radius.sm, padding: 3, marginBottom: 12 },
+  segmentOption: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: 6 },
+  segmentOptionActive: { backgroundColor: THEME.primary },
+  segmentLabel: { fontSize: 12, color: THEME.textMuted, fontWeight: '600' },
+  segmentLabelActive: { color: '#08090D', fontWeight: '800' },
+  inputTitle: { fontSize: 10, fontWeight: '800', color: THEME.textSubtle, letterSpacing: 0.6, marginBottom: 6 },
+  inputField: {
+    backgroundColor: THEME.cardBgElevated,
+    borderRadius: THEME.radius.sm,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+    color: THEME.text,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder
+  },
+  helperText: { fontSize: 11, color: THEME.textSubtle, marginTop: 5, lineHeight: 16 },
+
+  // Cards de Estratégia
+  strategyCard: {
+    backgroundColor: THEME.cardBg,
+    borderRadius: THEME.radius.md,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder,
+    padding: 14,
+    marginBottom: 10
+  },
+  strategyCardActive: { borderColor: THEME.primary, backgroundColor: THEME.cardBgElevated },
+  strategyHeader: { flexDirection: 'row', alignItems: 'center' },
+  strategyIconCircle: { width: 32, height: 32, borderRadius: 16, backgroundColor: THEME.cardBgElevated, alignItems: 'center', justifyContent: 'center' },
+  strategyIconCircleActive: { backgroundColor: THEME.primaryGlow },
+  strategyTitle: { fontSize: 13, fontWeight: '700', color: THEME.textSecondary },
+  strategyTitleActive: { color: THEME.primary, fontWeight: '800' },
+  strategyDesc: { fontSize: 11, color: THEME.textMuted, marginTop: 2, lineHeight: 16 },
+  strategyExtraBox: { marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
+  sortToggleTitle: { fontSize: 12, fontWeight: '700', color: THEME.textSecondary },
+  sortToggleDesc: { fontSize: 10, color: THEME.textSubtle, marginTop: 2 },
+  targetPreviewCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.primaryGlow,
+    padding: 9,
+    borderRadius: THEME.radius.sm,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,122,0,0.3)'
+  },
+  targetPreviewText: { fontSize: 11, color: THEME.textSecondary },
+
+  // Presets de Frequência
+  presetsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
+  presetPill: {
+    flex: 1,
+    marginHorizontal: 3,
+    paddingVertical: 7,
+    borderRadius: THEME.radius.sm,
+    backgroundColor: THEME.cardBgElevated,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: THEME.cardBorder
+  },
+  presetPillActive: { backgroundColor: THEME.primary, borderColor: THEME.primary },
+  presetPillText: { fontSize: 11, fontWeight: '700', color: THEME.textMuted },
+  presetPillTextActive: { color: '#08090D', fontWeight: '800' },
+
+  // Configurações
+  settingsCard: { padding: 16, marginBottom: 14 },
+  userAvatarBox: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: THEME.primaryGlow,
+    borderWidth: 1,
+    borderColor: THEME.cardBorderActive,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  userEmailText: { fontSize: 14, fontWeight: '800', color: THEME.text },
+  userProviderText: { fontSize: 11, color: THEME.textMuted, marginTop: 2 },
+  badgeSuccessPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.successBg,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: THEME.radius.pill,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)'
+  },
+  badgeSuccessDot: { width: 5, height: 5, borderRadius: 2.5, backgroundColor: THEME.success, marginRight: 5 },
+  badgeSuccessPillText: { fontSize: 10, fontWeight: '800', color: THEME.success },
+  syncDescText: { fontSize: 12, color: THEME.textMuted, lineHeight: 18, marginBottom: 10 },
+  divider: { height: 1, backgroundColor: THEME.cardBorder, marginVertical: 12 },
+  btnLogoutModern: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: THEME.dangerBg,
-    paddingVertical: 11,
-    paddingHorizontal: 16,
-    borderRadius: 10,
     borderWidth: 1,
-    borderColor: 'rgba(255, 69, 58, 0.3)'
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderRadius: THEME.radius.sm,
+    paddingVertical: 10,
+    marginTop: 4
   },
-  btnLogoutText: {
-    color: THEME.danger,
-    fontSize: 13,
-    fontWeight: 'bold'
-  },
-  deviceModeBadgeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8
-  },
-  deviceModeTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: THEME.text
-  },
-  deviceTagText: {
-    fontSize: 11,
-    color: THEME.textSubtle,
-    fontFamily: Platform.OS === 'android' ? 'monospace' : 'Courier',
-    backgroundColor: THEME.badgeBg,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  deviceModeSub: {
-    fontSize: 12,
-    color: THEME.textMuted,
-    lineHeight: 17,
-    marginBottom: 16
-  },
-  btnGoogle: {
+  btnLogoutModernText: { fontSize: 12, fontWeight: '800', color: THEME.danger },
+  btnGoogleModern: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#FFFFFF',
-    paddingVertical: 13,
-    borderRadius: 10,
-    marginBottom: 14,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOpacity: 0.15,
-    shadowRadius: 4
+    borderRadius: THEME.radius.sm,
+    paddingVertical: 12,
+    marginBottom: 10
   },
-  btnGoogleText: {
-    color: '#000000',
-    fontSize: 14,
-    fontWeight: 'bold'
-  },
-  authOrRow: {
+  btnGoogleModernText: { fontSize: 13, fontWeight: '700', color: '#08090D' },
+  authDividerRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 10 },
+  authDividerLine: { flex: 1, height: 1, backgroundColor: THEME.cardBorder },
+  authDividerText: { fontSize: 11, color: THEME.textSubtle, marginHorizontal: 8 },
+  authTabPillWrap: { flexDirection: 'row', backgroundColor: THEME.cardBgElevated, borderRadius: THEME.radius.sm, padding: 3, marginBottom: 10 },
+  authTabPill: { flex: 1, paddingVertical: 7, alignItems: 'center', borderRadius: 6 },
+  authTabPillActive: { backgroundColor: THEME.primary },
+  authTabPillText: { fontSize: 11, fontWeight: '700', color: THEME.textMuted },
+  authTabPillTextActive: { color: '#08090D', fontWeight: '800' },
+  forgotPasswordText: { fontSize: 11, color: THEME.primary, fontWeight: '600' },
+  settingsItemTitle: { fontSize: 14, fontWeight: '700', color: THEME.text },
+  settingsItemSub: { fontSize: 11, color: THEME.success, marginTop: 2, fontWeight: '600' },
+  infoNoticeBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 10
+    backgroundColor: THEME.warningBg,
+    padding: 10,
+    borderRadius: THEME.radius.sm,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)'
   },
-  authOrLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: THEME.cardBorder
-  },
-  authOrText: {
-    fontSize: 11,
-    color: THEME.textSubtle,
-    paddingHorizontal: 10,
-    fontWeight: '600',
-    textTransform: 'uppercase'
-  },
-  authTabWrap: {
+  infoNoticeText: { flex: 1, fontSize: 11, color: THEME.warning, lineHeight: 16 },
+  btnTestNotification: {
     flexDirection: 'row',
-    backgroundColor: THEME.badgeBg,
-    borderRadius: 10,
-    padding: 3,
-    marginVertical: 10,
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: THEME.cardBgElevated,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder,
+    borderRadius: THEME.radius.sm,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginTop: 12
+  },
+  btnTestNotificationText: { fontSize: 12, fontWeight: '700', color: THEME.primary },
+  aboutMetaLabel: { fontSize: 12, color: THEME.textMuted },
+  aboutMetaValue: { fontSize: 12, fontWeight: '700', color: THEME.text },
+  aboutCopyrightText: { fontSize: 11, color: THEME.textSubtle, textAlign: 'center' },
+
+  // Modais
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  modalContent: {
+    backgroundColor: THEME.cardBg,
+    borderRadius: THEME.radius.lg,
+    width: '100%',
+    maxWidth: 400,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder,
+    padding: 18
+  },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  modalTitle: { fontSize: 16, fontWeight: '800', color: THEME.text },
+  modalCloseBtn: { padding: 4 },
+  modalSearchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.cardBgElevated,
+    borderRadius: THEME.radius.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginBottom: 10,
     borderWidth: 1,
     borderColor: THEME.cardBorder
   },
-  authTabBtn: {
-    flex: 1,
-    paddingVertical: 9,
+  modalSearchInput: { flex: 1, color: THEME.text, fontSize: 13, padding: 0 },
+  modalItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    borderRadius: 8
+    paddingVertical: 11,
+    paddingHorizontal: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.cardBorder
   },
-  authTabBtnActive: {
-    backgroundColor: THEME.cardBg,
-    borderWidth: 1,
-    borderColor: THEME.primary
-  },
-  authTabBtnText: {
-    fontSize: 13,
-    color: THEME.textMuted,
-    fontWeight: '600'
-  },
-  authTabBtnTextActive: {
-    color: THEME.primary,
-    fontWeight: 'bold'
-  },
-  forgotPasswordText: {
-    fontSize: 12,
-    color: THEME.primary,
-    fontWeight: '600'
-  },
-  btnAuthSubmit: {
-    backgroundColor: THEME.primary,
-    paddingVertical: 13,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 3,
-    shadowColor: THEME.primary,
-    shadowOpacity: 0.25,
-    shadowRadius: 5
-  },
-  btnAuthSubmitText: {
-    color: '#000000',
-    fontSize: 14,
-    fontWeight: 'bold'
-  },
+  modalItemSelected: { backgroundColor: THEME.cardBgElevated, borderRadius: THEME.radius.sm },
+  modalItemText: { fontSize: 13, color: THEME.textSecondary },
+  modalItemTextSelected: { color: THEME.primary, fontWeight: '800' },
+  modalBodyText: { fontSize: 12, color: THEME.textMuted, textAlign: 'center', lineHeight: 18, marginTop: 4 },
+  btnSecondaryTextOnly: { alignItems: 'center', paddingVertical: 8 },
+  btnSecondaryTextOnlyLabel: { fontSize: 12, color: THEME.textMuted, fontWeight: '600' },
 
-  // Estilos do Botão Varrer e Ações do Card
-  btnVarrer: {
-    backgroundColor: THEME.primary,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderRadius: 10,
-    marginTop: 12,
-    elevation: 3,
-    shadowColor: THEME.primary,
-    shadowOpacity: 0.35,
-    shadowRadius: 5
-  },
-  btnVarrerText: {
-    color: '#000000',
-    fontSize: 14,
-    fontWeight: 'bold'
-  },
-  btnVarrerCompact: {
-    backgroundColor: THEME.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 7,
-    paddingHorizontal: 11,
-    borderRadius: 8,
-    elevation: 2,
-    shadowColor: THEME.primary,
-    shadowOpacity: 0.25,
-    shadowRadius: 3
-  },
-  btnVarrerCompactText: {
-    color: '#000000',
-    fontSize: 12,
-    fontWeight: 'bold'
-  },
-  btnIconAction: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    backgroundColor: THEME.badgeBg,
+  // Estados Vazios
+  emptyCard: { alignItems: 'center', padding: 25, marginTop: 4 },
+  emptyIconCircle: { width: 50, height: 50, borderRadius: 25, backgroundColor: THEME.primaryGlow, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
+  emptyCardTitle: { fontSize: 14, fontWeight: '800', color: THEME.text, marginBottom: 4 },
+  emptyCardSub: { fontSize: 12, color: THEME.textSubtle, textAlign: 'center', lineHeight: 17 },
+  emptyFullState: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30, marginTop: 60 },
+  emptyIconPulseCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: THEME.cardBgElevated,
     borderWidth: 1,
     borderColor: THEME.cardBorder,
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center'
+    marginBottom: 16
   },
-  radarFooterHarmonious: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingTop: 12,
+  emptyStateTitle: { fontSize: 17, fontWeight: '800', color: THEME.text, marginBottom: 6, textAlign: 'center' },
+  emptyStateSub: { fontSize: 13, color: THEME.textMuted, textAlign: 'center', lineHeight: 19 },
+
+  // Barra de Navegação Inferior
+  bottomTabBar: {
+    backgroundColor: THEME.bgSecondary,
+    borderTopColor: THEME.cardBorder,
     borderTopWidth: 1,
-    borderTopColor: THEME.cardBorder
+    elevation: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
   },
-  radarFrequencyText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: THEME.text
-  },
-  radarCountdownText: {
-    fontSize: 11,
-    color: THEME.primary,
-    fontWeight: '600'
-  },
-  infoBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 214, 10, 0.1)',
-    borderRadius: 8,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 214, 10, 0.25)'
-  },
-  infoBannerText: {
-    flex: 1,
-    fontSize: 11,
-    color: THEME.warning,
-    lineHeight: 16
-  },
-  aboutFooterText: {
-    fontSize: 12,
-    color: THEME.textSubtle,
-    textAlign: 'center',
-    marginTop: 4,
-    lineHeight: 18
+  bottomTabLabel: { fontSize: 11, fontWeight: '700', marginTop: 3 },
+  tabIconWrap: { width: 36, height: 30, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
+  tabIconWrapFocused: { backgroundColor: THEME.primaryGlow },
+  tabBadgeStyle: {
+    backgroundColor: THEME.primary,
+    color: '#08090D',
+    fontSize: 10,
+    fontWeight: '900',
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9
   }
 });

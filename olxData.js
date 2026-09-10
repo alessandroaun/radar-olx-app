@@ -3,6 +3,13 @@
 // =====================================================================
 
 export const OLX_ESTADOS = {
+  BR: {
+    nome: "Brasil Inteiro (Todas as Regiões)",
+    slug: "brasil",
+    regioes: [
+      { nome: "Todas as Regiões", slug: "" }
+    ]
+  },
   AC: {
     nome: "Acre",
     slug: "estado-ac",
@@ -267,28 +274,38 @@ export const OLX_ESTADOS = {
   }
 };
 
-export const LISTA_ESTADOS = Object.keys(OLX_ESTADOS).map(uf => ({
-  uf,
-  nome: OLX_ESTADOS[uf].nome,
-  slug: OLX_ESTADOS[uf].slug
-})).sort((a, b) => a.nome.localeCompare(b.nome));
+export const LISTA_ESTADOS = [
+  { uf: "BR", nome: "Brasil Inteiro (Todas as Regiões)", slug: "brasil" },
+  ...Object.keys(OLX_ESTADOS)
+    .filter(uf => uf !== "BR")
+    .map(uf => ({
+      uf,
+      nome: OLX_ESTADOS[uf].nome,
+      slug: OLX_ESTADOS[uf].slug
+    }))
+    .sort((a, b) => a.nome.localeCompare(b.nome))
+];
 
 export function gerarUrlOlx(uf, regiaoSlug, termo) {
-  const estado = OLX_ESTADOS[uf];
-  if (!estado) return "https://www.olx.com.br/brasil?sf=1";
-
   let base = "https://www.olx.com.br/";
-  if (uf === "DF") {
-    base += "distrito-federal-e-regiao";
-  } else if (regiaoSlug) {
-    base += `${estado.slug}/${regiaoSlug}`;
+  if (uf === "BR" || uf === "BRASIL") {
+    base += "brasil";
   } else {
-    base += estado.slug;
+    const estado = OLX_ESTADOS[uf];
+    if (!estado) return "https://www.olx.com.br/brasil?sf=1";
+
+    if (uf === "DF") {
+      base += "distrito-federal-e-regiao";
+    } else if (regiaoSlug) {
+      base += `${estado.slug}/${regiaoSlug}`;
+    } else {
+      base += estado.slug;
+    }
   }
 
   const queryParams = ["sf=1"];
   if (termo && termo.trim()) {
-    queryParams.push(`q=${encodeURIComponent(termo.trim())}`);
+    queryParams.push(`q=${encodeURIComponent(termo.trim().toLowerCase())}`);
   }
 
   return `${base}?${queryParams.join("&")}`;
