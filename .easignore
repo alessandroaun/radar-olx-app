@@ -9,21 +9,6 @@ dist/
 web-build/
 expo-env.d.ts
 
-# Firebase & Secret Configs
-google-services.json
-GoogleService-Info.plist
-*firebase-adminsdk*.json
-*-adminsdk-*.json
-service-account*.json
-
-# Environment variables & local configs
-.env
-.env*.local
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
 # Native builds & keystores
 .kotlin/
 *.orig.*

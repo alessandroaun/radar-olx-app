@@ -1,24 +1,55 @@
 {
   "expo": {
-    "name": "radar-olx-app",
+    "name": "AchôAI",
     "slug": "radar-olx-app",
+    "scheme": [
+      "achoai",
+      "radarapp"
+    ],
+    "description": "AchôAI - Monitoramento inteligente de anúncios e notícias relevantes.",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#07090E",
         "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "package": "com.alessandro.radarolx",
+      "versionCode": 1,
+      "permissions": [
+        "RECEIVE_BOOT_COMPLETED",
+        "POST_NOTIFICATIONS",
+        "INTERNET",
+        "VIBRATE"
+      ],
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#FF9500",
+          "defaultChannel": "achoai-alerts"
+        }
+      ],
+      "expo-font",
+      "expo-web-browser"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "a68a6cba-cbc8-482b-968b-f501341bea46"
+      }
+    },
+    "owner": "alessandroaun"
   }
 }
