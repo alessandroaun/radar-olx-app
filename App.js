@@ -74,6 +74,33 @@ class RadarAPI {
     if (error) throw error;
   }
 
+  static async pauseAllMonitors(ownerId = null) {
+    let query = supabase.from('monitores').update({ ativo: false, forcar_teste: false });
+    if (ownerId) {
+      query = query.eq('usuario_id', ownerId);
+    }
+    const { error } = await query;
+    if (error) throw error;
+  }
+
+  static async resumeAllMonitors(ownerId = null) {
+    let query = supabase.from('monitores').update({ ativo: true });
+    if (ownerId) {
+      query = query.eq('usuario_id', ownerId);
+    }
+    const { error } = await query;
+    if (error) throw error;
+  }
+
+  static async stopAllSweeps(ownerId = null) {
+    let query = supabase.from('monitores').update({ forcar_teste: false, ativo: false });
+    if (ownerId) {
+      query = query.eq('usuario_id', ownerId);
+    }
+    const { error } = await query;
+    if (error) throw error;
+  }
+
   static async getLogs(limit = 8, monitorIds = []) {
     try {
       if (!monitorIds || monitorIds.length === 0) return [];
@@ -779,6 +806,97 @@ function RadarProvider({ children }) {
     };
   }, [currentOwnerId, fetchData]);
 
+  const pausarOuRetomarVarreduras = useCallback(async () => {
+    const temAtivos = (monitores || []).some(m => m.ativo);
+    if (temAtivos) {
+      showAlert({
+        title: "Pausar Todas as Varreduras?",
+        message: "O robô deixará de varrer automaticamente as plataformas até que você retome os radares.",
+        type: "warning",
+        icon: "pause-circle",
+        confirmText: "Pausar Tudo",
+        cancelText: "Voltar",
+        showCancel: true,
+        onConfirm: async () => {
+          try {
+            await RadarAPI.pauseAllMonitors(currentOwnerId);
+            setVarrendoMonitorId(null);
+            await fetchData(null, true);
+            showAlert({
+              title: "Varreduras Pausadas",
+              message: "Todos os seus radares foram pausados com sucesso.",
+              type: "success",
+              icon: "checkmark-circle"
+            });
+          } catch (e) {
+            showAlert({
+              title: "Erro",
+              message: "Não foi possível pausar as varreduras.",
+              type: "error"
+            });
+          }
+        }
+      });
+    } else {
+      if ((monitores || []).length === 0) {
+        showAlert({
+          title: "Nenhum Radar",
+          message: "Você ainda não possui nenhum radar cadastrado para retomar.",
+          type: "warning",
+          icon: "alert-circle"
+        });
+        return;
+      }
+      try {
+        await RadarAPI.resumeAllMonitors(currentOwnerId);
+        await fetchData(null, true);
+        showAlert({
+          title: "Varreduras Retomadas",
+          message: "Todos os seus radares foram reativados e o robô voltou a operar normalmente!",
+          type: "success",
+          icon: "play-circle"
+        });
+      } catch (e) {
+        showAlert({
+          title: "Erro",
+          message: "Não foi possível retomar as varreduras.",
+          type: "error"
+        });
+      }
+    }
+  }, [monitores, currentOwnerId, fetchData, showAlert]);
+
+  const pararVarredurasEmergencia = useCallback(async () => {
+    showAlert({
+      title: "Parar Todas as Varreduras?",
+      message: "Isso cancelará imediatamente qualquer varredura em andamento e desativará todos os seus radares ativos para sua segurança.",
+      type: "warning",
+      icon: "stop-circle",
+      confirmText: "Parar Agora",
+      cancelText: "Cancelar",
+      showCancel: true,
+      onConfirm: async () => {
+        try {
+          setVarrendoMonitorId(null);
+          await RadarAPI.stopAllSweeps(currentOwnerId);
+          await fetchData(null, true);
+          showAlert({
+            title: "Operação Interrompida",
+            message: "Todas as varreduras foram canceladas e os radares foram parados com segurança.",
+            type: "success",
+            icon: "shield-checkmark"
+          });
+        } catch (e) {
+          showAlert({
+            title: "Erro",
+            message: "Falha ao interromper as varreduras no servidor.",
+            type: "error"
+          });
+        }
+      }
+    });
+  }, [currentOwnerId, fetchData, showAlert]);
+
   return (
     <RadarContext.Provider value={{ 
       monitores, resultados, atividades, pushToken, setPushToken, deviceId, user, currentOwnerId,
@@ -788,6 +906,7 @@ function RadarProvider({ children }) {
       tier, tierState, trialEligibility, activatingTrial, subscribing,
       sweepCooldownSeconds, dispararVarreduraManual, handleOpenAd,
       antiSpamCooldowns, varrendoMonitorId,
+      pausarOuRetomarVarreduras, pararVarredurasEmergencia,
       openUpgradeModal: () => setFreemiumModalVisible(true),
       closeUpgradeModal: () => setFreemiumModalVisible(false),
       handleActivateTrial, handleSubscribePremium,
@@ -1042,7 +1161,8 @@ function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }
 function DashboardScreen({ navigation }) {
   const { 
     monitores, resultados, atividades, loading, refreshing, onRefresh, fetchData,
-    tier, openUpgradeModal, handleOpenAd, showAlert 
+    tier, openUpgradeModal, handleOpenAd, showAlert,
+    pausarOuRetomarVarreduras, pararVarredurasEmergencia, varrendoMonitorId
   } = useContext(RadarContext);
   const ativos = monitores.filter(m => m.ativo).length;
 
@@ -1196,7 +1316,7 @@ function DashboardScreen({ navigation }) {
                 <Text style={styles.opportunityTitle} numberOfLines={2}>{item.title}</Text>
 
                 <View style={styles.opportunityFooter}>
-                  {item.price !== null ? (
+                  {item.price !== null && Number(item.price) > 0 ? (
                     <View style={styles.priceContainer}>
                       <Text style={styles.pricePrefix}>R$</Text>
                       <Text style={styles.priceNumber}>{Number(item.price).toFixed(2)}</Text>
@@ -1328,6 +1448,63 @@ function DashboardScreen({ navigation }) {
               </View>
             </FrostedOverlay>
           )}
+        </Surface>
+
+        {/* SEÇÃO: CONTROLES DE VARREDURA (PAUSAR / PARAR) */}
+        <SectionHeader 
+          title="Controles de Varredura" 
+          icon="shield-checkmark-outline"
+        />
+
+        <Surface style={styles.emergencyControlsCard}>
+          <View style={styles.emergencyHeaderRow}>
+            <View style={[styles.statusIndicatorDot, { backgroundColor: varrendoMonitorId ? THEME.primary : ativos > 0 ? THEME.success : THEME.warning }]} />
+            <Text style={styles.emergencyStatusText}>
+              {varrendoMonitorId 
+                ? 'Varredura em andamento pelo robô...' 
+                : ativos > 0 
+                  ? `${ativos} radar${ativos > 1 ? 'es' : ''} operando normalmente` 
+                  : 'Todas as varreduras estão pausadas'}
+            </Text>
+          </View>
+          <Text style={styles.emergencyCardDesc}>
+            Controle a atividade do robô instantaneamente. Você pode pausar temporariamente as buscas programadas ou interromper qualquer varredura com segurança.
+          </Text>
+
+          <View style={styles.emergencyButtonsRow}>
+            <TouchableOpacity 
+              style={[
+                styles.btnEmergencyAction, 
+                ativos > 0 ? styles.btnPauseMode : styles.btnResumeMode
+              ]}
+              onPress={pausarOuRetomarVarreduras}
+              activeOpacity={0.8}
+            >
+              <Ionicons 
+                name={ativos > 0 ? "pause-circle" : "play-circle"} 
+                size={18} 
+                color={ativos > 0 ? "#F59E0B" : THEME.primary} 
+                style={{ marginRight: 6 }} 
+              />
+              <Text style={[
+                styles.btnEmergencyText, 
+                { color: ativos > 0 ? "#F59E0B" : THEME.primary }
+              ]}>
+                {ativos > 0 ? "Pausar" : "Retomar"}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.btnEmergencyAction, styles.btnStopMode]}
+              onPress={pararVarredurasEmergencia}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="stop-circle" size={18} color="#EF4444" style={{ marginRight: 6 }} />
+              <Text style={[styles.btnEmergencyText, { color: '#EF4444' }]}>
+                Parar
+              </Text>
+            </TouchableOpacity>
+          </View>
         </Surface>
 
         <View style={{ height: 80 }} />
@@ -1781,7 +1958,7 @@ function AlertsScreen({ navigation }) {
                     <View style={styles.alertPriceRow}>
                       <View>
                         <Text style={styles.alertPriceLabel}>VALOR CAPTURADO</Text>
-                        {res.price !== null ? (
+                        {res.price !== null && Number(res.price) > 0 ? (
                           <Text style={[styles.alertPriceValue, tier === TIERS.FREE && styles.blurredPrice]}>
                             R$ {Number(res.price).toFixed(2)}
                           </Text>
@@ -3506,6 +3683,71 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
     color: '#08090D'
+  },
+
+  // Controles de Varredura (Home Emergency Controls)
+  emergencyControlsCard: {
+    padding: 16,
+    borderRadius: THEME.radius.lg,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder,
+    backgroundColor: THEME.cardBg,
+    marginTop: 4,
+    marginBottom: 8
+  },
+  emergencyHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6
+  },
+  statusIndicatorDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8
+  },
+  emergencyStatusText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: THEME.text
+  },
+  emergencyCardDesc: {
+    fontSize: 12,
+    color: THEME.textSubtle,
+    lineHeight: 17,
+    marginBottom: 14
+  },
+  emergencyButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10
+  },
+  btnEmergencyAction: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: THEME.radius.md,
+    borderWidth: 1
+  },
+  btnPauseMode: {
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderColor: 'rgba(245, 158, 11, 0.35)'
+  },
+  btnResumeMode: {
+    backgroundColor: THEME.primaryGlow,
+    borderColor: THEME.primary
+  },
+  btnStopMode: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderColor: 'rgba(239, 68, 68, 0.4)'
+  },
+  btnEmergencyText: {
+    fontSize: 13,
+    fontWeight: '700'
   },
 
   // Frosted Glass Overlays (Aba Alertas Completa)
