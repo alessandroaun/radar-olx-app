@@ -47,12 +47,12 @@ export const THEME = {
       border: 'rgba(245, 158, 11, 0.35)',
       icon: 'search-outline'
     },
-    BUSCAPE: {
-      nome: 'Buscapé',
-      color: '#10B981',        // Verde esmeralda
-      bg: 'rgba(16, 185, 129, 0.12)',
-      border: 'rgba(16, 185, 129, 0.35)',
-      icon: 'pricetag-outline'
+    FACEBOOK: {
+      nome: 'Facebook',
+      color: '#1877F2',        // Azul Facebook
+      bg: 'rgba(24, 119, 242, 0.12)',
+      border: 'rgba(24, 119, 242, 0.35)',
+      icon: 'logo-facebook'
     },
     OUTROS: {
       nome: 'Web & Notícias',

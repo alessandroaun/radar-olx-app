@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { BlurView } from 'expo-blur';
 
 import { supabase, supabaseAuth } from './supabase'; 
 import { setupNotifications, registerPushToken, testLocalNotification, subscribeNotificationEvents, checkIsExpoGo } from './notificationService';
@@ -20,8 +21,15 @@ import { getOrCreateDeviceId, registerDeviceInSupabase, migrateDeviceMonitorsToA
 import { THEME } from './theme';
 import { 
   Surface, PrimaryButton, IconButton, StatusBadge, PlatformBadge, 
-  StrategyBadge, SectionHeader, MetricBox 
+  StrategyBadge, SectionHeader, MetricBox, TierBadge 
 } from './components';
+import { TierService, TIERS, TIER_LIMITS } from './tierService';
+import { 
+  LockOverlay, LockBadge, FreemiumModal, CelebrationModal, 
+  TrialExpiredModal, RenewalModal, AdDetailModal 
+} from './FreemiumModals';
+import { CustomAlertModal } from './CustomAlertModal';
+
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -109,6 +117,68 @@ function RadarProvider({ children }) {
   const [refreshing, setRefreshing] = useState(false);
   const [notificacoesAtivas, setNotificacoesAtivas] = useState(true);
 
+  // Freemium States
+  const [tierState, setTierState] = useState({
+    tier: TIERS.FREE,
+    expiresAt: null,
+    trialUsed: false
+  });
+  const [trialEligibility, setTrialEligibility] = useState({ canActivate: true });
+  const [activatingTrial, setActivatingTrial] = useState(false);
+  const [subscribing, setSubscribing] = useState(false);
+  const [freemiumModalVisible, setFreemiumModalVisible] = useState(false);
+  const [celebrationModalVisible, setCelebrationModalVisible] = useState(false);
+  const [trialExpiredModalVisible, setTrialExpiredModalVisible] = useState(false);
+  const [renewalModalVisible, setRenewalModalVisible] = useState(false);
+  const [remainingRenewalDays, setRemainingRenewalDays] = useState(5);
+  const [adDetailModalVisible, setAdDetailModalVisible] = useState(false);
+  const [selectedAdItem, setSelectedAdItem] = useState(null);
+  const [sweepCooldownSeconds, setSweepCooldownSeconds] = useState(0);
+  const [antiSpamCooldowns, setAntiSpamCooldowns] = useState({});
+  const [varrendoMonitorId, setVarrendoMonitorId] = useState(null);
+
+  const [alertConfig, setAlertConfig] = useState({
+    visible: false,
+    title: '',
+    message: '',
+    type: 'info',
+    icon: null,
+    confirmText: 'Entendido',
+    cancelText: 'Cancelar',
+    onConfirm: null,
+    onCancel: null,
+    showCancel: false
+  });
+
+  const showAlert = useCallback(({
+    title,
+    message,
+    type = 'info',
+    icon = null,
+    confirmText = 'Entendido',
+    cancelText = 'Cancelar',
+    onConfirm = null,
+    onCancel = null,
+    showCancel = false
+  }) => {
+    setAlertConfig({
+      visible: true,
+      title: title || '',
+      message: message || '',
+      type,
+      icon,
+      confirmText,
+      cancelText,
+      onConfirm,
+      onCancel,
+      showCancel: showCancel || type === 'confirm_danger' || type === 'confirm_warning'
+    });
+  }, []);
+
+  const hideAlert = useCallback(() => {
+    setAlertConfig(prev => ({ ...prev, visible: false }));
+  }, []);
+
   const deviceIdRef = useRef(deviceId);
   deviceIdRef.current = deviceId;
   const pushTokenRef = useRef(pushToken);
@@ -120,10 +190,16 @@ function RadarProvider({ children }) {
   const hasLoadedRef = useRef(false);
   const lastResultsCountRef = useRef(0);
 
-  const currentOwnerId = user?.id || deviceId;
+  const tier = tierState.tier;
+  const tierRef = useRef(tier);
+  tierRef.current = tier;
+
+  // Se o usuário for Free, mesmo conectado as informações ficam limitadas apenas ao aparelho (deviceId)
+  // Se for Premium ou Admin, a conta Google recebe a assinatura e sincroniza entre múltiplos aparelhos (user.id || deviceId)
+  const currentOwnerId = (tier === TIERS.FREE) ? deviceId : (user?.id || deviceId);
 
   const fetchData = useCallback(async (targetOwnerId = null, silent = false) => {
-    const ownerId = targetOwnerId || userRef.current?.id || deviceIdRef.current;
+    const ownerId = targetOwnerId || ((tierRef.current === TIERS.FREE) ? deviceIdRef.current : (userRef.current?.id || deviceIdRef.current));
     if (!ownerId) return;
     try {
       if (!silent && !hasLoadedRef.current) {
@@ -156,10 +232,49 @@ function RadarProvider({ children }) {
     }
   }, []);
 
+  const refreshTierState = useCallback(async (devId = null, authUser = null) => {
+    const currentDev = devId || deviceIdRef.current;
+    const currentUser = authUser || userRef.current;
+    if (!currentDev) return;
+
+    const state = await TierService.getTierState(currentDev, currentUser);
+    setTierState(state);
+
+    const eligibility = await TierService.canActivateTrial(currentDev, currentUser, pushTokenRef.current);
+    setTrialEligibility(eligibility);
+
+    // Se acabou de expirar, aciona modal e pausa radares excedentes (> 1)
+    if (state.justExpired) {
+      setTrialExpiredModalVisible(true);
+      try {
+        const dadosMonitores = await RadarAPI.getMonitors(currentDev);
+        const { monitoresToPause } = TierService.pruneExcessRadars(dadosMonitores, TIERS.FREE);
+        for (const m of monitoresToPause) {
+          await RadarAPI.updateMonitor(m.id, { ativo: false });
+        }
+      } catch (e) {}
+      fetchData(currentDev, true);
+    }
+
+    // Se estiver no plano Premium e faltar <= 5 dias para expirar, mostra aviso de renovação
+    if (state.tier === TIERS.PREMIUM && state.expiresAt) {
+      const rem = TierService.getRemainingTime(state.expiresAt);
+      if (rem && rem.isExpiringSoon && rem.days <= 5) {
+        setRemainingRenewalDays(rem.days);
+        const renewalShown = await AsyncStorage.getItem('@radar_renewal_modal_shown_session');
+        if (!renewalShown) {
+          setRenewalModalVisible(true);
+          await AsyncStorage.setItem('@radar_renewal_modal_shown_session', 'true');
+        }
+      }
+    }
+  }, [fetchData]);
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     fetchData(null, true);
-  }, [fetchData]);
+    refreshTierState();
+  }, [fetchData, refreshTierState]);
 
   const alternarNotificacoes = useCallback(async (novoValor) => {
     setNotificacoesAtivas(novoValor);
@@ -169,7 +284,11 @@ function RadarProvider({ children }) {
       setPushToken(null);
       pushTokenRef.current = null;
       if (currentDevId) {
-        await supabase.from('usuarios').update({ expo_push_token: null }).eq('id', currentDevId);
+        await supabase.from('usuarios').update({ 
+          expo_push_token: null,
+          notificacoes_ativas: false,
+          updated_at: new Date().toISOString()
+        }).eq('id', currentDevId);
       }
     } else {
       if (currentDevId) {
@@ -177,10 +296,19 @@ function RadarProvider({ children }) {
         if (token) {
           setPushToken(token);
           pushTokenRef.current = token;
+          await supabase.from('usuarios').update({
+            expo_push_token: token,
+            notificacoes_ativas: true,
+            updated_at: new Date().toISOString()
+          }).eq('id', currentDevId);
         }
       }
     }
-  }, []);
+    // Revalida elegibilidade de trial caso tenha sido alterado
+    if (currentDevId) {
+      refreshTierState(currentDevId, userRef.current);
+    }
+  }, [refreshTierState]);
 
   const linkAccount = useCallback(async (authUser) => {
     if (!authUser) return;
@@ -192,28 +320,33 @@ function RadarProvider({ children }) {
       const currentDevId = deviceIdRef.current;
       const currentToken = pushTokenRef.current;
 
-      if (currentDevId) {
+      // Atualiza o estado de tier para ver se esta conta possui plano Premium
+      await refreshTierState(currentDevId, authUser);
+
+      // Se o usuário for Premium ou Admin, migra os radares para a conta Google sincronizar
+      if (currentDevId && (tierRef.current === TIERS.PREMIUM || tierRef.current === TIERS.ADMIN)) {
         await migrateDeviceMonitorsToAccount(currentDevId, authUser.id, currentToken);
+      } else if (currentDevId) {
+        await registerDeviceInSupabase(currentDevId, currentToken, authUser.id);
       }
-      await fetchData(authUser.id);
+
+      await fetchData(null);
     } catch (e) {
-      console.log("[Radar] Erro ao vincular conta e migrar radares:", e);
+      console.log("[Radar] Erro ao vincular conta Google:", e);
     } finally {
       setLoading(false);
     }
-  }, [fetchData]);
+  }, [fetchData, refreshTierState]);
 
   const logoutUser = useCallback(async () => {
     try {
       setLoading(true);
-      const oldDevId = deviceIdRef.current;
-      const currentToken = pushTokenRef.current;
+      const currentDevId = deviceIdRef.current;
 
       await supabaseAuth.auth.signOut();
 
-      const newDevId = await resetDeviceOnLogout(oldDevId, currentToken);
-      setDeviceId(newDevId);
-      deviceIdRef.current = newDevId;
+      // Desvincula o aparelho no Supabase mantendo o mesmo deviceId!
+      await resetDeviceOnLogout(currentDevId);
 
       setUser(null);
       userRef.current = null;
@@ -223,13 +356,265 @@ function RadarProvider({ children }) {
       setAtividades([]);
       hasLoadedRef.current = false;
 
-      await fetchData(newDevId);
+      // Ao deslogar, usuário volta a ser Free estrito neste aparelho
+      await refreshTierState(currentDevId, null);
+      await fetchData(currentDevId);
     } catch (e) {
       console.log("[Radar] Erro ao efetuar logout:", e);
     } finally {
       setLoading(false);
     }
-  }, [fetchData]);
+  }, [fetchData, refreshTierState]);
+
+  // Disparo manual do botão "Varrer" com verificação de cooldown e polling até conclusão
+  const dispararVarreduraManual = useCallback(async (monitorId) => {
+    if (!monitorId) return false;
+
+    // 1. Evita duplo acionamento concorrente no mesmo radar
+    if (varrendoMonitorId === monitorId) {
+      return false;
+    }
+
+    // 2. Proteção Anti-Spam: delay de 120 segundos no mesmo card
+    const expCooldown = antiSpamCooldowns[monitorId];
+    if (expCooldown && expCooldown > Date.now()) {
+      const restSec = Math.ceil((expCooldown - Date.now()) / 1000);
+      showAlert({
+        title: "Proteção Anti-Spam",
+        message: `Aguarde mais ${restSec} segundos para varrer este mesmo radar novamente e evitar sobrecarga do servidor.`,
+        type: "warning",
+        icon: "time-outline"
+      });
+      return false;
+    }
+
+    // 3. Checa limite de cooldown de 60 minutos do Plano Free
+    if (tierRef.current === TIERS.FREE) {
+      const cooldown = await TierService.getSweepCooldown(TIERS.FREE);
+      if (cooldown > 0) {
+        const min = Math.floor(cooldown / 60);
+        const sec = cooldown % 60;
+        showAlert({
+          title: "Limite do Plano Free",
+          message: `No plano Free, o robô pode ser acionado manualmente 1 vez a cada 60 minutos.\n\nAguarde ${min > 0 ? `${min}m ` : ''}${sec}s ou faça upgrade para o AchôAI Premium para varrer quantas vezes quiser sem tempo de espera!`,
+          type: "warning",
+          icon: "lock-closed",
+          confirmText: "Ver Planos",
+          cancelText: "Aguardar",
+          showCancel: true,
+          onConfirm: () => setFreemiumModalVisible(true)
+        });
+        return false;
+      }
+    }
+
+    try {
+      setVarrendoMonitorId(monitorId);
+      await RadarAPI.testMonitor(monitorId);
+
+      // Polling aguardando o worker processar a varredura (forcar_teste volta a ser false)
+      let finalizado = false;
+      let tentativas = 0;
+      while (!finalizado && tentativas < 20) {
+        await new Promise(r => setTimeout(r, 1500));
+        tentativas++;
+        try {
+          const { data } = await supabase.from('monitores').select('forcar_teste').eq('id', monitorId).single();
+          if (data && data.forcar_teste === false) {
+            finalizado = true;
+          }
+        } catch (pollErr) {}
+      }
+
+      // Aplica o cooldown de 120 segundos para este radar específico
+      const novoExp = Date.now() + 120 * 1000;
+      setAntiSpamCooldowns(prev => {
+        const updated = { ...prev, [monitorId]: novoExp };
+        AsyncStorage.setItem('@achoai_antispam_cooldowns', JSON.stringify(updated)).catch(() => {});
+        return updated;
+      });
+
+      if (tierRef.current === TIERS.FREE) {
+        await TierService.recordSweep();
+        setSweepCooldownSeconds(3600);
+      }
+
+      // Recarrega todos os dados atualizados com novas ofertas e logs silenciosamente
+      await fetchData(null, true);
+
+      // Modal de varredura concluída removido permanentemente conforme solicitado
+      return true;
+    } catch (e) {
+      showAlert({
+        title: "Erro na Varredura",
+        message: "Falha ao processar comando de varredura nos servidores.",
+        type: "error"
+      });
+      return false;
+    } finally {
+      setVarrendoMonitorId(null);
+    }
+  }, [varrendoMonitorId, antiSpamCooldowns, fetchData, showAlert]);
+
+  // Abertura de ofertas: Free abre dentro do app com cadeado; Premium abre link externo direto
+  const handleOpenAd = useCallback((item) => {
+    if (!item) return;
+    if (tierRef.current === TIERS.FREE) {
+      setSelectedAdItem(item);
+      setAdDetailModalVisible(true);
+    } else {
+      if (item.url) {
+        Linking.openURL(item.url).catch(() => showAlert({
+          title: "Aviso",
+          message: "Não foi possível abrir o link da oferta.",
+          type: "error"
+        }));
+      }
+    }
+  }, [showAlert]);
+
+  // Ativação do teste grátis de 2 dias (Premium Lite)
+  const handleActivateTrial = useCallback(async () => {
+    try {
+      const devId = deviceIdRef.current;
+      const authUser = userRef.current;
+      const token = pushTokenRef.current;
+
+      if (!authUser) {
+        showAlert({
+          title: "Conectar Conta Google",
+          message: "Para ativar seu teste grátis de 2 dias (Premium Lite), é necessário conectar sua conta Google primeiro.",
+          type: "warning",
+          confirmText: "Ir para Configurações",
+          cancelText: "Cancelar",
+          showCancel: true,
+          onConfirm: () => setFreemiumModalVisible(false)
+        });
+        return;
+      }
+
+      if (!token) {
+        showAlert({
+          title: "Ativar Notificações",
+          message: "Para ativar o teste de 2 dias (Premium Lite), é obrigatório estar com as notificações ativadas no seu celular.",
+          type: "warning",
+          icon: "notifications-outline"
+        });
+        return;
+      }
+
+      setActivatingTrial(true);
+      const res = await TierService.activateTrial(devId, authUser, token);
+
+      if (res.success) {
+        await refreshTierState(devId, authUser);
+        setFreemiumModalVisible(false);
+        showAlert({
+          title: "Teste Grátis Ativado!",
+          message: "Você agora tem acesso completo a todas as funções do AchôAI Premium durante 48 horas (2 dias)!",
+          type: "success",
+          icon: "sparkles"
+        });
+        fetchData(null, true);
+      } else {
+        showAlert({
+          title: "Aviso",
+          message: res.message || "Não foi possível ativar o teste grátis.",
+          type: "warning"
+        });
+      }
+    } catch (e) {
+      showAlert({
+        title: "Erro",
+        message: "Falha ao ativar teste de 2 dias.",
+        type: "error"
+      });
+    } finally {
+      setActivatingTrial(false);
+    }
+  }, [refreshTierState, fetchData, showAlert]);
+
+  // Assinatura do plano Premium por 30 dias (R$ 39,90/mês)
+  const handleSubscribePremium = useCallback(async () => {
+    try {
+      const devId = deviceIdRef.current;
+      const authUser = userRef.current;
+
+      if (!authUser) {
+        showAlert({
+          title: "Conectar Conta Google",
+          message: "Para assinar o plano Premium (R$ 39,90/mês), é necessário conectar sua conta Google para associar sua assinatura.",
+          type: "warning",
+          confirmText: "Ir para Configurações",
+          cancelText: "Cancelar",
+          showCancel: true,
+          onConfirm: () => setFreemiumModalVisible(false)
+        });
+        return;
+      }
+
+      setSubscribing(true);
+
+      // Simula checkout seguro via Google Play Billing
+      await new Promise(resolve => setTimeout(resolve, 1600));
+
+      const res = await TierService.simulateSubscribePremium(devId, authUser);
+      if (res.success) {
+        await refreshTierState(devId, authUser);
+        setFreemiumModalVisible(false);
+        setCelebrationModalVisible(true);
+
+        if (authUser && devId) {
+          await migrateDeviceMonitorsToAccount(devId, authUser.id, pushTokenRef.current);
+        }
+        fetchData(null, true);
+      } else {
+        showAlert({
+          title: "Aviso",
+          message: res.message || "Não foi possível processar a assinatura.",
+          type: "warning"
+        });
+      }
+    } catch (e) {
+      showAlert({
+        title: "Erro",
+        message: "Falha ao processar assinatura.",
+        type: "error"
+      });
+    } finally {
+      setSubscribing(false);
+    }
+  }, [refreshTierState, fetchData, showAlert]);
+
+  // Atualização em tempo real do cooldown de 60 min no Free
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      if (tierRef.current === TIERS.FREE) {
+        const rem = await TierService.getSweepCooldown(TIERS.FREE);
+        setSweepCooldownSeconds(rem);
+      } else {
+        setSweepCooldownSeconds(0);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Carrega cooldowns anti-spam de 120s persistidos no cache
+  useEffect(() => {
+    AsyncStorage.getItem('@achoai_antispam_cooldowns').then(cached => {
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          const now = Date.now();
+          const clean = {};
+          for (const [id, exp] of Object.entries(parsed)) {
+            if (exp > now) clean[id] = exp;
+          }
+          setAntiSpamCooldowns(clean);
+        } catch (e) {}
+      }
+    });
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -249,22 +634,16 @@ function RadarProvider({ children }) {
         userRef.current = currentUser;
       }
 
-      await registerDeviceInSupabase(devId, null, currentUser?.id);
-
-      if (currentUser) {
-        await migrateDeviceMonitorsToAccount(devId, currentUser.id, null);
-      }
-
-      fetchData(currentUser?.id || devId);
-
       const savedNotif = await AsyncStorage.getItem('@radar_notificacoes_ativas');
       const isNotifActive = savedNotif !== null ? savedNotif === 'true' : true;
       if (mounted) setNotificacoesAtivas(isNotifActive);
 
+      let currentToken = null;
       if (isNotifActive) {
         try {
           const token = await registerPushToken(devId, currentUser?.id);
           if (token && mounted) {
+            currentToken = token;
             setPushToken(token);
             pushTokenRef.current = token;
           }
@@ -275,6 +654,15 @@ function RadarProvider({ children }) {
         setPushToken(null);
         pushTokenRef.current = null;
       }
+
+      await registerDeviceInSupabase(devId, currentToken, currentUser?.id, isNotifActive);
+      await refreshTierState(devId, currentUser);
+
+      if (currentUser && (tierRef.current === TIERS.PREMIUM || tierRef.current === TIERS.ADMIN)) {
+        await migrateDeviceMonitorsToAccount(devId, currentUser.id, currentToken);
+      }
+
+      fetchData(null);
     }
 
     init();
@@ -287,8 +675,11 @@ function RadarProvider({ children }) {
       if (event === 'SIGNED_IN' && authUser && currentDevId) {
         setUser(authUser);
         userRef.current = authUser;
-        await migrateDeviceMonitorsToAccount(currentDevId, authUser.id, currentToken);
-        fetchData(authUser.id);
+        await refreshTierState(currentDevId, authUser);
+        if (tierRef.current === TIERS.PREMIUM || tierRef.current === TIERS.ADMIN) {
+          await migrateDeviceMonitorsToAccount(currentDevId, authUser.id, currentToken);
+        }
+        fetchData(null);
       } else if (event === 'SIGNED_OUT') {
         setUser(null);
         userRef.current = null;
@@ -302,8 +693,20 @@ function RadarProvider({ children }) {
       () => { fetchData(null, true); },
       (response) => {
         const data = response?.notification?.request?.content?.data;
+        const title = response?.notification?.request?.content?.title;
         if (data?.url) {
-          Linking.openURL(data.url).catch(() => {});
+          if (tierRef.current === TIERS.FREE) {
+            setSelectedAdItem({
+              id: `notif_${Date.now()}`,
+              title: title || 'Oferta Detectada pelo Robô',
+              price: null,
+              url: data.url,
+              created_at: new Date().toISOString()
+            });
+            setAdDetailModalVisible(true);
+          } else {
+            Linking.openURL(data.url).catch(() => {});
+          }
         }
       }
     );
@@ -313,7 +716,7 @@ function RadarProvider({ children }) {
       subscription?.unsubscribe();
       if (unsubscribeEvents) unsubscribeEvents();
     };
-  }, [fetchData]);
+  }, [fetchData, refreshTierState]);
 
   // Realtime Supabase
   useEffect(() => {
@@ -344,7 +747,6 @@ function RadarProvider({ children }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'resultados' }, (payload) => {
         if (payload?.eventType === 'INSERT' && payload.new) {
           const currentMonitorIds = (monitoresRef.current || []).map(m => m.id);
-          // ISOLAMENTO RIGOROSO: Só processa se o resultado pertencer a um monitor deste usuário
           if (payload.new.monitor_id && currentMonitorIds.includes(payload.new.monitor_id)) {
             setResultados(prev => {
               if (prev.some(r => r.id === payload.new.id)) return prev;
@@ -360,7 +762,6 @@ function RadarProvider({ children }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'logs' }, (payload) => {
         if (payload?.eventType === 'INSERT' && payload.new) {
           const currentMonitorIds = (monitoresRef.current || []).map(m => m.id);
-          // ISOLAMENTO RIGOROSO: Só processa se o log pertencer a um monitor deste usuário
           if (payload.new.monitor_id && currentMonitorIds.includes(payload.new.monitor_id)) {
             setAtividades(prev => {
               if (prev.some(l => l.id === payload.new.id)) return prev;
@@ -382,12 +783,78 @@ function RadarProvider({ children }) {
     <RadarContext.Provider value={{ 
       monitores, resultados, atividades, pushToken, setPushToken, deviceId, user, currentOwnerId,
       notificacoesAtivas, alternarNotificacoes,
-      loading, refreshing, onRefresh, fetchData, linkAccount, logoutUser 
+      loading, refreshing, onRefresh, fetchData, linkAccount, logoutUser,
+      // Freemium context
+      tier, tierState, trialEligibility, activatingTrial, subscribing,
+      sweepCooldownSeconds, dispararVarreduraManual, handleOpenAd,
+      antiSpamCooldowns, varrendoMonitorId,
+      openUpgradeModal: () => setFreemiumModalVisible(true),
+      closeUpgradeModal: () => setFreemiumModalVisible(false),
+      handleActivateTrial, handleSubscribePremium,
+      refreshTierState,
+      showAlert, hideAlert
     }}>
       {children}
+      <FreemiumModal 
+        visible={freemiumModalVisible}
+        onClose={() => setFreemiumModalVisible(false)}
+        onActivateTrial={handleActivateTrial}
+        onSubscribe={handleSubscribePremium}
+        trialEligibility={trialEligibility}
+        activatingTrial={activatingTrial}
+        subscribing={subscribing}
+      />
+      <CelebrationModal 
+        visible={celebrationModalVisible}
+        onClose={() => setCelebrationModalVisible(false)}
+        durationDays={30}
+      />
+      <TrialExpiredModal 
+        visible={trialExpiredModalVisible}
+        onSubscribe={() => {
+          setTrialExpiredModalVisible(false);
+          handleSubscribePremium();
+        }}
+        onContinueFree={() => setTrialExpiredModalVisible(false)}
+      />
+      <RenewalModal 
+        visible={renewalModalVisible}
+        remainingDays={remainingRenewalDays}
+        onRenew={() => {
+          setRenewalModalVisible(false);
+          handleSubscribePremium();
+        }}
+        onDismiss={() => setRenewalModalVisible(false)}
+      />
+      <AdDetailModal 
+        visible={adDetailModalVisible}
+        item={selectedAdItem}
+        onClose={() => {
+          setAdDetailModalVisible(false);
+          setSelectedAdItem(null);
+        }}
+        onUnlock={() => {
+          setAdDetailModalVisible(false);
+          setFreemiumModalVisible(true);
+        }}
+      />
+      <CustomAlertModal 
+        visible={alertConfig.visible}
+        title={alertConfig.title}
+        message={alertConfig.message}
+        type={alertConfig.type}
+        icon={alertConfig.icon}
+        confirmText={alertConfig.confirmText}
+        cancelText={alertConfig.cancelText}
+        onConfirm={alertConfig.onConfirm}
+        onCancel={alertConfig.onCancel}
+        showCancel={alertConfig.showCancel}
+        onClose={hideAlert}
+      />
     </RadarContext.Provider>
   );
 }
+
 
 // =====================================================================
 // 3. AUXILIARES E COMPONENTES DE ESTRATÉGIA
@@ -395,10 +862,28 @@ function RadarProvider({ children }) {
 
 function identificarPlataforma(url) {
   const u = (url || '').toLowerCase();
+  if (u.includes('facebook.com')) return 'FACEBOOK';
   if (u.includes('zoom.com.br')) return 'ZOOM';
-  if (u.includes('buscape.com.br')) return 'BUSCAPE';
   if (u.includes('olx.com.br')) return 'OLX';
   return 'OUTROS';
+}
+
+function normalizarSlugCidade(texto) {
+  if (!texto) return 'fortaleza';
+  return texto
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function extrairCidadeFacebook(url) {
+  if (!url) return 'fortaleza';
+  const match = url.match(/marketplace\/([^\/\?]+)/);
+  if (match && match[1] && !['search', 'item', 'category'].includes(match[1])) {
+    return match[1];
+  }
+  return 'fortaleza';
 }
 
 function identificarEstrategia(m) {
@@ -411,7 +896,7 @@ function identificarEstrategia(m) {
 }
 
 function extrairInfoOlx(url) {
-  let ufEncontrada = 'CE';
+  let ufEncontrada = 'BR';
   let regiaoEncontrada = '';
   if (!url) return { uf: ufEncontrada, regiaoSlug: regiaoEncontrada };
 
@@ -462,6 +947,22 @@ function calcularSegundosProximaVarredura(monitores, now) {
   }
   if (menorDiff === Infinity) return null;
   return menorDiff <= 0 ? 0 : menorDiff;
+}
+
+// Componente de Vidro Fosco Cross-Platform (sem fallback de caixa cinza opaca no Android)
+function FrostedOverlay({ style, children }) {
+  if (Platform.OS === 'ios') {
+    return (
+      <BlurView intensity={50} tint="dark" style={style}>
+        {children}
+      </BlurView>
+    );
+  }
+  return (
+    <View style={style}>
+      {children}
+    </View>
+  );
 }
 
 // Modal seletor moderno para Estado e Região
@@ -539,7 +1040,10 @@ function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }
 
 // --- TELA 1: HOME / DASHBOARD (VISÃO GERAL OPERACIONAL) ---
 function DashboardScreen({ navigation }) {
-  const { monitores, resultados, atividades, loading, refreshing, onRefresh, fetchData } = useContext(RadarContext);
+  const { 
+    monitores, resultados, atividades, loading, refreshing, onRefresh, fetchData,
+    tier, openUpgradeModal, handleOpenAd, showAlert 
+  } = useContext(RadarContext);
   const ativos = monitores.filter(m => m.ativo).length;
 
   const [now, setNow] = useState(Date.now());
@@ -561,11 +1065,28 @@ function DashboardScreen({ navigation }) {
     return `${segProx}s`;
   }, [segProx]);
 
+  const handleNovoRadarPress = () => {
+    if (tier === TIERS.FREE && monitores.length >= 1) {
+      showAlert({
+        title: "Limite do Plano Free",
+        message: "Usuários do plano Free podem criar até 1 radar por vez. Desbloqueie até 5 radares simultâneos e varreduras ultra rápidas assinando o AchôAI Premium!",
+        type: "warning",
+        icon: "lock-closed",
+        confirmText: "Conhecer Premium",
+        cancelText: "Entendi",
+        showCancel: true,
+        onConfirm: openUpgradeModal
+      });
+    } else {
+      navigation.navigate('Criar');
+    }
+  };
+
   return (
     <View style={styles.screen}>
       <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
       
-      {/* BRAND BAR SUPERIOR COM LOGO 3D REAL (TRANSPARENTE) */}
+      {/* BRAND BAR SUPERIOR COM LOGO 3D REAL, STATUS E TIER BADGE */}
       <View style={styles.brandHeader}>
         <View style={styles.brandGroup}>
           <Image 
@@ -574,7 +1095,12 @@ function DashboardScreen({ navigation }) {
             resizeMode="contain" 
           />
           <View style={styles.brandTextGroup}>
-            <Text style={styles.brandName}>AchôAI</Text>
+            <View style={styles.row}>
+              <Text style={styles.brandName}>AchôAI</Text>
+              <View style={{ marginLeft: 8 }}>
+                <TierBadge tier={tier} onPress={openUpgradeModal} size="sm" />
+              </View>
+            </View>
             <View style={styles.livePulseRow}>
               <View style={styles.livePulseDot} />
               <Text style={styles.livePulseText}>Robô Online</Text>
@@ -584,7 +1110,7 @@ function DashboardScreen({ navigation }) {
 
         <TouchableOpacity 
           style={styles.btnHeaderAction}
-          onPress={() => navigation.navigate('Criar')}
+          onPress={handleNovoRadarPress}
           activeOpacity={0.8}
         >
           <Ionicons name="add" size={17} color="#08090D" style={{ marginRight: 2 }} />
@@ -602,8 +1128,8 @@ function DashboardScreen({ navigation }) {
           <MetricBox 
             icon="pulse"
             value={ativos}
-            label="Radares Ativos"
-            sublabel="Em monitoramento"
+            label="Radares"
+            sublabel="Monitorando"
             color={THEME.primary}
             bg={THEME.primaryGlow}
           />
@@ -611,18 +1137,30 @@ function DashboardScreen({ navigation }) {
             icon="pricetag"
             value={resultados.length}
             label="Oportunidades"
-            sublabel="Itens capturados"
+            sublabel="Capturadas"
             color={THEME.success}
             bg={THEME.successBg}
           />
-          <MetricBox 
-            icon="timer-outline"
-            value={segProxFormatado}
-            label="Próxima Busca"
-            sublabel="Ciclo do robô"
-            color={THEME.info}
-            bg={THEME.infoBg}
-          />
+          {tier === TIERS.FREE ? (
+            <MetricBox 
+              icon="lock-closed"
+              value="3 Horas"
+              label="Próxima Busca"
+              sublabel="Upgrade ⚡"
+              color={THEME.primary}
+              bg={THEME.primaryGlow}
+              onPress={openUpgradeModal}
+            />
+          ) : (
+            <MetricBox 
+              icon="timer-outline"
+              value={segProxFormatado}
+              label="Próxima Busca"
+              sublabel="Ciclo do Robô"
+              color={THEME.info}
+              bg={THEME.infoBg}
+            />
+          )}
         </View>
 
         {/* SEÇÃO: ÚLTIMAS OPORTUNIDADES */}
@@ -669,11 +1207,19 @@ function DashboardScreen({ navigation }) {
 
                   <TouchableOpacity 
                     style={styles.btnOpenOffer}
-                    onPress={() => Linking.openURL(item.url).catch(() => Alert.alert("Erro", "Não foi possível abrir o link."))}
+                    onPress={() => {
+                      if (item.url) {
+                        Linking.openURL(item.url).catch(() => showAlert({
+                          title: "Erro",
+                          message: "Não foi possível abrir o link da oferta.",
+                          type: "error"
+                        }));
+                      }
+                    }}
                     activeOpacity={0.8}
                   >
                     <Text style={styles.btnOpenOfferText}>
-                      {plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'BUSCAPE' ? 'Ver no Buscapé' : plat === 'OLX' ? 'Ver na OLX' : 'Abrir Oferta'}
+                      {plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'FACEBOOK' ? 'Ver no Facebook' : plat === 'OLX' ? 'Ver na OLX' : 'Ver Oferta'}
                     </Text>
                     <Ionicons name="arrow-forward" size={13} color={THEME.primary} style={{ marginLeft: 5 }} />
                   </TouchableOpacity>
@@ -689,34 +1235,98 @@ function DashboardScreen({ navigation }) {
           icon="hardware-chip-outline"
         />
 
-        <Surface style={styles.telemetryCard}>
-          {loading && atividades.length === 0 ? (
-            <ActivityIndicator size="small" color={THEME.primary} style={{ padding: 25 }} />
-          ) : atividades.length === 0 ? (
-            <View style={styles.telemetryEmpty}>
-              <Ionicons name="time-outline" size={22} color={THEME.textSubtle} style={{ marginBottom: 6 }} />
-              <Text style={styles.emptyCardSub}>Aguardando primeiro ciclo de varredura...</Text>
-            </View>
-          ) : (
-            atividades.map((at, idx) => {
-              const dotColor = at.level === 'SUCCESS' ? THEME.success 
-                             : at.level === 'ERROR' ? THEME.danger 
-                             : at.level === 'WARNING' ? THEME.warning 
-                             : THEME.info;
-              return (
-                <View key={at.id || idx} style={[styles.telemetryRow, idx === atividades.length - 1 && { borderBottomWidth: 0 }]}>
-                  <View style={[styles.telemetryDot, { backgroundColor: dotColor }]} />
+        <Surface style={[styles.telemetryCard, { position: 'relative', overflow: 'hidden', minHeight: 180 }]}>
+          <View style={styles.telemetryTargetContainer}>
+            {atividades.length === 0 ? (
+              <View style={{ paddingVertical: 10 }}>
+                <View style={styles.telemetryRow}>
+                  <View style={[styles.telemetryDot, { backgroundColor: THEME.success }]} />
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.telemetryMessage}>{at.message}</Text>
+                    <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
+                      Robô AchôAI conectado e operando em segundo plano
+                    </Text>
                     <View style={styles.telemetryMetaRow}>
-                      <Text style={styles.telemetryTime}>{new Date(at.created_at).toLocaleTimeString()}</Text>
+                      <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>Hoje</Text>
                       <Text style={styles.telemetrySeparator}>•</Text>
-                      <Text style={styles.telemetrySource}>Robô AchôAI</Text>
+                      <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Sistema</Text>
                     </View>
                   </View>
                 </View>
-              );
-            })
+                <View style={styles.telemetryRow}>
+                  <View style={[styles.telemetryDot, { backgroundColor: THEME.primary }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
+                      Varredura inteligente programada para as plataformas ativas
+                    </Text>
+                    <View style={styles.telemetryMetaRow}>
+                      <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>Hoje</Text>
+                      <Text style={styles.telemetrySeparator}>•</Text>
+                      <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Robô AchôAI</Text>
+                    </View>
+                  </View>
+                </View>
+                <View style={[styles.telemetryRow, { borderBottomWidth: 0 }]}>
+                  <View style={[styles.telemetryDot, { backgroundColor: THEME.info }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
+                      Aguardando próximo ciclo de varredura...
+                    </Text>
+                    <View style={styles.telemetryMetaRow}>
+                      <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>Hoje</Text>
+                      <Text style={styles.telemetrySeparator}>•</Text>
+                      <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Agendador</Text>
+                    </View>
+                  </View>
+                </View>
+              </View>
+            ) : (
+              atividades.slice(0, 6).map((at, idx) => {
+                const dotColor = at.level === 'SUCCESS' ? THEME.success 
+                               : at.level === 'ERROR' ? THEME.danger 
+                               : at.level === 'WARNING' ? THEME.warning 
+                               : THEME.info;
+                return (
+                  <View key={at.id || idx} style={[styles.telemetryRow, idx === Math.min(atividades.length, 6) - 1 && { borderBottomWidth: 0 }]}>
+                    <View style={[styles.telemetryDot, { backgroundColor: dotColor }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
+                        {at.message}
+                      </Text>
+                      <View style={styles.telemetryMetaRow}>
+                        <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>
+                          {new Date(at.created_at).toLocaleTimeString('pt-BR')}
+                        </Text>
+                        <Text style={styles.telemetrySeparator}>•</Text>
+                        <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Robô AchôAI</Text>
+                      </View>
+                    </View>
+                  </View>
+                );
+              })
+            )}
+          </View>
+
+          {/* OVERLAY DESFOCADO COM CADEADO E FROSTED GLASS SE FOR FREE */}
+          {tier === TIERS.FREE && (
+            <FrostedOverlay style={[StyleSheet.absoluteFill, styles.frostedOverlay]}>
+              <View style={styles.frostedLockContent}>
+                <View style={styles.frostedLockCircle}>
+                  <Ionicons name="lock-closed" size={24} color="#FFF" />
+                </View>
+                <Text style={styles.frostedLockTitle}>Histórico em Tempo Real</Text>
+                <Text style={styles.frostedLockSub}>
+                  O robô está trabalhando em segundo plano. Desbloqueie a telemetria ao vivo com o AchôAI Premium.
+                </Text>
+                <TouchableOpacity 
+                  style={styles.btnFrostedUnlock}
+                  onPress={openUpgradeModal}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons name="sparkles" size={14} color="#08090D" style={{ marginRight: 6 }} />
+                  <Text style={styles.btnFrostedUnlockText}>Desbloquear com Premium</Text>
+                </TouchableOpacity>
+              </View>
+            </FrostedOverlay>
           )}
         </Surface>
 
@@ -726,9 +1336,14 @@ function DashboardScreen({ navigation }) {
   );
 }
 
+
 // --- TELA 2: RADARES ATIVOS ---
 function MonitorListScreen({ navigation }) {
-  const { monitores, loading, refreshing, onRefresh, fetchData } = useContext(RadarContext);
+  const { 
+    monitores, loading, refreshing, onRefresh, fetchData,
+    tier, sweepCooldownSeconds, dispararVarreduraManual, openUpgradeModal,
+    antiSpamCooldowns, varrendoMonitorId, showAlert 
+  } = useContext(RadarContext);
   const [testandoId, setTestandoId] = useState(null);
   const [now, setNow] = useState(Date.now());
 
@@ -742,42 +1357,67 @@ function MonitorListScreen({ navigation }) {
       await RadarAPI.toggleMonitor(id, !atual);
       fetchData(null, true);
     } catch (e) {
-      Alert.alert("Erro", "Não foi possível atualizar o radar.");
+      showAlert({
+        title: "Erro",
+        message: "Não foi possível atualizar o radar.",
+        type: "error"
+      });
     }
   };
 
-  const dispararTeste = async (id) => {
-    try {
-      setTestandoId(id);
-      await RadarAPI.testMonitor(id);
-      Alert.alert(
-        "⚡ Varredura Acionada!", 
-        "Comando enviado com sucesso! O robô iniciará a varredura em instantes."
-      );
-      fetchData(null, true);
-    } catch (e) {
-      Alert.alert("Erro", "Falha ao enviar comando de varredura.");
-    } finally {
-      setTimeout(() => setTestandoId(null), 1500);
+  const handleDispararVarrer = async (id) => {
+    setTestandoId(id);
+    await dispararVarreduraManual(id);
+    setTestandoId(null);
+  };
+
+  const handleCriarRadarPress = () => {
+    if (tier === TIERS.FREE && monitores.length >= 1) {
+      showAlert({
+        title: "Limite do Plano Free",
+        message: "Você atingiu o limite de 1 radar ativo no Plano Free. Desbloqueie até 5 radares simultâneos e varreduras ultra rápidas assinando o AchôAI Premium!",
+        type: "warning",
+        icon: "lock-closed",
+        confirmText: "Conhecer Premium",
+        cancelText: "Entendi",
+        showCancel: true,
+        onConfirm: openUpgradeModal
+      });
+    } else {
+      navigation.navigate('Criar');
     }
   };
 
   const removerRadar = (id, nome) => {
-    Alert.alert(
-      "Excluir Radar",
-      `Deseja realmente remover o monitor "${nome}"?`,
-      [
-        { text: "Cancelar", style: "cancel" },
-        { 
-          text: "Excluir", 
-          style: "destructive", 
-          onPress: async () => {
-            await RadarAPI.deleteMonitor(id);
-            fetchData(null, true);
-          } 
+    showAlert({
+      title: "Excluir Radar",
+      message: `Deseja realmente remover o monitor "${nome}"? Esta ação apagará as regras de varredura deste radar.`,
+      type: "confirm_danger",
+      icon: "trash-outline",
+      confirmText: "Sim, Excluir",
+      cancelText: "Cancelar",
+      showCancel: true,
+      onConfirm: async () => {
+        try {
+          await RadarAPI.deleteMonitor(id);
+          fetchData(null, true);
+        } catch (err) {
+          showAlert({
+            title: "Erro",
+            message: "Falha ao excluir o radar.",
+            type: "error"
+          });
         }
-      ]
-    );
+      }
+    });
+  };
+
+  // Formata o tempo de espera do cooldown de 60 min
+  const formatarCooldown = (segundos) => {
+    const min = Math.floor(segundos / 60);
+    const sec = segundos % 60;
+    if (min > 0) return `${min}m ${sec}s`;
+    return `${sec}s`;
   };
 
   return (
@@ -788,11 +1428,14 @@ function MonitorListScreen({ navigation }) {
       <View style={styles.screenHeader}>
         <View>
           <Text style={styles.screenHeaderTitle}>Radares Ativos</Text>
-          <Text style={styles.screenHeaderSub}>{monitores.length} tarefas de busca configuradas</Text>
+          <Text style={styles.screenHeaderSub}>
+            {monitores.length} {monitores.length === 1 ? 'radar configurado' : 'radares configurados'}
+            {tier === TIERS.FREE ? ' (Limite: 1)' : ' (Até 5)'}
+          </Text>
         </View>
         <TouchableOpacity 
           style={styles.headerBtnSquare}
-          onPress={() => navigation.navigate('Criar')}
+          onPress={handleCriarRadarPress}
           activeOpacity={0.8}
         >
           <Ionicons name="add" size={22} color={THEME.primary} />
@@ -818,7 +1461,7 @@ function MonitorListScreen({ navigation }) {
             <PrimaryButton 
               title="Criar Primeiro Radar"
               icon="add-circle-outline"
-              onPress={() => navigation.navigate('Criar')}
+              onPress={handleCriarRadarPress}
               style={{ marginTop: 24, width: '100%', maxWidth: 260 }}
             />
           </View>
@@ -844,6 +1487,7 @@ function MonitorListScreen({ navigation }) {
 
             const infoLocal = plataforma === 'OLX' ? extrairInfoOlx(m.urls) : null;
             const estadoNome = infoLocal ? OLX_ESTADOS[infoLocal.uf]?.nome || infoLocal.uf : null;
+            const emCooldown = tier === TIERS.FREE && sweepCooldownSeconds > 0;
 
             return (
               <Surface key={m.id} style={styles.radarCard} elevated={m.ativo}>
@@ -896,21 +1540,68 @@ function MonitorListScreen({ navigation }) {
                   </View>
 
                   <View style={styles.radarActionsGroup}>
-                    <TouchableOpacity 
-                      style={[styles.btnScanNow, (!m.ativo || testandoId === m.id) && { opacity: 0.7 }]}
-                      onPress={() => dispararTeste(m.id)}
-                      disabled={testandoId === m.id || !m.ativo}
-                      activeOpacity={0.8}
-                    >
-                      {testandoId === m.id ? (
-                        <ActivityIndicator size="small" color="#08090D" />
-                      ) : (
-                        <>
-                          <Ionicons name="radio-outline" size={13} color="#08090D" style={{ marginRight: 4 }} />
-                          <Text style={styles.btnScanNowText}>Varrer</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
+                    {(() => {
+                      const estaVarrendo = testandoId === m.id || varrendoMonitorId === m.id;
+                      const antiSpamRestante = (antiSpamCooldowns && antiSpamCooldowns[m.id]) 
+                        ? Math.max(0, Math.ceil((antiSpamCooldowns[m.id] - now) / 1000)) 
+                        : 0;
+                      const emCooldownAntiSpam = antiSpamRestante > 0;
+                      const emCooldownFree = tier === TIERS.FREE && sweepCooldownSeconds > 0;
+
+                      return (
+                        <TouchableOpacity 
+                          style={[
+                            styles.btnScanNow, 
+                            (!m.ativo || estaVarrendo) && { opacity: 0.7 },
+                            (emCooldownAntiSpam || emCooldownFree) && { 
+                              backgroundColor: 'rgba(255, 255, 255, 0.08)', 
+                              borderWidth: 1, 
+                              borderColor: 'rgba(255, 255, 255, 0.12)' 
+                            }
+                          ]}
+                          onPress={() => {
+                            if (emCooldownAntiSpam) {
+                              showAlert({
+                                title: "Proteção Anti-Spam",
+                                message: `Aguarde mais ${antiSpamRestante}s para varrer este mesmo radar novamente e evitar sobrecarga do servidor.`,
+                                type: "warning",
+                                icon: "time-outline"
+                              });
+                              return;
+                            }
+                            handleDispararVarrer(m.id);
+                          }}
+                          disabled={!m.ativo || estaVarrendo || emCooldownAntiSpam || emCooldownFree}
+                          activeOpacity={0.8}
+                        >
+                          {estaVarrendo ? (
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <ActivityIndicator size="small" color="#08090D" style={{ marginRight: 5 }} />
+                              <Text style={styles.btnScanNowText}>Varrendo...</Text>
+                            </View>
+                          ) : emCooldownAntiSpam ? (
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Ionicons name="time-outline" size={12} color={THEME.textMuted} style={{ marginRight: 4 }} />
+                              <Text style={[styles.btnScanNowText, { color: THEME.textMuted, fontSize: 11 }]}>
+                                {antiSpamRestante}s
+                              </Text>
+                            </View>
+                          ) : emCooldownFree ? (
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Ionicons name="lock-closed" size={11} color={THEME.warning} style={{ marginRight: 4 }} />
+                              <Text style={[styles.btnScanNowText, { color: THEME.warning, fontSize: 11 }]}>
+                                {formatarCooldown(sweepCooldownSeconds)}
+                              </Text>
+                            </View>
+                          ) : (
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Ionicons name="radio-outline" size={13} color="#08090D" style={{ marginRight: 4 }} />
+                              <Text style={styles.btnScanNowText}>Varrer</Text>
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })()}
 
                     <IconButton 
                       icon="create-outline" 
@@ -939,7 +1630,7 @@ function MonitorListScreen({ navigation }) {
       {/* BOTÃO FLUTUANTE ADICIONAR */}
       <TouchableOpacity 
         style={styles.fabGlow}
-        onPress={() => navigation.navigate('Criar')}
+        onPress={handleCriarRadarPress}
         activeOpacity={0.85}
       >
         <Ionicons name="add" size={28} color="#08090D" />
@@ -948,9 +1639,13 @@ function MonitorListScreen({ navigation }) {
   );
 }
 
+
 // --- TELA 3: ALERTAS / OPORTUNIDADES CAPTURADAS ---
 function AlertsScreen({ navigation }) {
-  const { resultados, loading, refreshing, onRefresh, fetchData } = useContext(RadarContext);
+  const { 
+    resultados, loading, refreshing, onRefresh, fetchData,
+    tier, handleOpenAd, openUpgradeModal, showAlert 
+  } = useContext(RadarContext);
   const [filtroPlataforma, setFiltroPlataforma] = useState('TODAS');
   const [buscaTexto, setBuscaTexto] = useState('');
 
@@ -980,8 +1675,17 @@ function AlertsScreen({ navigation }) {
       {/* TOP HEADER */}
       <View style={styles.screenHeader}>
         <View>
-          <Text style={styles.screenHeaderTitle}>Oportunidades</Text>
-          <Text style={styles.screenHeaderSub}>{resultados.length} anúncios e ofertas detectados</Text>
+          <View style={styles.row}>
+            <Text style={styles.screenHeaderTitle}>Oportunidades</Text>
+            {tier === TIERS.FREE && (
+              <View style={{ marginLeft: 8 }}>
+                <LockBadge text="PROTEGIDO" onPress={openUpgradeModal} />
+              </View>
+            )}
+          </View>
+          <Text style={styles.screenHeaderSub}>
+            {resultados.length} anúncios e ofertas detectados
+          </Text>
         </View>
       </View>
 
@@ -1006,9 +1710,9 @@ function AlertsScreen({ navigation }) {
 
       {/* CHIPS DE FILTRO POR PLATAFORMA */}
       <View style={styles.filterChipRow}>
-        {['TODAS', 'OLX', 'ZOOM', 'BUSCAPE', 'OUTROS'].map(k => {
+        {['TODAS', 'OLX', 'FACEBOOK', 'ZOOM', 'OUTROS'].map(k => {
           const isSelected = filtroPlataforma === k;
-          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'BUSCAPE' ? 'Buscapé' : k === 'ZOOM' ? 'Zoom' : 'OLX';
+          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'FACEBOOK' ? 'Facebook' : k === 'ZOOM' ? 'Zoom' : 'OLX';
           return (
             <TouchableOpacity 
               key={k}
@@ -1024,97 +1728,178 @@ function AlertsScreen({ navigation }) {
         })}
       </View>
 
-      <ScrollView 
-        contentContainerStyle={styles.scrollArea}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
-        showsVerticalScrollIndicator={false}
-      >
-        {loading && resultados.length === 0 ? (
-          <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 50 }} />
-        ) : resultadosFiltrados.length === 0 ? (
-          <View style={styles.emptyFullState}>
-            <View style={styles.emptyIconPulseCircle}>
-              <Ionicons name="notifications-off-outline" size={38} color={THEME.textSubtle} />
-            </View>
-            <Text style={styles.emptyStateTitle}>
-              {buscaTexto.length > 0 ? 'Nenhum resultado encontrado' : 'Nenhuma oportunidade no momento'}
-            </Text>
-            <Text style={styles.emptyStateSub}>
-              {buscaTexto.length > 0 
-                ? 'Tente ajustar os termos de pesquisa ou remover os filtros de plataforma.' 
-                : 'Quando o robô detectar um anúncio dentro das suas configurações, ele aparecerá aqui imediatamente.'}
-            </Text>
-          </View>
-        ) : (
-          resultadosFiltrados.map(res => {
-            const plat = identificarPlataforma(res.url);
-            return (
-              <Surface key={res.id} style={styles.alertCardFull} elevated>
-                <View style={styles.alertHeaderRow}>
-                  <View style={styles.row}>
-                    <PlatformBadge platformKey={plat} />
-                    <View style={styles.robotTag}>
-                      <Ionicons name="checkmark-circle" size={13} color={THEME.success} style={{ marginRight: 4 }} />
-                      <Text style={styles.robotTagText}>Capturado pelo Robô</Text>
+      {/* ÁREA DE LISTAGEM COM OVERLAY FROSTED GLASS PARA USUÁRIOS FREE */}
+      <View style={{ flex: 1, position: 'relative' }}>
+        <ScrollView 
+          contentContainerStyle={[styles.scrollArea, { paddingBottom: 90 }]}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
+          showsVerticalScrollIndicator={false}
+          scrollEnabled={tier !== TIERS.FREE}
+        >
+          <View style={styles.alertsTargetContainer}>
+            {loading && resultados.length === 0 ? (
+              <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 50 }} />
+            ) : resultadosFiltrados.length === 0 ? (
+              <View style={styles.emptyFullState}>
+                <View style={styles.emptyIconPulseCircle}>
+                  <Ionicons name="notifications-off-outline" size={38} color={THEME.textSubtle} />
+                </View>
+                <Text style={styles.emptyStateTitle}>
+                  {buscaTexto.length > 0 ? 'Nenhum resultado encontrado' : 'Nenhuma oportunidade no momento'}
+                </Text>
+                <Text style={styles.emptyStateSub}>
+                  {buscaTexto.length > 0 
+                    ? 'Tente ajustar os termos de pesquisa ou remover os filtros de plataforma.' 
+                    : 'Quando o robô detectar um anúncio dentro das suas configurações, ele aparecerá aqui imediatamente.'}
+                </Text>
+              </View>
+            ) : (
+              resultadosFiltrados.map(res => {
+                const plat = identificarPlataforma(res.url);
+                return (
+                  <Surface key={res.id} style={styles.alertCardFull} elevated>
+                    <View style={styles.alertHeaderRow}>
+                      <View style={styles.row}>
+                        <PlatformBadge platformKey={plat} />
+                        <View style={styles.robotTag}>
+                          <Ionicons name="checkmark-circle" size={13} color={THEME.success} style={{ marginRight: 4 }} />
+                          <Text style={styles.robotTagText}>Capturado pelo Robô</Text>
+                        </View>
+                      </View>
+                      <Text style={[styles.alertTime, tier === TIERS.FREE && styles.blurredTime]}>
+                        {new Date(res.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                      </Text>
                     </View>
-                  </View>
-                  <Text style={styles.alertTime}>
-                    {new Date(res.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-                  </Text>
-                </View>
 
-                <Text style={styles.alertTitleFull}>{res.title}</Text>
+                    <Text 
+                      style={[styles.alertTitleFull, tier === TIERS.FREE && styles.blurredTextTitle]}
+                      numberOfLines={2}
+                    >
+                      {res.title}
+                    </Text>
 
-                <View style={styles.alertPriceRow}>
-                  <View>
-                    <Text style={styles.alertPriceLabel}>VALOR CAPTURADO</Text>
-                    {res.price !== null ? (
-                      <Text style={styles.alertPriceValue}>R$ {Number(res.price).toFixed(2)}</Text>
-                    ) : (
-                      <Text style={styles.priceConsult}>Sob Consulta</Text>
-                    )}
-                  </View>
-                  
-                  <TouchableOpacity 
-                    style={styles.btnAlertAction}
-                    onPress={() => Linking.openURL(res.url).catch(() => Alert.alert("Erro", "Não foi possível abrir o link."))}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.btnAlertActionText}>Acessar Oferta</Text>
-                    <Ionicons name="open-outline" size={14} color="#08090D" style={{ marginLeft: 5 }} />
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            );
-          })
+                    <View style={styles.alertPriceRow}>
+                      <View>
+                        <Text style={styles.alertPriceLabel}>VALOR CAPTURADO</Text>
+                        {res.price !== null ? (
+                          <Text style={[styles.alertPriceValue, tier === TIERS.FREE && styles.blurredPrice]}>
+                            R$ {Number(res.price).toFixed(2)}
+                          </Text>
+                        ) : (
+                          <Text style={[styles.priceConsult, tier === TIERS.FREE && styles.blurredPrice]}>Sob Consulta</Text>
+                        )}
+                      </View>
+                      
+                      <TouchableOpacity 
+                        style={[styles.btnAlertAction, tier === TIERS.FREE && styles.btnAlertActionLocked]}
+                        onPress={() => {
+                          if (tier === TIERS.FREE) {
+                            openUpgradeModal();
+                          } else {
+                            if (res.url) {
+                              Linking.openURL(res.url).catch(() => showAlert({
+                                title: "Erro",
+                                message: "Não foi possível abrir o link da oferta.",
+                                type: "error"
+                              }));
+                            }
+                          }
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={[styles.btnAlertActionText, tier === TIERS.FREE && styles.btnAlertActionLockedText]}>
+                          {tier === TIERS.FREE ? 'Exclusivo Premium' : 'Acessar Oferta'}
+                        </Text>
+                        <Ionicons 
+                          name={tier === TIERS.FREE ? "lock-closed" : "open-outline"} 
+                          size={13} 
+                          color={tier === TIERS.FREE ? THEME.textMuted : "#08090D"} 
+                          style={{ marginLeft: 5 }} 
+                        />
+                      </TouchableOpacity>
+                    </View>
+                  </Surface>
+                );
+              })
+            )}
+          </View>
+          <View style={{ height: 80 }} />
+        </ScrollView>
+
+        {/* OVERLAY DESFOCADO COM FROSTED GLASS E CADEADO CENTRAL SE FOR FREE */}
+        {tier === TIERS.FREE && (
+          <FrostedOverlay style={[StyleSheet.absoluteFill, styles.alertsFrostedOverlay]}>
+            <View style={styles.alertsLockCard}>
+              <View style={styles.alertsLockIconCircle}>
+                <Ionicons name="lock-closed" size={30} color="#FFF" />
+              </View>
+              <Text style={styles.alertsLockTitle}>Feed de Ofertas Protegido</Text>
+              <Text style={styles.alertsLockSub}>
+                O robô capturou <Text style={{ color: THEME.primary, fontWeight: '800' }}>{resultados.length} oportunidades</Text> para você!
+                {'\n\n'}
+                Para visualizar todas as ofertas sem desfoque e clicar para ser redirecionado diretamente à página de compra, ative o AchôAI Premium.
+              </Text>
+
+              <TouchableOpacity 
+                style={styles.btnAlertsUnlock}
+                onPress={openUpgradeModal}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="diamond" size={16} color="#08090D" style={{ marginRight: 8 }} />
+                <Text style={styles.btnAlertsUnlockText}>Desbloquear Todas as Ofertas</Text>
+              </TouchableOpacity>
+            </View>
+          </FrostedOverlay>
         )}
-        <View style={{ height: 80 }} />
-      </ScrollView>
+      </View>
     </View>
   );
 }
+
 
 // --- TELA 4: MODAL DE CRIAÇÃO / EDIÇÃO DE RADAR ---
 function CreateMonitorScreen({ navigation, route }) {
   const { 
     currentOwnerId, pushToken, setPushToken, deviceId, user, fetchData, 
-    notificacoesAtivas, alternarNotificacoes 
+    notificacoesAtivas, alternarNotificacoes,
+    tier, openUpgradeModal, monitores, showAlert 
   } = useContext(RadarContext);
   const editando = route?.params?.monitor;
 
   const platInicial = editando ? identificarPlataforma(editando.urls) : 'OLX';
   const [plataforma, setPlataforma] = useState(platInicial);
 
-  const infoOlx = editando && platInicial === 'OLX' ? extrairInfoOlx(editando.urls) : { uf: 'CE', regiaoSlug: 'fortaleza-e-regiao' };
+  const infoOlx = editando && platInicial === 'OLX' ? extrairInfoOlx(editando.urls) : { uf: 'BR', regiaoSlug: '' };
   const [estadoUf, setEstadoUf] = useState(infoOlx.uf);
   const [regiaoSlug, setRegiaoSlug] = useState(infoOlx.regiaoSlug);
+
+  // Carrega última localização de estado e região salva em cache para novos radares
+  useEffect(() => {
+    if (!editando) {
+      AsyncStorage.getItem('@achoai_last_olx_location').then(cached => {
+        if (cached) {
+          try {
+            const parsed = JSON.parse(cached);
+            if (parsed && parsed.uf && OLX_ESTADOS[parsed.uf]) {
+              setEstadoUf(parsed.uf);
+              setRegiaoSlug(parsed.regiaoSlug || '');
+            }
+          } catch (e) {}
+        }
+      });
+    }
+  }, [editando]);
+
+  const [cidadeFacebook, setCidadeFacebook] = useState(
+    editando && platInicial === 'FACEBOOK' ? extrairCidadeFacebook(editando.urls) : 'fortaleza'
+  );
   const [modalEstadoVisivel, setModalEstadoVisivel] = useState(false);
   const [modalRegiaoVisivel, setModalRegiaoVisivel] = useState(false);
   const [modalAvisoNotifVisivel, setModalAvisoNotifVisivel] = useState(false);
   const [ativandoNotif, setAtivandoNotif] = useState(false);
 
   const [modo, setModo] = useState(editando?.modo === 'noticia' ? 'noticia' : 'produto');
-  const estratInicial = editando ? identificarEstrategia(editando) : 'mais_recentes';
+  const estratInicial = editando ? identificarEstrategia(editando) : 'menor_preco';
   const [estrategia, setEstrategia] = useState(estratInicial);
   const [ordenarMenorPreco, setOrdenarMenorPreco] = useState(
     editando?.palavras ? editando.palavras.includes('ordenar_menor_preco') : false
@@ -1126,7 +1911,9 @@ function CreateMonitorScreen({ navigation, route }) {
   const [precoAlvo, setPrecoAlvo] = useState(editando?.preco_alvo ? String(editando.preco_alvo) : '');
   const [margem, setMargem] = useState(String(editando?.margem || '15'));
   const [palavras, setPalavras] = useState(editando?.modo === 'noticia' ? (editando?.palavras || '') : '');
-  const [intervalo, setIntervalo] = useState(String(editando?.intervalo_valor || '30'));
+  const [intervalo, setIntervalo] = useState(
+    tier === TIERS.FREE ? '180' : String(editando?.intervalo_valor || '30')
+  );
   const [salvando, setSalvando] = useState(false);
 
   useEffect(() => {
@@ -1147,10 +1934,12 @@ function CreateMonitorScreen({ navigation, route }) {
     let urlFinal = '';
     if (plataforma === 'OLX') {
       urlFinal = gerarUrlOlx(estadoUf, regiaoSlug, produto);
+      AsyncStorage.setItem('@achoai_last_olx_location', JSON.stringify({ uf: estadoUf, regiaoSlug })).catch(() => {});
+    } else if (plataforma === 'FACEBOOK') {
+      const slugCidade = normalizarSlugCidade(cidadeFacebook) || 'fortaleza';
+      urlFinal = `https://www.facebook.com/marketplace/${slugCidade}/search/?query=${encodeURIComponent(produto.trim())}`;
     } else if (plataforma === 'ZOOM') {
       urlFinal = `https://www.zoom.com.br/search?q=${encodeURIComponent(produto.trim())}`;
-    } else if (plataforma === 'BUSCAPE') {
-      urlFinal = `https://www.buscape.com.br/search?q=${encodeURIComponent(produto.trim())}`;
     } else {
       urlFinal = urls.trim();
     }
@@ -1168,6 +1957,8 @@ function CreateMonitorScreen({ navigation, route }) {
       }
     }
 
+    const intervaloFinal = tier === TIERS.FREE ? 180 : Math.max(15, Number(intervalo) || 30);
+
     const payload = {
       usuario_id: currentOwnerId,
       nome: nome.trim(),
@@ -1177,7 +1968,7 @@ function CreateMonitorScreen({ navigation, route }) {
       preco_alvo: (estrategia === 'por_preco' && alvoNum > 0) ? alvoNum : null,
       margem: margemNum,
       palavras: palavrasFinal,
-      intervalo_valor: Number(intervalo) || 30,
+      intervalo_valor: intervaloFinal,
       intervalo_unidade: 'minutos',
       ativo: true,
       forcar_teste: false
@@ -1188,22 +1979,32 @@ function CreateMonitorScreen({ navigation, route }) {
       if (editando) {
         await RadarAPI.updateMonitor(editando.id, payload);
         fetchData(null, true);
-        Alert.alert(
-          "✅ Radar Atualizado!",
-          `As configurações de "${nome.trim()}" foram atualizadas com sucesso.`,
-          [{ text: "OK", onPress: () => navigation.goBack() }]
-        );
+        showAlert({
+          title: "Radar Atualizado!",
+          message: `As configurações de "${nome.trim()}" foram atualizadas e o robô já está operando com as novas regras!`,
+          type: "radar_saved",
+          icon: "thumbs-up",
+          confirmText: "Ver Meus Radares",
+          onConfirm: () => navigation.goBack()
+        });
       } else {
         await RadarAPI.createMonitor(payload);
         fetchData(null, true);
-        Alert.alert(
-          "✅ Radar Ativado!",
-          "Monitor cadastrado com sucesso! As varreduras ocorrerão conforme a frequência agendada ou ao tocar no botão 'Varrer'.",
-          [{ text: "OK", onPress: () => navigation.goBack() }]
-        );
+        showAlert({
+          title: "Radar em Operação!",
+          message: `O monitor "${nome.trim()}" foi salvo com sucesso! O robô de busca já iniciou o monitoramento conforme o intervalo programado.`,
+          type: "radar_saved",
+          icon: "thumbs-up",
+          confirmText: "Ver Meus Radares",
+          onConfirm: () => navigation.goBack()
+        });
       }
     } catch (e) {
-      Alert.alert("Erro", "Falha de conexão com o Supabase ao salvar radar.");
+      showAlert({
+        title: "Erro ao Salvar",
+        message: "Falha de conexão com o Supabase ao salvar radar.",
+        type: "error"
+      });
     } finally {
       setSalvando(false);
     }
@@ -1217,20 +2018,34 @@ function CreateMonitorScreen({ navigation, route }) {
       if (token && String(token).startsWith('ExponentPushToken')) {
         setPushToken(token);
         setModalAvisoNotifVisivel(false);
-        Alert.alert("✅ Notificações Ativadas!", "Seu aparelho agora receberá alertas instantâneos de novas oportunidades.");
+        showAlert({
+          title: "Notificações Ativadas!",
+          message: "Seu aparelho agora receberá alertas instantâneos de novas oportunidades.",
+          type: "success",
+          icon: "notifications-outline"
+        });
         await executarSalvamento();
       } else {
-        Alert.alert(
-          "Permissão Necessária",
-          "Não será possível receber as notificações dos alertas. Habilite as notificações nas configurações do seu celular.",
-          [
-            { text: "Salvar sem Notificações", onPress: () => { setModalAvisoNotifVisivel(false); executarSalvamento(); } },
-            { text: "Cancelar", style: "cancel" }
-          ]
-        );
+        showAlert({
+          title: "Permissão Necessária",
+          message: "Não será possível receber as notificações dos alertas. Habilite as notificações nas configurações do seu celular.",
+          type: "confirm_warning",
+          icon: "notifications-off-outline",
+          confirmText: "Salvar sem Notificações",
+          cancelText: "Cancelar",
+          showCancel: true,
+          onConfirm: () => {
+            setModalAvisoNotifVisivel(false);
+            executarSalvamento();
+          }
+        });
       }
     } catch (e) {
-      Alert.alert("Aviso", "Falha ao registrar notificações no aparelho.");
+      showAlert({
+        title: "Aviso",
+        message: "Falha ao registrar notificações no aparelho.",
+        type: "warning"
+      });
     } finally {
       setAtivandoNotif(false);
     }
@@ -1238,28 +2053,116 @@ function CreateMonitorScreen({ navigation, route }) {
 
   const salvar = async () => {
     if (!nome.trim() || !intervalo.trim()) {
-      return Alert.alert("Campos Obrigatórios", "Informe ao menos o Nome do Radar e a Frequência.");
+      showAlert({
+        title: "Campos Obrigatórios",
+        message: "Informe ao menos o Nome do Radar e a Frequência.",
+        type: "warning",
+        icon: "alert-circle"
+      });
+      return;
+    }
+
+    const intervaloNum = Number(intervalo);
+    if (tier !== TIERS.FREE && (isNaN(intervaloNum) || intervaloNum < 15)) {
+      showAlert({
+        title: "Frequência Mínima de 15 min",
+        message: "O tempo mínimo permitido entre varreduras é de 15 minutos para evitar sobrecarga no servidor.",
+        type: "warning",
+        icon: "time-outline"
+      });
+      return;
+    }
+
+    // Validação de limite no Plano Free
+    if (!editando && tier === TIERS.FREE && (monitores || []).length >= 1) {
+      showAlert({
+        title: "Limite do Plano Free",
+        message: "Usuários do plano Free só podem criar 1 radar por vez. Desbloqueie até 5 radares simultâneos e varreduras de 15 minutos assinando o AchôAI Premium!",
+        type: "warning",
+        icon: "lock-closed",
+        confirmText: "Ver Planos",
+        cancelText: "Entendi",
+        showCancel: true,
+        onConfirm: openUpgradeModal
+      });
+      return;
     }
 
     if (plataforma === 'OUTROS') {
+      if (tier === TIERS.FREE) {
+        showAlert({
+          title: "Recurso Premium",
+          message: "A plataforma Outros Sites é exclusiva para assinantes Premium.",
+          type: "warning",
+          icon: "lock-closed",
+          confirmText: "Ver Planos",
+          cancelText: "Voltar",
+          showCancel: true,
+          onConfirm: openUpgradeModal
+        });
+        return;
+      }
       if (!urls.trim()) {
-        return Alert.alert("Campos Obrigatórios", "Informe a URL da página para monitorar.");
+        showAlert({
+          title: "Campos Obrigatórios",
+          message: "Informe a URL da página para monitorar.",
+          type: "warning",
+          icon: "alert-circle"
+        });
+        return;
       }
       if (modo === 'noticia' && !palavras.trim()) {
-        return Alert.alert("Campos Obrigatórios", "Informe ao menos uma palavra-chave.");
+        showAlert({
+          title: "Campos Obrigatórios",
+          message: "Informe ao menos uma palavra-chave.",
+          type: "warning",
+          icon: "alert-circle"
+        });
+        return;
       }
       if (modo === 'produto' && !produto.trim()) {
-        return Alert.alert("Campos Obrigatórios", "Informe o termo do anúncio pesquisado.");
+        showAlert({
+          title: "Campos Obrigatórios",
+          message: "Informe o termo do anúncio pesquisado.",
+          type: "warning",
+          icon: "alert-circle"
+        });
+        return;
       }
     } else {
       if (!produto.trim()) {
-        return Alert.alert("Campos Obrigatórios", "Informe o termo do anúncio (ex: iPhone 15, Notebook Dell, Cadeira Gamer).");
+        showAlert({
+          title: "Campos Obrigatórios",
+          message: "Informe o termo do anúncio (ex: iPhone 15, Notebook Dell, Cadeira Gamer).",
+          type: "warning",
+          icon: "alert-circle"
+        });
+        return;
       }
     }
 
     if (estrategia === 'por_preco' && modo !== 'noticia') {
+      if (tier === TIERS.FREE) {
+        showAlert({
+          title: "Recurso Premium",
+          message: "A estratégia Por Preço Alvo é exclusiva para assinantes Premium.",
+          type: "warning",
+          icon: "lock-closed",
+          confirmText: "Ver Planos",
+          cancelText: "Voltar",
+          showCancel: true,
+          onConfirm: openUpgradeModal
+        });
+        return;
+      }
       if (!precoAlvo.trim() || alvoNum <= 0) {
-        return Alert.alert("Preço Alvo Obrigatório", "Na estratégia 'Rastrear pelo Preço', digite o valor alvo desejado (em R$).");
+        showAlert({
+          title: "Preço Alvo Obrigatório",
+          message: "Na estratégia 'Rastrear pelo Preço', digite o valor alvo desejado (em R$).",
+          type: "warning",
+          icon: "pricetag-outline"
+        });
+        return;
       }
     }
 
@@ -1278,21 +2181,28 @@ function CreateMonitorScreen({ navigation, route }) {
       <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
       <ScrollView contentContainerStyle={styles.scrollArea} showsVerticalScrollIndicator={false}>
         
-        {editando && (
+        {editando ? (
           <View style={styles.editNoticeBanner}>
             <Ionicons name="create" size={15} color={THEME.primary} style={{ marginRight: 8 }} />
             <Text style={styles.editNoticeText}>Editando parâmetros do radar existente</Text>
           </View>
-        )}
+        ) : tier === TIERS.FREE && (monitores || []).length >= 1 ? (
+          <View style={[styles.editNoticeBanner, { borderColor: THEME.warning, backgroundColor: THEME.warningBg }]}>
+            <Ionicons name="lock-closed" size={15} color={THEME.warning} style={{ marginRight: 8 }} />
+            <Text style={[styles.editNoticeText, { color: THEME.text }]}>
+              Você já possui 1 radar ativo (limite do Plano Free). Salvar este radar requer o AchôAI Premium.
+            </Text>
+          </View>
+        ) : null}
 
         {/* 1. SELEÇÃO DA PLATAFORMA */}
         <Text style={styles.formSectionTitle}>1. ONDE O ROBÔ DEVE BUSCAR</Text>
         <View style={styles.platformGrid}>
           {[
-            { key: 'OLX', nome: 'OLX', icon: 'cart-outline', color: '#A855F7' },
-            { key: 'ZOOM', nome: 'Zoom', icon: 'search-outline', color: '#F59E0B' },
-            { key: 'BUSCAPE', nome: 'Buscapé', icon: 'pricetag-outline', color: '#10B981' },
-            { key: 'OUTROS', nome: 'Outros Sites', icon: 'globe-outline', color: '#06B6D4' }
+            { key: 'OLX', nome: 'OLX', icon: 'cart-outline', color: '#A855F7', locked: false },
+            { key: 'FACEBOOK', nome: 'Facebook Marketplace', icon: 'logo-facebook', color: '#1877F2', locked: false },
+            { key: 'ZOOM', nome: 'Zoom', icon: 'search-outline', color: '#F59E0B', locked: false },
+            { key: 'OUTROS', nome: 'Outros Sites', icon: 'globe-outline', color: '#06B6D4', locked: tier === TIERS.FREE }
           ].map(p => {
             const isActive = plataforma === p.key;
             return (
@@ -1300,14 +2210,32 @@ function CreateMonitorScreen({ navigation, route }) {
                 key={p.key}
                 style={[styles.platformCardBtn, isActive && styles.platformCardBtnActive]}
                 onPress={() => {
+                  if (p.locked) {
+                    showAlert({
+                      title: "Recurso Premium",
+                      message: "Monitorar páginas da internet e portais de notícias externos é exclusivo do AchôAI Premium.",
+                      type: "warning",
+                      icon: "lock-closed",
+                      confirmText: "Ver Planos",
+                      cancelText: "Entendi",
+                      showCancel: true,
+                      onConfirm: openUpgradeModal
+                    });
+                    return;
+                  }
                   setPlataforma(p.key);
-                  if (p.key === 'ZOOM' || p.key === 'BUSCAPE') {
+                  if (p.key === 'ZOOM') {
                     if (estrategia === 'mais_recentes') setEstrategia('menor_preco');
                   }
                   if (p.key !== 'OUTROS') setModo('produto');
                 }}
                 activeOpacity={0.7}
               >
+                {p.locked && (
+                  <View style={{ position: 'absolute', top: 6, right: 6 }}>
+                    <Ionicons name="lock-closed" size={12} color={THEME.warning} />
+                  </View>
+                )}
                 <View style={[styles.platformIconCircle, { backgroundColor: isActive ? THEME.primaryGlow : 'rgba(255,255,255,0.05)' }]}>
                   <Ionicons name={p.icon} size={18} color={isActive ? THEME.primary : p.color} />
                 </View>
@@ -1319,15 +2247,80 @@ function CreateMonitorScreen({ navigation, route }) {
           })}
         </View>
 
-        {(plataforma === 'ZOOM' || plataforma === 'BUSCAPE') && (
+        {plataforma === 'FACEBOOK' && (
+          <View style={[styles.comparatorBanner, { borderColor: 'rgba(24, 119, 242, 0.35)', backgroundColor: 'rgba(24, 119, 242, 0.08)' }]}>
+            <Ionicons name="logo-facebook" size={16} color="#1877F2" style={{ marginRight: 8 }} />
+            <Text style={styles.comparatorBannerText}>
+              O Facebook Marketplace rastreia ofertas de vendedores e lojas na cidade selecionada com link direto para o anúncio.
+            </Text>
+          </View>
+        )}
+
+        {plataforma === 'ZOOM' && (
           <View style={styles.comparatorBanner}>
             <Ionicons name="information-circle-outline" size={16} color={THEME.primary} style={{ marginRight: 8 }} />
             <Text style={styles.comparatorBannerText}>
-              {plataforma === 'ZOOM' 
-                ? "O Zoom compara preços em lojas como Amazon, Magazine Luiza e Mercado Livre em todo o Brasil."
-                : "O Buscapé compara ofertas no comércio eletrônico com link direto para a compra na loja parceira."}
+              O Zoom compara preços em lojas como Amazon, Magazine Luiza e Mercado Livre em todo o Brasil.
             </Text>
           </View>
+        )}
+
+        {/* SE FOR FACEBOOK MARKETPLACE: CIDADE */}
+        {plataforma === 'FACEBOOK' && (
+          <>
+            <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>LOCALIZAÇÃO (FACEBOOK MARKETPLACE)</Text>
+            <Surface style={styles.formSurface}>
+              <Text style={styles.inputTitle}>CIDADE DA BUSCA</Text>
+              <TextInput 
+                style={styles.inputField} 
+                placeholder="Ex: fortaleza, saopaulo, riodejaneiro..." 
+                placeholderTextColor={THEME.textSubtle} 
+                value={cidadeFacebook} 
+                onChangeText={setCidadeFacebook} 
+                autoCapitalize="none"
+              />
+              
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }}>
+                {[
+                  { label: 'Fortaleza', slug: 'fortaleza' },
+                  { label: 'São Paulo', slug: 'saopaulo' },
+                  { label: 'Rio de Janeiro', slug: 'riodejaneiro' },
+                  { label: 'Belo Horizonte', slug: 'belohorizonte' },
+                  { label: 'Curitiba', slug: 'curitiba' },
+                  { label: 'Brasília', slug: 'brasilia' },
+                  { label: 'Recife', slug: 'recife' },
+                  { label: 'Salvador', slug: 'salvador' },
+                  { label: 'Goiânia', slug: 'goiania' },
+                  { label: 'Porto Alegre', slug: 'portoalegre' },
+                ].map(c => {
+                  const isSelected = normalizarSlugCidade(cidadeFacebook) === c.slug;
+                  return (
+                    <TouchableOpacity 
+                      key={c.slug}
+                      style={[
+                        styles.filterChip, 
+                        { marginRight: 8, paddingHorizontal: 12, paddingVertical: 6 }, 
+                        isSelected && styles.filterChipActive
+                      ]}
+                      onPress={() => setCidadeFacebook(c.slug)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.filterChipText, isSelected && styles.filterChipTextActive]}>
+                        {c.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <View style={[styles.urlPreviewBox, { marginTop: 12 }]}>
+                <Ionicons name="link-outline" size={13} color={THEME.success} style={{ marginRight: 6 }} />
+                <Text style={styles.urlPreviewText} numberOfLines={1}>
+                  {`https://www.facebook.com/marketplace/${normalizarSlugCidade(cidadeFacebook)}/search/?query=${encodeURIComponent(produto || '...')}`}
+                </Text>
+              </View>
+            </Surface>
+          </>
         )}
 
         {/* SE FOR OLX: ESTADO E REGIÃO */}
@@ -1354,7 +2347,12 @@ function CreateMonitorScreen({ navigation, route }) {
                   style={[styles.selectBtn, estadoUf === 'BR' && { opacity: 0.85 }]} 
                   onPress={() => {
                     if (estadoUf === 'BR') {
-                      Alert.alert("Brasil Inteiro", "A opção Brasil abrange automaticamente todas as regiões do país.");
+                      showAlert({
+                        title: "Brasil Inteiro",
+                        message: "A opção Brasil abrange automaticamente todas as regiões do país.",
+                        type: "info",
+                        icon: "globe-outline"
+                      });
                     } else {
                       setModalRegiaoVisivel(true);
                     }
@@ -1410,7 +2408,7 @@ function CreateMonitorScreen({ navigation, route }) {
                 placeholder="Ex: https://g1.globo.com/ ou URL do anúncio" 
                 placeholderTextColor={THEME.textSubtle} 
                 value={urls} 
-                onChangeText={setUrls}
+                onChangeText={setUrls} 
                 autoCapitalize="none"
               />
             </Surface>
@@ -1442,7 +2440,9 @@ function CreateMonitorScreen({ navigation, route }) {
               <Text style={styles.helperText}>
                 {plataforma === 'OLX'
                   ? "O robô buscará exatamente este termo nos anúncios da região definida."
-                  : plataforma === 'ZOOM' || plataforma === 'BUSCAPE'
+                  : plataforma === 'FACEBOOK'
+                  ? "O robô buscará anúncios no Facebook Marketplace da cidade selecionada."
+                  : plataforma === 'ZOOM'
                   ? "O comparador filtrará os preços de lojas confiáveis com este termo."
                   : "O robô buscará este produto na página cadastrada."}
               </Text>
@@ -1494,7 +2494,7 @@ function CreateMonitorScreen({ navigation, route }) {
             </TouchableOpacity>
 
             {/* ESTRATÉGIA: MAIS RECENTES */}
-            {!(plataforma === 'ZOOM' || plataforma === 'BUSCAPE') && (
+            {plataforma !== 'ZOOM' && (
               <TouchableOpacity 
                 style={[styles.strategyCard, estrategia === 'mais_recentes' && styles.strategyCardActive]}
                 onPress={() => setEstrategia('mais_recentes')}
@@ -1538,10 +2538,29 @@ function CreateMonitorScreen({ navigation, route }) {
               </TouchableOpacity>
             )}
 
-            {/* ESTRATÉGIA: POR PREÇO ALVO */}
+            {/* ESTRATÉGIA: POR PREÇO ALVO (COM CADEADO NO FREE) */}
             <TouchableOpacity 
-              style={[styles.strategyCard, estrategia === 'por_preco' && styles.strategyCardActive]}
-              onPress={() => setEstrategia('por_preco')}
+              style={[
+                styles.strategyCard, 
+                estrategia === 'por_preco' && styles.strategyCardActive,
+                tier === TIERS.FREE && { borderColor: 'rgba(255, 122, 0, 0.3)' }
+              ]}
+              onPress={() => {
+                if (tier === TIERS.FREE) {
+                  showAlert({
+                    title: "Recurso Exclusivo Premium",
+                    message: "O rastreamento de anúncios por Preço Alvo com faixa de tolerância é exclusivo para assinantes AchôAI Premium.",
+                    type: "warning",
+                    icon: "lock-closed",
+                    confirmText: "Ver Planos",
+                    cancelText: "Entendi",
+                    showCancel: true,
+                    onConfirm: openUpgradeModal
+                  });
+                  return;
+                }
+                setEstrategia('por_preco');
+              }}
               activeOpacity={0.8}
             >
               <View style={styles.strategyHeader}>
@@ -1549,21 +2568,28 @@ function CreateMonitorScreen({ navigation, route }) {
                   <Ionicons name="pricetag-outline" size={17} color={estrategia === 'por_preco' ? THEME.primary : THEME.textMuted} />
                 </View>
                 <View style={{ flex: 1, marginHorizontal: 10 }}>
-                  <Text style={[styles.strategyTitle, estrategia === 'por_preco' && styles.strategyTitleActive]}>
-                    Rastrear por Preço Alvo (Faixa Orçamentária)
-                  </Text>
+                  <View style={styles.row}>
+                    <Text style={[styles.strategyTitle, estrategia === 'por_preco' && styles.strategyTitleActive]}>
+                      Rastrear por Preço Alvo (Orçamento)
+                    </Text>
+                    {tier === TIERS.FREE && (
+                      <View style={{ marginLeft: 6 }}>
+                        <LockBadge text="PREMIUM" />
+                      </View>
+                    )}
+                  </View>
                   <Text style={styles.strategyDesc}>
                     Filtra ofertas com margem de tolerância em torno do seu valor desejado.
                   </Text>
                 </View>
                 <Ionicons 
-                  name={estrategia === 'por_preco' ? "radio-button-on" : "radio-button-off"} 
+                  name={tier === TIERS.FREE ? "lock-closed" : (estrategia === 'por_preco' ? "radio-button-on" : "radio-button-off")} 
                   size={19} 
-                  color={estrategia === 'por_preco' ? THEME.primary : THEME.textSubtle} 
+                  color={tier === TIERS.FREE ? THEME.warning : (estrategia === 'por_preco' ? THEME.primary : THEME.textSubtle)} 
                 />
               </View>
 
-              {estrategia === 'por_preco' && (
+              {estrategia === 'por_preco' && tier !== TIERS.FREE && (
                 <View style={styles.strategyExtraBox}>
                   <View style={styles.row}>
                     <View style={{ flex: 1, marginRight: 8 }}>
@@ -1610,36 +2636,58 @@ function CreateMonitorScreen({ navigation, route }) {
 
         {/* 4. FREQUÊNCIA DE VARREDURA */}
         <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>4. FREQUÊNCIA DE VARREDURA</Text>
-        <Surface style={styles.formSurface}>
-          <Text style={styles.inputTitle}>PRESETS RÁPIDOS</Text>
-          <View style={styles.presetsRow}>
-            {['15', '30', '60', '120'].map(p => {
-              const isSelected = String(intervalo) === p;
-              const label = p === '60' ? '1 hora' : p === '120' ? '2 horas' : `${p} min`;
-              return (
-                <TouchableOpacity 
-                  key={p}
-                  style={[styles.presetPill, isSelected && styles.presetPillActive]}
-                  onPress={() => setIntervalo(p)}
-                >
-                  <Text style={[styles.presetPillText, isSelected && styles.presetPillTextActive]}>
-                    {label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+        {tier === TIERS.FREE ? (
+          <Surface style={styles.formSurface}>
+            <View style={styles.rowBetween}>
+              <View style={{ flex: 1, paddingRight: 10 }}>
+                <Text style={styles.inputTitle}>INTERVALO FREE</Text>
+                <Text style={{ fontSize: 16, fontWeight: 'bold', color: THEME.text, marginTop: 4 }}>
+                  3 horas (180 minutos)
+                </Text>
+                <Text style={[styles.helperText, { marginTop: 6 }]}>
+                  🔒 Frequência padrão do Plano Free. Varreduras ultra rápidas a cada 15 minutos estão disponíveis no AchôAI Premium.
+                </Text>
+              </View>
+              <TouchableOpacity onPress={openUpgradeModal}>
+                <LockBadge text="LIBERAR 15M" />
+              </TouchableOpacity>
+            </View>
+          </Surface>
+        ) : (
+          <Surface style={styles.formSurface}>
+            <Text style={styles.inputTitle}>PRESETS RÁPIDOS</Text>
+            <View style={styles.presetsRow}>
+              {['15', '30', '60', '120'].map(p => {
+                const isSelected = String(intervalo) === p;
+                const label = p === '60' ? '1 hora' : p === '120' ? '2 horas' : `${p} min`;
+                return (
+                  <TouchableOpacity 
+                    key={p}
+                    style={[styles.presetPill, isSelected && styles.presetPillActive]}
+                    onPress={() => setIntervalo(p)}
+                  >
+                    <Text style={[styles.presetPillText, isSelected && styles.presetPillTextActive]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
 
-          <Text style={[styles.inputTitle, { marginTop: 12 }]}>INTERVALO MANUAL (MINUTOS)</Text>
-          <TextInput 
-            style={styles.inputField} 
-            placeholder="30" 
-            placeholderTextColor={THEME.textSubtle} 
-            keyboardType="numeric" 
-            value={intervalo} 
-            onChangeText={setIntervalo} 
-          />
-        </Surface>
+            <Text style={[styles.inputTitle, { marginTop: 12 }]}>INTERVALO MANUAL (MINUTOS)</Text>
+            <TextInput 
+              style={styles.inputField} 
+              placeholder="15" 
+              placeholderTextColor={THEME.textSubtle} 
+              keyboardType="numeric" 
+              value={intervalo} 
+              onChangeText={setIntervalo} 
+            />
+            <Text style={[styles.helperText, { marginTop: 4 }]}>
+              Tempo mínimo: 15 minutos (para evitar sobrecarga no servidor).
+            </Text>
+          </Surface>
+        )}
 
         {/* BOTÃO SALVAR */}
         <View style={{ marginTop: 22 }}>
@@ -1655,6 +2703,7 @@ function CreateMonitorScreen({ navigation, route }) {
         <View style={{ height: 60 }} />
       </ScrollView>
 
+
       {/* MODAIS DE SUPORTE */}
       <SelectionModal 
         visible={modalEstadoVisivel}
@@ -1663,12 +2712,15 @@ function CreateMonitorScreen({ navigation, route }) {
         selectedId={estadoUf}
         onSelect={(item) => {
           setEstadoUf(item.uf);
+          let novaRegiao = '';
           if (item.uf === 'BR') {
-            setRegiaoSlug('');
+            novaRegiao = '';
           } else {
             const regs = OLX_ESTADOS[item.uf]?.regioes || [];
-            setRegiaoSlug(regs.length > 1 ? regs[1].slug : regs[0]?.slug || '');
+            novaRegiao = regs.length > 1 ? regs[1].slug : regs[0]?.slug || '';
           }
+          setRegiaoSlug(novaRegiao);
+          AsyncStorage.setItem('@achoai_last_olx_location', JSON.stringify({ uf: item.uf, regiaoSlug: novaRegiao })).catch(() => {});
         }}
         onClose={() => setModalEstadoVisivel(false)}
       />
@@ -1678,7 +2730,10 @@ function CreateMonitorScreen({ navigation, route }) {
         title={`Regiões de ${OLX_ESTADOS[estadoUf]?.nome}`}
         items={regioesDoEstado}
         selectedId={regiaoSlug}
-        onSelect={(item) => setRegiaoSlug(item.slug)}
+        onSelect={(item) => {
+          setRegiaoSlug(item.slug);
+          AsyncStorage.setItem('@achoai_last_olx_location', JSON.stringify({ uf: estadoUf, regiaoSlug: item.slug })).catch(() => {});
+        }}
         onClose={() => setModalRegiaoVisivel(false)}
       />
 
@@ -1732,18 +2787,28 @@ function CreateMonitorScreen({ navigation, route }) {
 // --- TELA 5: CONFIGURAÇÕES & IDENTIDADE ---
 function SettingsScreen() {
   const { 
-    pushToken, deviceId, user, fetchData, linkAccount, logoutUser,
-    notificacoesAtivas, alternarNotificacoes 
+    pushToken, user, fetchData, linkAccount, logoutUser,
+    notificacoesAtivas, alternarNotificacoes,
+    tier, tierState, trialEligibility, activatingTrial, subscribing,
+    openUpgradeModal, handleActivateTrial, handleSubscribePremium,
+    showAlert
   } = useContext(RadarContext);
 
-  const [authTab, setAuthTab] = useState('login');
-  const [authEmail, setAuthEmail] = useState('');
-  const [authSenha, setAuthSenha] = useState('');
-  const [authConfirmaSenha, setAuthConfirmaSenha] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
-  const [modalRecuperacaoVisivel, setModalRecuperacaoVisivel] = useState(false);
-  const [emailRecuperacao, setEmailRecuperacao] = useState('');
-  const [recuperandoSenha, setRecuperandoSenha] = useState(false);
+  const [timeRemaining, setTimeRemaining] = useState(null);
+
+  useEffect(() => {
+    const updateTime = () => {
+      if (tierState?.expiresAt) {
+        setTimeRemaining(TierService.getRemainingTime(tierState.expiresAt));
+      } else {
+        setTimeRemaining(null);
+      }
+    };
+    updateTime();
+    const interval = setInterval(updateTime, 10000);
+    return () => clearInterval(interval);
+  }, [tierState?.expiresAt]);
 
   const handleLoginGoogle = async () => {
     try {
@@ -1761,7 +2826,11 @@ function SettingsScreen() {
         }
       });
       if (error) {
-        Alert.alert("Google Sign-In", error.message);
+        showAlert({
+          title: "Google Sign-In",
+          message: error.message,
+          type: "error"
+        });
         return;
       }
       if (data?.url) {
@@ -1783,137 +2852,68 @@ function SettingsScreen() {
             if (sessionData?.user) {
               await linkAccount(sessionData.user);
             }
-            Alert.alert("✅ Sucesso", "Conta Google conectada com sucesso!");
+            showAlert({
+              title: "Conectado!",
+              message: "Sua conta Google foi conectada com sucesso.",
+              type: "success",
+              icon: "checkmark-circle"
+            });
           }
         }
       }
     } catch (e) {
-      Alert.alert(
-        "Configuração do Google", 
-        "Para utilizar o login com o Google, ative o provedor Google no Supabase Dashboard e adicione a URL de retorno às Redirect URLs autorizadas."
-      );
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleLoginEmail = async () => {
-    if (!authEmail.trim() || !authSenha.trim()) {
-      return Alert.alert("Campos Obrigatórios", "Informe seu email e senha.");
-    }
-    try {
-      setAuthLoading(true);
-      const { data, error } = await supabaseAuth.auth.signInWithPassword({
-        email: authEmail.trim(),
-        password: authSenha.trim()
+      showAlert({
+        title: "Configuração do Google",
+        message: "Para utilizar o login com o Google, ative o provedor Google no Supabase Dashboard e adicione a URL de retorno às Redirect URLs autorizadas.",
+        type: "warning",
+        icon: "alert-circle"
       });
-      if (error) {
-        Alert.alert("Falha no Login", error.message);
-      } else {
-        if (data?.user) {
-          await linkAccount(data.user);
-        }
-        Alert.alert("✅ Conectado", `Bem-vindo de volta, ${data.user.email}!`);
-        setAuthEmail('');
-        setAuthSenha('');
-      }
-    } catch (e) {
-      Alert.alert("Erro", "Não foi possível conectar.");
     } finally {
       setAuthLoading(false);
-    }
-  };
-
-  const handleSignupEmail = async () => {
-    if (!authEmail.trim() || !authSenha.trim() || !authConfirmaSenha.trim()) {
-      return Alert.alert("Campos Obrigatórios", "Preencha todos os campos para criar sua conta.");
-    }
-    if (authSenha.length < 6) {
-      return Alert.alert("Senha Curta", "A senha deve conter ao menos 6 caracteres.");
-    }
-    if (authSenha !== authConfirmaSenha) {
-      return Alert.alert("Senhas Não Conferem", "A senha e a confirmação devem ser idênticas.");
-    }
-    try {
-      setAuthLoading(true);
-      const { data, error } = await supabaseAuth.auth.signUp({
-        email: authEmail.trim(),
-        password: authSenha.trim()
-      });
-      if (error) {
-        Alert.alert("Falha no Cadastro", error.message);
-      } else {
-        if (data?.user) {
-          await linkAccount(data.user);
-        }
-        Alert.alert(
-          "✅ Conta Criada!", 
-          "Sua conta foi criada com sucesso e os dados deste aparelho já foram vinculados a ela!"
-        );
-        setAuthEmail('');
-        setAuthSenha('');
-        setAuthConfirmaSenha('');
-      }
-    } catch (e) {
-      Alert.alert("Erro", "Não foi possível criar a conta.");
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleResetPassword = async () => {
-    if (!emailRecuperacao.trim()) {
-      return Alert.alert("Email Obrigatório", "Informe o email cadastrado.");
-    }
-    try {
-      setRecuperandoSenha(true);
-      const { error } = await supabaseAuth.auth.resetPasswordForEmail(emailRecuperacao.trim());
-      if (error) {
-        Alert.alert("Aviso", error.message);
-      } else {
-        Alert.alert(
-          "Email Enviado", 
-          "Caso este email esteja cadastrado, enviamos as instruções para recuperação da sua senha."
-        );
-        setModalRecuperacaoVisivel(false);
-        setEmailRecuperacao('');
-      }
-    } catch (e) {
-      Alert.alert("Erro", "Falha ao solicitar recuperação de senha.");
-    } finally {
-      setRecuperandoSenha(false);
     }
   };
 
   const handleLogout = async () => {
-    Alert.alert(
-      "Sair da Conta",
-      "Deseja realmente desconectar? Este aparelho voltará a operar no modo anônimo limpo e não terá acesso aos dados da conta.",
-      [
-        { text: "Cancelar", style: "cancel" },
-        { 
-          text: "Sair", 
-          style: "destructive", 
-          onPress: async () => {
-            await logoutUser();
-          } 
-        }
-      ]
-    );
+    showAlert({
+      title: "Desconectar Conta Google",
+      message: "Deseja realmente desconectar? Seus dados serão mantidos com segurança e este aparelho voltará ao modo anônimo local.",
+      type: "confirm_warning",
+      icon: "log-out-outline",
+      confirmText: "Sim, Sair",
+      cancelText: "Cancelar",
+      showCancel: true,
+      onConfirm: async () => {
+        await logoutUser();
+      }
+    });
   };
 
   const dispararTesteLocal = async () => {
     try {
       const res = await testLocalNotification();
       if (res && res.success === false) {
-        Alert.alert("Informação", res.message);
+        showAlert({
+          title: "Informação",
+          message: res.message,
+          type: "info"
+        });
       } else {
-        Alert.alert("Sucesso", "Notificação de teste disparada na barra de status.");
+        showAlert({
+          title: "Notificação Enviada!",
+          message: "Notificação de teste disparada na barra de status.",
+          type: "success",
+          icon: "notifications-outline"
+        });
       }
     } catch (e) {
-      Alert.alert("Aviso", "Notificações locais requerem o app compilado.");
+      showAlert({
+        title: "Aviso",
+        message: "Notificações locais requerem o app compilado.",
+        type: "warning"
+      });
     }
   };
+
 
   return (
     <View style={styles.screen}>
@@ -1923,14 +2923,165 @@ function SettingsScreen() {
       <View style={styles.screenHeader}>
         <View>
           <Text style={styles.screenHeaderTitle}>Configurações</Text>
-          <Text style={styles.screenHeaderSub}>Identidade, Nuvem e Servidor</Text>
+          <Text style={styles.screenHeaderSub}>Plano, Conta e Notificações</Text>
         </View>
+        <TierBadge tier={tier} size="md" />
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollArea} showsVerticalScrollIndicator={false}>
         
-        {/* SEÇÃO 1: IDENTIDADE DO USUÁRIO */}
-        <SectionHeader title="IDENTIDADE DO USUÁRIO" icon="person-circle-outline" />
+        {/* SEÇÃO 1: MINHA ASSINATURA & PLANO */}
+        <SectionHeader title="MINHA ASSINATURA & PLANO" icon="sparkles-outline" />
+        <Surface style={styles.settingsCard} elevated>
+          <View style={styles.rowBetween}>
+            <View style={{ flex: 1, paddingRight: 10 }}>
+              <Text style={styles.settingsItemTitle}>
+                {tier === TIERS.ADMIN ? 'Administrador Master' :
+                 tier === TIERS.PREMIUM ? 'Plano Premium Ativo' :
+                 tier === TIERS.LITE ? 'Teste Grátis (Premium Lite)' : 'Plano Gratuito'}
+              </Text>
+              <Text style={styles.helperText}>
+                {tier === TIERS.ADMIN ? 'Acesso vitalício irrestrito a todas as ferramentas.' :
+                 tier === TIERS.PREMIUM ? 'Varreduras sem cooldown, 5 radares e sincronização.' :
+                 tier === TIERS.LITE ? 'Aproveite 48 horas completas com todos os benefícios Premium.' :
+                 'Monitoramento essencial de 1 radar restrito a este aparelho.'}
+              </Text>
+            </View>
+            <TierBadge tier={tier} size="md" />
+          </View>
+
+          {/* Contador de Tempo do Plano */}
+          {tier === TIERS.PREMIUM && timeRemaining && (
+            <View style={styles.subscriptionTimeBox}>
+              <View style={styles.row}>
+                <Ionicons 
+                  name="time-outline" 
+                  size={16} 
+                  color={timeRemaining.isExpiringSoon ? THEME.warning : THEME.primary} 
+                  style={{ marginRight: 6 }} 
+                />
+                <Text style={[styles.subscriptionTimeText, timeRemaining.isExpiringSoon && { color: THEME.warning }]}>
+                  {timeRemaining.days > 0 
+                    ? `${timeRemaining.days} dias, ${timeRemaining.hours}h e ${timeRemaining.minutes}m restantes`
+                    : `${timeRemaining.hours}h e ${timeRemaining.minutes}m restantes`}
+                </Text>
+              </View>
+              {timeRemaining.isExpiringSoon && (
+                <View style={styles.expiringSoonAlert}>
+                  <Ionicons name="alert-circle" size={14} color={THEME.warning} style={{ marginRight: 6 }} />
+                  <Text style={styles.expiringSoonText}>
+                    Sua assinatura expira em breve! Renove agora para manter seus radares adicionais ativos.
+                  </Text>
+                </View>
+              )}
+            </View>
+          )}
+
+          {tier === TIERS.LITE && timeRemaining && (
+            <View style={styles.subscriptionTimeBox}>
+              <View style={styles.row}>
+                <Ionicons name="hourglass-outline" size={16} color={THEME.primary} style={{ marginRight: 6 }} />
+                <Text style={styles.subscriptionTimeText}>
+                  {timeRemaining.hours > 0 
+                    ? `${timeRemaining.hours} horas e ${timeRemaining.minutes} minutos restantes`
+                    : `${timeRemaining.minutes} minutos restantes`}
+                </Text>
+              </View>
+              <Text style={styles.trialInfoSub}>
+                Após o término das 48h, sua conta voltará automaticamente ao plano Free.
+              </Text>
+            </View>
+          )}
+
+          {tier === TIERS.ADMIN && (
+            <View style={styles.adminPerksBox}>
+              <Ionicons name="shield-checkmark" size={16} color={THEME.success} style={{ marginRight: 8 }} />
+              <Text style={styles.adminPerksText}>
+                Acesso Vitalício Irrestrito • Radares Ilimitados • Sem Cooldown
+              </Text>
+            </View>
+          )}
+
+          <View style={styles.divider} />
+
+          {/* Botões de Ação de Assinatura */}
+          {tier === TIERS.FREE && (
+            <View>
+              <TouchableOpacity 
+                style={styles.btnUpgradeSaaS}
+                onPress={handleSubscribePremium}
+                activeOpacity={0.85}
+                disabled={subscribing}
+              >
+                {subscribing ? (
+                  <ActivityIndicator size="small" color="#08090D" />
+                ) : (
+                  <>
+                    <Ionicons name="sparkles" size={16} color="#08090D" style={{ marginRight: 8 }} />
+                    <Text style={styles.btnUpgradeSaaSText}>Assinar Premium (R$ 39,90/mês)</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+
+              {trialEligibility?.canActivate && (
+                <TouchableOpacity 
+                  style={styles.btnTrialSaaS}
+                  onPress={handleActivateTrial}
+                  activeOpacity={0.8}
+                  disabled={activatingTrial}
+                >
+                  {activatingTrial ? (
+                    <ActivityIndicator size="small" color={THEME.primary} />
+                  ) : (
+                    <>
+                      <Ionicons name="gift-outline" size={15} color={THEME.primary} style={{ marginRight: 6 }} />
+                      <Text style={styles.btnTrialSaaSText}>Ativar 2 Dias Grátis (Premium Lite)</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+
+          {tier === TIERS.LITE && (
+            <TouchableOpacity 
+              style={styles.btnUpgradeSaaS}
+              onPress={handleSubscribePremium}
+              activeOpacity={0.85}
+              disabled={subscribing}
+            >
+              {subscribing ? (
+                <ActivityIndicator size="small" color="#08090D" />
+              ) : (
+                <>
+                  <Ionicons name="sparkles" size={16} color="#08090D" style={{ marginRight: 8 }} />
+                  <Text style={styles.btnUpgradeSaaSText}>Garantir Assinatura Premium (R$ 39,90/mês)</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+
+          {tier === TIERS.PREMIUM && (
+            <TouchableOpacity 
+              style={[styles.btnUpgradeSaaS, timeRemaining?.isExpiringSoon && { backgroundColor: THEME.warning }]}
+              onPress={handleSubscribePremium}
+              activeOpacity={0.85}
+              disabled={subscribing}
+            >
+              {subscribing ? (
+                <ActivityIndicator size="small" color="#08090D" />
+              ) : (
+                <>
+                  <Ionicons name="repeat" size={16} color="#08090D" style={{ marginRight: 8 }} />
+                  <Text style={styles.btnUpgradeSaaSText}>Renovar Assinatura (R$ 39,90/mês)</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+        </Surface>
+
+        {/* SEÇÃO 2: IDENTIDADE & CONTA GOOGLE */}
+        <SectionHeader title="IDENTIDADE E CONTA" icon="person-circle-outline" />
 
         {user ? (
           <Surface style={styles.settingsCard} elevated>
@@ -1941,9 +3092,7 @@ function SettingsScreen() {
                 </View>
                 <View style={{ flex: 1, marginLeft: 10 }}>
                   <Text style={styles.userEmailText} numberOfLines={1}>{user.email}</Text>
-                  <Text style={styles.userProviderText}>
-                    {user.app_metadata?.provider === 'google' ? 'Conectado via Google' : 'Conectado via Email/Senha'}
-                  </Text>
+                  <Text style={styles.userProviderText}>Conta Google Conectada</Text>
                 </View>
               </View>
               <View style={[styles.badgeSuccessPill, { flexShrink: 0 }]}>
@@ -1953,9 +3102,24 @@ function SettingsScreen() {
             </View>
 
             <View style={styles.divider} />
-            <Text style={styles.syncDescText}>
-              Seus radares e alertas estão sincronizados em nuvem. Qualquer outro aparelho conectado com este email terá acesso instantâneo.
-            </Text>
+            
+            {tier === TIERS.FREE ? (
+              <View style={styles.deviceNoticeBox}>
+                <Ionicons name="phone-portrait-outline" size={16} color={THEME.textMuted} style={{ marginRight: 8, marginTop: 2 }} />
+                <Text style={styles.deviceNoticeText}>
+                  <Text style={{ fontWeight: 'bold', color: THEME.text }}>Modo Dispositivo Único (Free): </Text>
+                  Seus radares e notificações ficam salvos exclusivamente neste aparelho. Para sincronizar em múltiplos dispositivos, ative o plano Premium.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.syncNoticeBox}>
+                <Ionicons name="cloud-done-outline" size={16} color={THEME.success} style={{ marginRight: 8, marginTop: 2 }} />
+                <Text style={styles.syncNoticeText}>
+                  <Text style={{ fontWeight: 'bold', color: THEME.text }}>Sincronização em Nuvem Ativa: </Text>
+                  Seus radares e oportunidades são sincronizados automaticamente em tempo real em todos os seus aparelhos conectados.
+                </Text>
+              </View>
+            )}
 
             <TouchableOpacity 
               style={styles.btnLogoutModern}
@@ -1963,13 +3127,13 @@ function SettingsScreen() {
               activeOpacity={0.8}
             >
               <Ionicons name="log-out-outline" size={15} color={THEME.danger} style={{ marginRight: 6 }} />
-              <Text style={styles.btnLogoutModernText}>Desconectar Conta</Text>
+              <Text style={styles.btnLogoutModernText}>Desconectar Conta Google</Text>
             </TouchableOpacity>
           </Surface>
         ) : (
           <Surface style={styles.settingsCard} elevated>
             <Text style={styles.syncDescText}>
-              Crie ou acesse sua conta para sincronizar seus radares entre vários aparelhos. Se preferir continuar sem conta, seus dados ficam salvos de forma segura e privada neste aparelho.
+              Conecte sua conta Google com 1 clique para gerenciar sua assinatura e usufruir da sincronização em nuvem caso seja assinante Premium.
             </Text>
 
             <TouchableOpacity 
@@ -1978,113 +3142,23 @@ function SettingsScreen() {
               activeOpacity={0.85}
               disabled={authLoading}
             >
-              <Ionicons name="logo-google" size={17} color="#08090D" style={{ marginRight: 8 }} />
-              <Text style={styles.btnGoogleModernText}>Continuar com o Google</Text>
+              {authLoading ? (
+                <ActivityIndicator size="small" color="#08090D" />
+              ) : (
+                <>
+                  <Ionicons name="logo-google" size={18} color="#08090D" style={{ marginRight: 10 }} />
+                  <Text style={styles.btnGoogleModernText}>Continuar com o Google</Text>
+                </>
+              )}
             </TouchableOpacity>
 
-            <View style={styles.authDividerRow}>
-              <View style={styles.authDividerLine} />
-              <Text style={styles.authDividerText}>ou email e senha</Text>
-              <View style={styles.authDividerLine} />
-            </View>
-
-            <View style={styles.authTabPillWrap}>
-              <TouchableOpacity 
-                style={[styles.authTabPill, authTab === 'login' && styles.authTabPillActive]}
-                onPress={() => setAuthTab('login')}
-              >
-                <Text style={[styles.authTabPillText, authTab === 'login' && styles.authTabPillTextActive]}>Entrar</Text>
-              </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.authTabPill, authTab === 'cadastro' && styles.authTabPillActive]}
-                onPress={() => setAuthTab('cadastro')}
-              >
-                <Text style={[styles.authTabPillText, authTab === 'cadastro' && styles.authTabPillTextActive]}>Criar Conta</Text>
-              </TouchableOpacity>
-            </View>
-
-            {authTab === 'login' ? (
-              <View style={{ marginTop: 12 }}>
-                <Text style={styles.inputTitle}>EMAIL</Text>
-                <TextInput 
-                  style={styles.inputField}
-                  placeholder="seu@email.com"
-                  placeholderTextColor={THEME.textSubtle}
-                  value={authEmail}
-                  onChangeText={setAuthEmail}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                />
-
-                <Text style={[styles.inputTitle, { marginTop: 10 }]}>SENHA</Text>
-                <TextInput 
-                  style={styles.inputField}
-                  placeholder="Sua senha de acesso"
-                  placeholderTextColor={THEME.textSubtle}
-                  value={authSenha}
-                  onChangeText={setAuthSenha}
-                  secureTextEntry
-                />
-
-                <TouchableOpacity 
-                  onPress={() => { setEmailRecuperacao(authEmail); setModalRecuperacaoVisivel(true); }}
-                  style={{ alignSelf: 'flex-end', marginTop: 8 }}
-                >
-                  <Text style={styles.forgotPasswordText}>Esqueceu a senha?</Text>
-                </TouchableOpacity>
-
-                <PrimaryButton 
-                  title="Entrar na Conta"
-                  onPress={handleLoginEmail}
-                  loading={authLoading}
-                  style={{ marginTop: 14 }}
-                />
-              </View>
-            ) : (
-              <View style={{ marginTop: 12 }}>
-                <Text style={styles.inputTitle}>SEU EMAIL</Text>
-                <TextInput 
-                  style={styles.inputField}
-                  placeholder="seu@email.com"
-                  placeholderTextColor={THEME.textSubtle}
-                  value={authEmail}
-                  onChangeText={setAuthEmail}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                />
-
-                <Text style={[styles.inputTitle, { marginTop: 10 }]}>CRIAR SENHA</Text>
-                <TextInput 
-                  style={styles.inputField}
-                  placeholder="Mínimo 6 caracteres"
-                  placeholderTextColor={THEME.textSubtle}
-                  value={authSenha}
-                  onChangeText={setAuthSenha}
-                  secureTextEntry
-                />
-
-                <Text style={[styles.inputTitle, { marginTop: 10 }]}>CONFIRMAR SENHA</Text>
-                <TextInput 
-                  style={styles.inputField}
-                  placeholder="Repita a mesma senha"
-                  placeholderTextColor={THEME.textSubtle}
-                  value={authConfirmaSenha}
-                  onChangeText={setAuthConfirmaSenha}
-                  secureTextEntry
-                />
-
-                <PrimaryButton 
-                  title="Cadastrar e Vincular"
-                  onPress={handleSignupEmail}
-                  loading={authLoading}
-                  style={{ marginTop: 14 }}
-                />
-              </View>
-            )}
+            <Text style={[styles.helperText, { textAlign: 'center', marginTop: 4 }]}>
+              Login rápido e seguro sem formulários ou senhas.
+            </Text>
           </Surface>
         )}
 
-        {/* SEÇÃO 2: SERVIDOR DO ROBÔ */}
+        {/* SEÇÃO 3: MOTOR DE VARREDURA */}
         <SectionHeader title="MOTOR DE VARREDURA" icon="hardware-chip-outline" />
         <Surface style={styles.settingsCard}>
           <View style={styles.rowBetween}>
@@ -2099,11 +3173,11 @@ function SettingsScreen() {
           </View>
           <View style={styles.divider} />
           <Text style={styles.helperText}>
-            • Responsável pelo processamento e varredura periódica de anúncios e ofertas na internet.
+            • Responsável pelo processamento autônomo e varredura periódica de anúncios e ofertas na internet.
           </Text>
         </Surface>
 
-        {/* SEÇÃO 3: NOTIFICAÇÕES */}
+        {/* SEÇÃO 5: NOTIFICAÇÕES */}
         <SectionHeader title="NOTIFICAÇÕES DO DISPOSITIVO" icon="notifications-outline" />
         <Surface style={styles.settingsCard}>
           <View style={styles.rowBetween}>
@@ -2140,7 +3214,7 @@ function SettingsScreen() {
           </TouchableOpacity>
         </Surface>
 
-        {/* SEÇÃO 4: SOBRE O ACHÔAI */}
+        {/* SEÇÃO 6: SOBRE O ACHÔAI */}
         <SectionHeader title="SOBRE O ACHÔAI" icon="information-circle-outline" />
         <Surface style={styles.settingsCard}>
           <View style={styles.rowBetween}>
@@ -2155,56 +3229,21 @@ function SettingsScreen() {
           <View style={styles.divider} />
           <View style={styles.rowBetween}>
             <Text style={styles.aboutMetaLabel}>Versão do App</Text>
-            <Text style={styles.aboutMetaValue}>1.0.0 (Build 2026)</Text>
+            <Text style={styles.aboutMetaValue}>1.0.0 (Build 2026 SaaS)</Text>
           </View>
           <View style={[styles.rowBetween, { marginTop: 6 }]}>
             <Text style={styles.aboutMetaLabel}>Fontes Integradas</Text>
-            <Text style={styles.aboutMetaValue}>OLX, Zoom, Buscapé & Web</Text>
+            <Text style={styles.aboutMetaValue}>OLX, Facebook, Zoom & Web</Text>
           </View>
           <View style={styles.divider} />
           <Text style={styles.aboutCopyrightText}>
-            A11 Digital © 2026. Todos os direitos reservados.
+            AchôAI © 2026. Todos os direitos reservados.
           </Text>
         </Surface>
 
         <View style={{ height: 90 }} />
       </ScrollView>
 
-      {/* MODAL RECUPERAÇÃO DE SENHA */}
-      <Modal visible={modalRecuperacaoVisivel} animationType="fade" transparent={true} onRequestClose={() => setModalRecuperacaoVisivel(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Recuperar Senha</Text>
-              <TouchableOpacity onPress={() => setModalRecuperacaoVisivel(false)} style={styles.modalCloseBtn}>
-                <Ionicons name="close" size={20} color={THEME.textMuted} />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.syncDescText}>
-              Informe seu email para enviarmos instruções seguras de recuperação de acesso.
-            </Text>
-
-            <Text style={[styles.inputTitle, { marginTop: 12 }]}>EMAIL</Text>
-            <TextInput 
-              style={styles.inputField}
-              placeholder="seu@email.com"
-              placeholderTextColor={THEME.textSubtle}
-              value={emailRecuperacao}
-              onChangeText={setEmailRecuperacao}
-              keyboardType="email-address"
-              autoCapitalize="none"
-            />
-
-            <PrimaryButton 
-              title="Enviar Link de Recuperação"
-              onPress={handleResetPassword}
-              loading={recuperandoSenha}
-              style={{ marginTop: 14 }}
-            />
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -2402,6 +3441,7 @@ const styles = StyleSheet.create({
 
   // Telemetria (Logs)
   telemetryCard: { padding: 14 },
+  telemetryTargetContainer: { width: '100%' },
   telemetryEmpty: { alignItems: 'center', paddingVertical: 15 },
   telemetryRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: THEME.cardBorder },
   telemetryDot: { width: 7, height: 7, borderRadius: 3.5, marginTop: 5, marginRight: 10 },
@@ -2410,6 +3450,171 @@ const styles = StyleSheet.create({
   telemetryTime: { fontSize: 10, color: THEME.textSubtle },
   telemetrySeparator: { fontSize: 10, color: THEME.textSubtle, marginHorizontal: 5 },
   telemetrySource: { fontSize: 10, color: THEME.textMuted },
+
+  // Frosted Glass Overlays (Home Telemetria)
+  frostedOverlay: {
+    backgroundColor: 'rgba(17, 20, 29, 0.76)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+    borderRadius: THEME.radius.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  frostedLockContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12
+  },
+  frostedLockCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: THEME.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+    shadowColor: THEME.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 4
+  },
+  frostedLockTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: THEME.text,
+    textAlign: 'center',
+    marginBottom: 4
+  },
+  frostedLockSub: {
+    fontSize: 12,
+    color: THEME.textMuted,
+    textAlign: 'center',
+    lineHeight: 16,
+    marginBottom: 12
+  },
+  btnFrostedUnlock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: THEME.radius.sm
+  },
+  btnFrostedUnlockText: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#08090D'
+  },
+
+  // Frosted Glass Overlays (Aba Alertas Completa)
+  alertsTargetContainer: { width: '100%' },
+  alertsFrostedOverlay: {
+    backgroundColor: 'rgba(8, 9, 13, 0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    zIndex: 10
+  },
+  blurredTextTitle: {
+    color: 'transparent',
+    textShadowColor: 'rgba(240, 242, 248, 0.40)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 11,
+  },
+  blurredPrice: {
+    color: 'transparent',
+    textShadowColor: 'rgba(16, 185, 129, 0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 13,
+  },
+  blurredTime: {
+    color: 'transparent',
+    textShadowColor: 'rgba(148, 163, 184, 0.35)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 8,
+  },
+  blurredTelemetryMessage: {
+    color: 'transparent',
+    textShadowColor: 'rgba(240, 242, 248, 0.40)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 9,
+  },
+  btnAlertActionLocked: {
+    backgroundColor: THEME.cardBgElevated,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder,
+  },
+  btnAlertActionLockedText: {
+    color: THEME.textMuted,
+    fontWeight: '700',
+  },
+  alertsLockCard: {
+    backgroundColor: 'rgba(17, 20, 29, 0.94)',
+    borderRadius: THEME.radius.xl,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 122, 0, 0.35)',
+    padding: 22,
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 340,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 8
+  },
+  alertsLockIconCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: THEME.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+    shadowColor: THEME.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 5
+  },
+  alertsLockTitle: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: THEME.text,
+    textAlign: 'center',
+    letterSpacing: 0.3,
+    marginBottom: 8
+  },
+  alertsLockSub: {
+    fontSize: 13,
+    color: THEME.textMuted,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 18
+  },
+  btnAlertsUnlock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: THEME.primary,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    borderRadius: THEME.radius.md,
+    width: '100%',
+    shadowColor: THEME.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.45,
+    shadowRadius: 8,
+    elevation: 4
+  },
+  btnAlertsUnlockText: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: '#08090D',
+    letterSpacing: 0.3
+  },
 
   // Cards de Radar (Aba 2)
   radarCard: { padding: 15, marginBottom: 12 },
@@ -2686,18 +3891,82 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderRadius: THEME.radius.sm,
     paddingVertical: 12,
-    marginBottom: 10
+    marginBottom: 4
   },
   btnGoogleModernText: { fontSize: 13, fontWeight: '700', color: '#08090D' },
-  authDividerRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 10 },
-  authDividerLine: { flex: 1, height: 1, backgroundColor: THEME.cardBorder },
-  authDividerText: { fontSize: 11, color: THEME.textSubtle, marginHorizontal: 8 },
-  authTabPillWrap: { flexDirection: 'row', backgroundColor: THEME.cardBgElevated, borderRadius: THEME.radius.sm, padding: 3, marginBottom: 10 },
-  authTabPill: { flex: 1, paddingVertical: 7, alignItems: 'center', borderRadius: 6 },
-  authTabPillActive: { backgroundColor: THEME.primary },
-  authTabPillText: { fontSize: 11, fontWeight: '700', color: THEME.textMuted },
-  authTabPillTextActive: { color: '#08090D', fontWeight: '800' },
-  forgotPasswordText: { fontSize: 11, color: THEME.primary, fontWeight: '600' },
+  subscriptionTimeBox: {
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    borderRadius: THEME.radius.sm,
+    padding: 10,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder
+  },
+  subscriptionTimeText: { fontSize: 13, fontWeight: '800', color: THEME.primary },
+  expiringSoonAlert: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.warningBg,
+    padding: 8,
+    borderRadius: THEME.radius.xs,
+    marginTop: 8
+  },
+  expiringSoonText: { flex: 1, fontSize: 11, color: THEME.warning, fontWeight: '600', lineHeight: 15 },
+  trialInfoSub: { fontSize: 11, color: THEME.textSubtle, marginTop: 4 },
+  adminPerksBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.successBg,
+    padding: 10,
+    borderRadius: THEME.radius.sm,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)'
+  },
+  adminPerksText: { flex: 1, fontSize: 11, color: THEME.success, fontWeight: '700' },
+  btnUpgradeSaaS: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: THEME.primary,
+    borderRadius: THEME.radius.sm,
+    paddingVertical: 12,
+    marginBottom: 8
+  },
+  btnUpgradeSaaSText: { fontSize: 13, fontWeight: '900', color: '#08090D' },
+  btnTrialSaaS: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: THEME.cardBgElevated,
+    borderWidth: 1,
+    borderColor: THEME.primary,
+    borderRadius: THEME.radius.sm,
+    paddingVertical: 10
+  },
+  btnTrialSaaSText: { fontSize: 12, fontWeight: '800', color: THEME.primary },
+  deviceNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: THEME.radius.sm,
+    padding: 10,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: THEME.cardBorder
+  },
+  deviceNoticeText: { flex: 1, fontSize: 11, color: THEME.textMuted, lineHeight: 16 },
+  syncNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: THEME.successBg,
+    borderRadius: THEME.radius.sm,
+    padding: 10,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.25)'
+  },
+  syncNoticeText: { flex: 1, fontSize: 11, color: THEME.textSecondary, lineHeight: 16 },
   settingsItemTitle: { fontSize: 14, fontWeight: '700', color: THEME.text },
   settingsItemSub: { fontSize: 11, color: THEME.success, marginTop: 2, fontWeight: '600' },
   infoNoticeBanner: {

@@ -33,22 +33,38 @@ export async function getOrCreateDeviceId() {
 
 /**
  * Registra ou atualiza o aparelho na tabela 'usuarios' do Supabase.
- * Salva o pushToken e o vínculo explícito com a conta de usuário (conta_id).
+ * Salva o pushToken, estado de notificações e o vínculo explícito com a conta de usuário (conta_id).
  */
-export async function registerDeviceInSupabase(deviceId, pushToken = null, contaId = null) {
+export async function registerDeviceInSupabase(deviceId, pushToken = null, contaId = null, notificacoesAtivas = true) {
   if (!deviceId) return;
   try {
-    const payload = { id: deviceId };
+    // Evita duplicidade: se outro registro antigo tiver o mesmo token push, limpa nele
+    if (pushToken && pushToken.startsWith('ExponentPushToken')) {
+      await supabase
+        .from('usuarios')
+        .update({ expo_push_token: null })
+        .eq('expo_push_token', pushToken)
+        .neq('id', deviceId);
+    }
+
+    const payload = { 
+      id: deviceId,
+      conta_id: contaId || null,
+      notificacoes_ativas: Boolean(notificacoesAtivas),
+      updated_at: new Date().toISOString()
+    };
+
     if (pushToken && pushToken.startsWith('ExponentPushToken')) {
       payload.expo_push_token = pushToken;
+    } else if (pushToken === null) {
+      payload.expo_push_token = null;
     }
-    payload.conta_id = contaId || null;
 
     const { error } = await supabase.from('usuarios').upsert([payload]);
     if (error) {
       console.log('[DeviceService] Erro ao registrar aparelho no Supabase:', error.message);
     } else {
-      console.log(`[DeviceService] Aparelho ${deviceId} registrado no Supabase (conta: ${contaId || 'anônimo'})`);
+      console.log(`[DeviceService] Aparelho ${deviceId} sincronizado no Supabase (conta: ${contaId || 'anônimo'}, token: ${payload.expo_push_token ? 'SIM' : 'NÃO'})`);
     }
   } catch (e) {
     console.log('[DeviceService] Falha na sincronização do aparelho:', e);
@@ -100,28 +116,25 @@ export async function migrateDeviceMonitorsToAccount(deviceId, accountId, pushTo
 
 /**
  * Ao deslogar a conta do aparelho:
- * 1. Desvincula o aparelho antigo no Supabase (conta_id = null) para interromper notificações da conta.
- * 2. Remove o ID antigo e gera um novo ID anônimo limpo no AsyncStorage.
- * 3. Registra o novo ID anônimo no Supabase (com o pushToken do aparelho, sem conta_id).
- * 4. Retorna o novo ID para que o app reinicie completamente zerado e isolado.
+ * 1. Desvincula o aparelho no Supabase (conta_id = null) para interromper sincronização com a conta.
+ * 2. NUNCA recria o deviceId: o mesmo aparelho físico continua existindo com seu deviceId imutável.
+ * 3. Retorna o mesmo deviceId.
  */
-export async function resetDeviceOnLogout(oldDeviceId, pushToken = null) {
+export async function resetDeviceOnLogout(deviceId) {
   try {
-    if (oldDeviceId) {
-      console.log(`[DeviceService] Desvinculando aparelho antigo ${oldDeviceId} da conta...`);
-      await supabase.from('usuarios').update({ conta_id: null }).eq('id', oldDeviceId);
+    if (deviceId) {
+      console.log(`[DeviceService] Desvinculando aparelho ${deviceId} da conta no Supabase...`);
+      await supabase
+        .from('usuarios')
+        .update({ 
+          conta_id: null,
+          updated_at: new Date().toISOString() 
+        })
+        .eq('id', deviceId);
     }
-
-    const newDeviceId = generateNewDeviceId();
-    await AsyncStorage.setItem(DEVICE_STORAGE_KEY, newDeviceId);
-    console.log(`[DeviceService] Nova identidade anônima gerada para o aparelho: ${newDeviceId}`);
-
-    await registerDeviceInSupabase(newDeviceId, pushToken, null);
-    return newDeviceId;
+    return deviceId;
   } catch (e) {
-    console.log('[DeviceService] Erro ao resetar aparelho no logout:', e);
-    const fallbackId = generateNewDeviceId();
-    await AsyncStorage.setItem(DEVICE_STORAGE_KEY, fallbackId);
-    return fallbackId;
+    console.log('[DeviceService] Erro ao desvincular aparelho no logout:', e);
+    return deviceId;
   }
 }

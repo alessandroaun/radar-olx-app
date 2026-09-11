@@ -144,6 +144,81 @@ export const StrategyBadge = ({ text, color = THEME.textMuted }) => (
   </View>
 );
 
+export const TierBadge = ({ tier = 'free', onPress, size = 'md', showCrown = true }) => {
+  const isFree = tier === 'free';
+  const isLite = tier === 'premium_lite';
+  const isPremium = tier === 'premium';
+  const isAdmin = tier === 'admin';
+
+  let config = {
+    label: 'FREE',
+    icon: 'shield-outline',
+    color: THEME.textMuted,
+    bg: 'rgba(255, 255, 255, 0.06)',
+    border: 'rgba(255, 255, 255, 0.12)'
+  };
+
+  if (isLite) {
+    config = {
+      label: 'LITE 2D',
+      icon: 'time',
+      color: THEME.info,
+      bg: THEME.infoBg,
+      border: 'rgba(6, 182, 212, 0.35)'
+    };
+  } else if (isPremium) {
+    config = {
+      label: 'PREMIUM',
+      icon: 'diamond',
+      color: THEME.primary,
+      bg: THEME.primaryGlow,
+      border: 'rgba(255, 122, 0, 0.45)'
+    };
+  } else if (isAdmin) {
+    config = {
+      label: 'ADMIN',
+      icon: 'key',
+      color: '#C084FC',
+      bg: 'rgba(168, 85, 247, 0.18)',
+      border: 'rgba(168, 85, 247, 0.45)'
+    };
+  }
+
+  const isSmall = size === 'sm';
+
+  const content = (
+    <View style={[
+      styles.tierBadgeWrap,
+      { backgroundColor: config.bg, borderColor: config.border },
+      isSmall && styles.tierBadgeWrapSm
+    ]}>
+      <Ionicons 
+        name={config.icon} 
+        size={isSmall ? 10 : 12} 
+        color={config.color} 
+        style={{ marginRight: 4 }} 
+      />
+      <Text style={[
+        styles.tierBadgeText, 
+        { color: config.color },
+        isSmall && styles.tierBadgeTextSm
+      ]}>
+        {config.label}
+      </Text>
+    </View>
+  );
+
+  if (onPress) {
+    return (
+      <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
+        {content}
+      </TouchableOpacity>
+    );
+  }
+  return content;
+};
+
+
 // =====================================================================
 // 4. CABEÇALHOS E TÍTULOS
 // =====================================================================
@@ -166,16 +241,57 @@ export const SectionHeader = ({ title, actionText, onAction, icon }) => (
 // 5. CAIXA DE MÉTRICAS (EXECUTIVE KPI)
 // =====================================================================
 
-export const MetricBox = ({ icon, value, label, sublabel, color = THEME.primary, bg = THEME.primaryGlow }) => (
-  <Surface style={styles.metricBox}>
-    <View style={[styles.metricIconBadge, { backgroundColor: bg }]}>
-      <Ionicons name={icon} size={19} color={color} />
-    </View>
-    <Text style={styles.metricValue}>{value}</Text>
-    <Text style={styles.metricLabel} numberOfLines={1}>{label}</Text>
-    {sublabel && <Text style={styles.metricSublabel} numberOfLines={1}>{sublabel}</Text>}
-  </Surface>
-);
+export const MetricBox = ({ 
+  icon, 
+  value, 
+  label, 
+  sublabel, 
+  color = THEME.primary, 
+  bg = THEME.primaryGlow, 
+  onPress,
+  style 
+}) => {
+  const Container = onPress ? TouchableOpacity : View;
+  return (
+    <Container 
+      style={[styles.metricBoxWrapper, style]} 
+      onPress={onPress} 
+      activeOpacity={onPress ? 0.8 : 1}
+    >
+      <Surface style={styles.metricBoxSurface}>
+        <View style={[styles.metricIconBadge, { backgroundColor: bg }]}>
+          <Ionicons name={icon} size={18} color={color} />
+        </View>
+        <Text 
+          style={styles.metricValue} 
+          numberOfLines={1} 
+          adjustsFontSizeToFit 
+          minimumFontScale={0.7}
+        >
+          {value}
+        </Text>
+        <Text 
+          style={styles.metricLabel} 
+          numberOfLines={1} 
+          adjustsFontSizeToFit 
+          minimumFontScale={0.75}
+        >
+          {label}
+        </Text>
+        {sublabel ? (
+          <Text 
+            style={styles.metricSublabel} 
+            numberOfLines={1} 
+            adjustsFontSizeToFit 
+            minimumFontScale={0.75}
+          >
+            {sublabel}
+          </Text>
+        ) : null}
+      </Surface>
+    </Container>
+  );
+};
 
 // =====================================================================
 // 6. ESTILOS DO DESIGN SYSTEM
@@ -350,39 +466,69 @@ const styles = StyleSheet.create({
   },
 
   // Caixa de Métrica
-  metricBox: {
+  metricBoxWrapper: {
     flex: 1,
-    marginHorizontal: 4,
-    padding: 14,
+    marginHorizontal: 3,
+  },
+  metricBoxSurface: {
+    paddingVertical: 12,
+    paddingHorizontal: 4,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 0
+    marginBottom: 0,
+    width: '100%',
+    minHeight: 110,
   },
   metricIconBadge: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8
+    marginBottom: 6
   },
   metricValue: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '900',
     color: THEME.text,
-    letterSpacing: 0.5
+    letterSpacing: 0.3,
+    textAlign: 'center'
   },
   metricLabel: {
     fontSize: 11,
-    fontWeight: '600',
+    fontWeight: '700',
     color: THEME.textMuted,
     marginTop: 2,
     textAlign: 'center'
   },
   metricSublabel: {
     fontSize: 9,
+    fontWeight: '600',
     color: THEME.textSubtle,
     marginTop: 2,
     textAlign: 'center'
+  },
+
+  // Tier Badge
+  tierBadgeWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: THEME.radius.pill,
+    borderWidth: 1
+  },
+  tierBadgeWrapSm: {
+    paddingHorizontal: 6,
+    paddingVertical: 2
+  },
+  tierBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.6
+  },
+  tierBadgeTextSm: {
+    fontSize: 9
   }
 });
+
