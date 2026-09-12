@@ -25,8 +25,8 @@ export const TIER_LIMITS = {
     name: 'Free',
     label: 'Plano Gratuito',
     maxRadars: 1,
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM'],
-    allowedStrategies: ['mais_recentes'], // padrão
+    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON'],
+    allowedStrategies: ['mais_recentes', 'menor_preco', 'maior_desconto'], // padrão
     canUseTargetPrice: false,
     fixedIntervalMinutes: 180, // Travado em 3 horas (180 min)
     sweepCooldownSeconds: 3600, // 60 minutos entre varreduras manuais
@@ -39,8 +39,8 @@ export const TIER_LIMITS = {
     name: 'Premium Lite',
     label: 'Teste Grátis (2 Dias)',
     maxRadars: 5,
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'OUTROS'],
-    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'noticia'],
+    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON', 'OUTROS'],
+    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'maior_desconto', 'noticia'],
     canUseTargetPrice: true,
     fixedIntervalMinutes: null, // Livre
     sweepCooldownSeconds: 0,
@@ -54,8 +54,8 @@ export const TIER_LIMITS = {
     name: 'Premium',
     label: 'Assinatura Premium',
     maxRadars: 5,
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'OUTROS'],
-    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'noticia'],
+    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON', 'OUTROS'],
+    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'maior_desconto', 'noticia'],
     canUseTargetPrice: true,
     fixedIntervalMinutes: null, // Livre
     sweepCooldownSeconds: 0,
@@ -70,8 +70,8 @@ export const TIER_LIMITS = {
     name: 'Admin',
     label: 'Administrador Master',
     maxRadars: 9999, // Ilimitado
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'OUTROS'],
-    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'noticia'],
+    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON', 'OUTROS'],
+    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'maior_desconto', 'noticia'],
     canUseTargetPrice: true,
     fixedIntervalMinutes: null,
     sweepCooldownSeconds: 0,

@@ -137,6 +137,324 @@ export const PlatformBadge = ({ platformKey = 'OLX' }) => {
   );
 };
 
+export const ShopeeOriginBadge = ({ origem = 'Nacional' }) => {
+  const isNac = origem === 'Nacional';
+  return (
+    <View style={[
+      styles.shopeeOriginBadge, 
+      isNac ? styles.shopeeOriginBadgeNac : styles.shopeeOriginBadgeInter
+    ]}>
+      <Ionicons 
+        name={isNac ? "flag-outline" : "globe-outline"} 
+        size={10} 
+        color={isNac ? "#10B981" : "#3B82F6"} 
+        style={{ marginRight: 3 }} 
+      />
+      <Text style={[
+        styles.shopeeOriginBadgeText,
+        isNac ? styles.shopeeOriginBadgeTextNac : styles.shopeeOriginBadgeTextInter
+      ]}>
+        {origem}
+      </Text>
+    </View>
+  );
+};
+
+export const ShopeeDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.shopeeDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#EE4D2D" style={{ marginRight: 3 }} />
+      <Text style={styles.shopeeDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const ShopeeRatingBadge = ({ score, vendidos }) => {
+  if (!score && !vendidos) return null;
+  return (
+    <View style={styles.shopeeRatingBadge}>
+      {score ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: vendidos ? 5 : 0 }}>
+          <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
+          <Text style={styles.shopeeRatingBadgeText}>{Number(score).toFixed(1)}</Text>
+        </View>
+      ) : null}
+      {vendidos ? (
+        <Text style={styles.shopeeSalesBadgeText}>{vendidos}</Text>
+      ) : null}
+    </View>
+  );
+};
+
+export const parseShopeeInfo = (title = '', url = '') => {
+  const isShopee = (url && url.toLowerCase().includes('shopee.com.br')) || title.includes('📍') || title.includes('OFF') || title.includes('off') || title.includes('⭐');
+  let cleanTitle = title || '';
+  let origem = null;
+  let desconto = null;
+  let score = null;
+  let vendidos = null;
+
+  // Extrair avaliação ⭐ x.x
+  const starMatch = cleanTitle.match(/(?:•\s*)?(?:\[⭐\s*([1-5]\.[0-9])\]|⭐\s*([1-5]\.[0-9]))/);
+  if (starMatch) {
+    score = starMatch[1] || starMatch[2];
+    cleanTitle = cleanTitle.replace(starMatch[0], '').trim();
+  }
+
+  // Extrair vendidos ex: • 20mil+ Vendido(s) ou [20mil+ Vendidos]
+  const salesMatch = cleanTitle.match(/(?:•\s*)?(?:\[(\d+(?:[\.,]\d+)?\s*(?:mil|k)?\+?\s*vendido[s\(\)]*)\]|(\d+(?:[\.,]\d+)?\s*(?:mil|k)?\+?\s*vendido[s\(\)]*))/i);
+  if (salesMatch) {
+    vendidos = salesMatch[1] || salesMatch[2];
+    cleanTitle = cleanTitle.replace(salesMatch[0], '').trim();
+  }
+
+  if (cleanTitle.includes('• 📍')) {
+    const parts = cleanTitle.split('• 📍');
+    cleanTitle = parts[0].trim();
+    const locPart = parts[1] ? parts[1].trim() : '';
+    if (locPart.toLowerCase().includes('internacional')) {
+      origem = 'Internacional';
+    } else {
+      origem = 'Nacional';
+    }
+  } else if (cleanTitle.toLowerCase().includes('internacional')) {
+    origem = 'Internacional';
+  } else if (isShopee) {
+    origem = 'Nacional';
+  }
+
+  // Desconto no formato "• -xx%" ou "• -xx% OFF" ou "(-xx% OFF)" ou "[-xx%OFF]"
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/off/i, '').replace('-', '').replace('[', '').replace(']', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  cleanTitle = cleanTitle.replace(/\s*•\s*$/, '').trim();
+
+  return { cleanTitle, origem, desconto, score, vendidos };
+};
+
+export const MLFullBadge = () => (
+  <View style={styles.mlFullBadge}>
+    <Ionicons name="flash" size={10} color="#00A650" style={{ marginRight: 3 }} />
+    <Text style={styles.mlFullBadgeText}>FULL</Text>
+  </View>
+);
+
+export const MLFreeShippingBadge = () => (
+  <View style={styles.mlFreeShippingBadge}>
+    <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+    <Text style={styles.mlFreeShippingBadgeText}>Frete Grátis</Text>
+  </View>
+);
+
+export const MLDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.mlDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#00A650" style={{ marginRight: 3 }} />
+      <Text style={styles.mlDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const parseMLInfo = (title = '', url = '') => {
+  const isML = (url && (url.toLowerCase().includes('mercadolivre.com') || url.toLowerCase().includes('mercadolivre.com.br'))) ||
+               title.includes('FULL') || title.includes('Frete Grátis');
+  let cleanTitle = title || '';
+  let isFull = cleanTitle.includes('⚡ FULL') || cleanTitle.includes('[FULL]') || (url && url.includes('_Frete_Full'));
+  let isFreteGratis = cleanTitle.includes('🚚 Frete Grátis') || cleanTitle.includes('[Frete Grátis]') || (url && url.includes('_CustoFrete_Gratis'));
+  let desconto = null;
+  let origem = null;
+  let condicao = null;
+
+  // Extrai desconto (% OFF)
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  // Remove tags estruturadas do título
+  cleanTitle = cleanTitle
+    .replace(/•\s*⚡\s*FULL/gi, '')
+    .replace(/\[FULL\]/gi, '')
+    .replace(/•\s*🚚\s*Frete\s*Grátis/gi, '')
+    .replace(/\[Frete\s*Grátis\]/gi, '')
+    .replace(/•\s*📍\s*Nacional/gi, '')
+    .replace(/•\s*📍\s*Internacional/gi, '')
+    .replace(/•\s*Novo/gi, '')
+    .replace(/•\s*Usado/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, isFull, isFreteGratis, desconto, origem, condicao };
+};
+
+export const AmazonPrimeBadge = () => (
+  <View style={styles.amzPrimeBadge}>
+    <Ionicons name="cube" size={10} color="#00A8E1" style={{ marginRight: 3 }} />
+    <Text style={styles.amzPrimeBadgeText}>Prime</Text>
+  </View>
+);
+
+export const AmazonFreeShippingBadge = () => (
+  <View style={styles.amzFreeShippingBadge}>
+    <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+    <Text style={styles.amzFreeShippingBadgeText}>Frete Grátis</Text>
+  </View>
+);
+
+export const AmazonDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.amzDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#FF9900" style={{ marginRight: 3 }} />
+      <Text style={styles.amzDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const parseAmazonInfo = (title = '', url = '') => {
+  const isAmz = (url && (url.toLowerCase().includes('amazon.com.br') || url.toLowerCase().includes('amazon.com') || url.toLowerCase().includes('amzn.to'))) ||
+                title.includes('Prime') || title.includes('Amazon');
+  let cleanTitle = title || '';
+  let isPrime = cleanTitle.includes('📦 Prime') || cleanTitle.includes('[Prime]');
+  let isFreteGratis = isPrime || cleanTitle.includes('🚚 Frete Grátis') || cleanTitle.includes('[Frete Grátis]');
+  let desconto = null;
+  let score = null;
+  let origem = null;
+  let condicao = null;
+
+  // Extrair avaliação ⭐ x.x ou ⭐ x
+  const starMatch = cleanTitle.match(/(?:•\s*)?(?:\[⭐\s*([1-5](?:\.[0-9]+)?)\]|⭐\s*([1-5](?:\.[0-9]+)?))/);
+  if (starMatch) {
+    score = starMatch[1] || starMatch[2];
+    cleanTitle = cleanTitle.replace(starMatch[0], '').trim();
+  }
+
+  // Extrai desconto (% OFF)
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  if (cleanTitle.includes('• 📍 Internacional') || cleanTitle.includes('[INTER]')) {
+    origem = 'Internacional';
+  } else if (cleanTitle.includes('• 📍 Nacional') || cleanTitle.includes('[NAC]')) {
+    origem = 'Nacional';
+  }
+
+  if (cleanTitle.includes('• Usado')) {
+    condicao = 'Usado';
+  } else if (cleanTitle.includes('• Novo')) {
+    condicao = 'Novo';
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/•\s*📦\s*Prime/gi, '')
+    .replace(/\[Prime\]/gi, '')
+    .replace(/•\s*🚚\s*Frete\s*Grátis/gi, '')
+    .replace(/\[Frete\s*Grátis\]/gi, '')
+    .replace(/•\s*📍\s*Nacional/gi, '')
+    .replace(/\[NAC\]/gi, '')
+    .replace(/•\s*📍\s*Internacional/gi, '')
+    .replace(/\[INTER\]/gi, '')
+    .replace(/•\s*Novo/gi, '')
+    .replace(/•\s*Usado/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, isPrime, isFreteGratis, desconto, score, origem, condicao };
+};
+
+export const MagaluFullBadge = () => (
+  <View style={styles.magaluFullBadge}>
+    <Ionicons name="flash" size={10} color="#0086FF" style={{ marginRight: 3 }} />
+    <Text style={styles.magaluFullBadgeText}>Full</Text>
+  </View>
+);
+
+export const MagaluFreeShippingBadge = () => (
+  <View style={styles.magaluFreeShippingBadge}>
+    <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+    <Text style={styles.magaluFreeShippingBadgeText}>Frete Grátis</Text>
+  </View>
+);
+
+export const MagaluDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.magaluDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#0086FF" style={{ marginRight: 3 }} />
+      <Text style={styles.magaluDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const parseMagaluInfo = (title = '', url = '') => {
+  const isMagalu = (url && (url.toLowerCase().includes('magazineluiza.com.br') || url.toLowerCase().includes('magalu.com'))) ||
+                   title.includes('Magalu') || title.includes('Magazine Luiza');
+  let cleanTitle = title || '';
+  let isFull = cleanTitle.includes('• ⚡ Full') || cleanTitle.includes('[Full]');
+  let isFreteGratis = cleanTitle.includes('• 🚚 Frete Grátis') || cleanTitle.includes('[Frete Grátis]');
+  let desconto = null;
+  let score = null;
+  let origem = null;
+
+  // Extrair avaliação ⭐ x.x ou ⭐ x
+  const starMatch = cleanTitle.match(/(?:•\s*)?(?:\[⭐\s*([1-5](?:\.[0-9]+)?)\]|⭐\s*([1-5](?:\.[0-9]+)?))/);
+  if (starMatch) {
+    score = starMatch[1] || starMatch[2];
+    cleanTitle = cleanTitle.replace(starMatch[0], '').trim();
+  }
+
+  // Extrai desconto (% OFF)
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  if (cleanTitle.includes('• 📍 Internacional') || cleanTitle.includes('[INTER]')) {
+    origem = 'Internacional';
+  } else if (cleanTitle.includes('• 📍 Nacional') || cleanTitle.includes('[NAC]')) {
+    origem = 'Nacional';
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/•\s*⚡\s*Full/gi, '')
+    .replace(/\[Full\]/gi, '')
+    .replace(/•\s*🚚\s*Frete\s*Grátis/gi, '')
+    .replace(/\[Frete\s*Grátis\]/gi, '')
+    .replace(/•\s*📍\s*Nacional/gi, '')
+    .replace(/\[NAC\]/gi, '')
+    .replace(/•\s*📍\s*Internacional/gi, '')
+    .replace(/\[INTER\]/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, isFull, isFreteGratis, desconto, score, origem };
+};
+
 export const StrategyBadge = ({ text, color = THEME.textMuted }) => (
   <View style={styles.strategyBadge}>
     <Ionicons name="sparkles-outline" size={11} color={THEME.primary} style={{ marginRight: 4 }} />
@@ -423,6 +741,226 @@ const styles = StyleSheet.create({
   platformBadgeText: {
     fontSize: 11,
     fontWeight: '700',
+    letterSpacing: 0.3
+  },
+  shopeeOriginBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  shopeeOriginBadgeNac: {
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderColor: 'rgba(16, 185, 129, 0.35)'
+  },
+  shopeeOriginBadgeInter: {
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderColor: 'rgba(59, 130, 246, 0.35)'
+  },
+  shopeeOriginBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.3
+  },
+  shopeeOriginBadgeTextNac: {
+    color: '#10B981'
+  },
+  shopeeOriginBadgeTextInter: {
+    color: '#3B82F6'
+  },
+  shopeeDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(238, 77, 45, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(238, 77, 45, 0.4)',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  shopeeDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#EE4D2D',
+    letterSpacing: 0.3
+  },
+  shopeeRatingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 187, 0, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 187, 0, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  shopeeRatingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#FFBB00',
+    letterSpacing: 0.3
+  },
+  shopeeSalesBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#D1D5DB'
+  },
+  mlFullBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 166, 80, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 166, 80, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  mlFullBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#00A650',
+    letterSpacing: 0.3
+  },
+  mlFreeShippingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  mlFreeShippingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.3
+  },
+  mlDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 166, 80, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 166, 80, 0.4)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  mlDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#00A650',
+    letterSpacing: 0.3
+  },
+  amzPrimeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 168, 225, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 168, 225, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  amzPrimeBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#00A8E1',
+    letterSpacing: 0.3
+  },
+  amzFreeShippingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  amzFreeShippingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.3
+  },
+  amzDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 153, 0, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 153, 0, 0.4)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  amzDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#FF9900',
+    letterSpacing: 0.3
+  },
+  magaluFullBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 134, 255, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 134, 255, 0.4)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  magaluFullBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#0086FF',
+    letterSpacing: 0.3
+  },
+  magaluFreeShippingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  magaluFreeShippingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.3
+  },
+  magaluDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 134, 255, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 134, 255, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  magaluDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#0086FF',
     letterSpacing: 0.3
   },
   strategyBadge: {

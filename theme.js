@@ -54,6 +54,34 @@ export const THEME = {
       border: 'rgba(24, 119, 242, 0.35)',
       icon: 'logo-facebook'
     },
+    SHOPEE: {
+      nome: 'Shopee',
+      color: '#EE4D2D',        // Laranja Shopee
+      bg: 'rgba(238, 77, 45, 0.12)',
+      border: 'rgba(238, 77, 45, 0.35)',
+      icon: 'bag-handle-outline'
+    },
+    MERCADO_LIVRE: {
+      nome: 'Mercado Livre',
+      color: '#FFE600',        // Amarelo Mercado Livre
+      bg: 'rgba(255, 230, 0, 0.12)',
+      border: 'rgba(255, 230, 0, 0.35)',
+      icon: 'cube-outline'
+    },
+    AMAZON: {
+      nome: 'Amazon',
+      color: '#FF9900',        // Laranja Amazon
+      bg: 'rgba(255, 153, 0, 0.12)',
+      border: 'rgba(255, 153, 0, 0.35)',
+      icon: 'cart-outline'
+    },
+    MAGALU: {
+      nome: 'Magalu',
+      color: '#0086FF',        // Azul Magalu
+      bg: 'rgba(0, 134, 255, 0.12)',
+      border: 'rgba(0, 134, 255, 0.35)',
+      icon: 'bag-handle-outline'
+    },
     OUTROS: {
       nome: 'Web & Notícias',
       color: '#06B6D4',        // Ciano
