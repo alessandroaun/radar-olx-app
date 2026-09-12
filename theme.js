@@ -82,6 +82,27 @@ export const THEME = {
       border: 'rgba(0, 134, 255, 0.35)',
       icon: 'bag-handle-outline'
     },
+    KABUM: {
+      nome: 'KaBuM!',
+      color: '#FF6500',        // Laranja KaBuM
+      bg: 'rgba(255, 101, 0, 0.12)',
+      border: 'rgba(255, 101, 0, 0.35)',
+      icon: 'hardware-chip-outline'
+    },
+    AMERICANAS: {
+      nome: 'Americanas',
+      color: '#E60014',        // Vermelho Americanas
+      bg: 'rgba(230, 0, 20, 0.12)',
+      border: 'rgba(230, 0, 20, 0.35)',
+      icon: 'storefront-outline'
+    },
+    SHEIN: {
+      nome: 'SHEIN',
+      color: '#FFFFFF',        // Branco/Dark Shein
+      bg: 'rgba(255, 255, 255, 0.12)',
+      border: 'rgba(255, 255, 255, 0.35)',
+      icon: 'shirt-outline'
+    },
     OUTROS: {
       nome: 'Web & Notícias',
       color: '#06B6D4',        // Ciano

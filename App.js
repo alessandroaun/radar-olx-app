@@ -25,7 +25,10 @@ import {
   ShopeeOriginBadge, ShopeeDiscountBadge, ShopeeRatingBadge, parseShopeeInfo,
   MLFullBadge, MLFreeShippingBadge, MLDiscountBadge, parseMLInfo,
   AmazonPrimeBadge, AmazonFreeShippingBadge, AmazonDiscountBadge, parseAmazonInfo,
-  MagaluFullBadge, MagaluFreeShippingBadge, MagaluDiscountBadge, parseMagaluInfo
+  MagaluFullBadge, MagaluFreeShippingBadge, MagaluDiscountBadge, parseMagaluInfo,
+  KabumFreeShippingBadge, KabumDiscountBadge, parseKabumInfo,
+  AmericanasFastDeliveryBadge, AmericanasFreeShippingBadge, AmericanasDiscountBadge, parseAmericanasInfo,
+  SheinBestSellerBadge, SheinDiscountBadge, parseSheinInfo
 } from './components';
 import { TierService, TIERS, TIER_LIMITS } from './tierService';
 import { 
@@ -1012,6 +1015,9 @@ function RadarProvider({ children }) {
 
 function identificarPlataforma(url) {
   const u = (url || '').toLowerCase();
+  if (u.includes('kabum.com.br')) return 'KABUM';
+  if (u.includes('americanas.com.br')) return 'AMERICANAS';
+  if (u.includes('shein.com') || u.includes('shein.top')) return 'SHEIN';
   if (u.includes('magazineluiza.com.br') || u.includes('magalu.com')) return 'MAGALU';
   if (u.includes('amazon.com.br') || u.includes('amazon.com') || u.includes('amzn.to')) return 'AMAZON';
   if (u.includes('facebook.com')) return 'FACEBOOK';
@@ -1352,6 +1358,15 @@ function DashboardScreen({ navigation }) {
             const magaluInfo = plat === 'MAGALU'
               ? parseMagaluInfo(item.title, item.url)
               : null;
+            const kabumInfo = plat === 'KABUM'
+              ? parseKabumInfo(item.title, item.url)
+              : null;
+            const ameInfo = plat === 'AMERICANAS'
+              ? parseAmericanasInfo(item.title, item.url)
+              : null;
+            const sheinInfo = plat === 'SHEIN'
+              ? parseSheinInfo(item.title, item.url)
+              : null;
             const displayTitle = plat === 'SHOPEE' 
               ? shopeeInfo.cleanTitle 
               : plat === 'MERCADO_LIVRE' && mlInfo 
@@ -1360,6 +1375,12 @@ function DashboardScreen({ navigation }) {
               ? amzInfo.cleanTitle
               : plat === 'MAGALU' && magaluInfo
               ? magaluInfo.cleanTitle
+              : plat === 'KABUM' && kabumInfo
+              ? kabumInfo.cleanTitle
+              : plat === 'AMERICANAS' && ameInfo
+              ? ameInfo.cleanTitle
+              : plat === 'SHEIN' && sheinInfo
+              ? sheinInfo.cleanTitle
               : item.title;
 
             return (
@@ -1415,6 +1436,39 @@ function DashboardScreen({ navigation }) {
                     {plat === 'MAGALU' && magaluInfo && magaluInfo.score && (
                       <ShopeeRatingBadge score={magaluInfo.score} />
                     )}
+                    {plat === 'KABUM' && kabumInfo && kabumInfo.isFreteGratis && (
+                      <KabumFreeShippingBadge />
+                    )}
+                    {plat === 'KABUM' && kabumInfo && kabumInfo.desconto && (
+                      <KabumDiscountBadge discount={kabumInfo.desconto} />
+                    )}
+                    {plat === 'KABUM' && kabumInfo && kabumInfo.score && (
+                      <ShopeeRatingBadge score={kabumInfo.score} />
+                    )}
+                    {plat === 'AMERICANAS' && ameInfo && ameInfo.isEntregaRapida && (
+                      <AmericanasFastDeliveryBadge />
+                    )}
+                    {plat === 'AMERICANAS' && ameInfo && ameInfo.isFreteGratis && (
+                      <AmericanasFreeShippingBadge />
+                    )}
+                    {plat === 'AMERICANAS' && ameInfo && ameInfo.desconto && (
+                      <AmericanasDiscountBadge discount={ameInfo.desconto} />
+                    )}
+                    {plat === 'AMERICANAS' && ameInfo && ameInfo.score && (
+                      <ShopeeRatingBadge score={ameInfo.score} />
+                    )}
+                    {plat === 'SHEIN' && sheinInfo && sheinInfo.origem && (
+                      <ShopeeOriginBadge origem={sheinInfo.origem} />
+                    )}
+                    {plat === 'SHEIN' && sheinInfo && sheinInfo.isMaisVendidos && (
+                      <SheinBestSellerBadge />
+                    )}
+                    {plat === 'SHEIN' && sheinInfo && sheinInfo.desconto && (
+                      <SheinDiscountBadge discount={sheinInfo.desconto} />
+                    )}
+                    {plat === 'SHEIN' && sheinInfo && sheinInfo.score && (
+                      <ShopeeRatingBadge score={sheinInfo.score} />
+                    )}
                   </View>
                   <Text style={styles.opportunityDate}>
                     {new Date(item.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} • Hoje
@@ -1447,7 +1501,7 @@ function DashboardScreen({ navigation }) {
                     activeOpacity={0.8}
                   >
                     <Text style={styles.btnOpenOfferText}>
-                      {plat === 'MAGALU' ? 'Ver no Magalu' : plat === 'AMAZON' ? 'Ver na Amazon' : plat === 'MERCADO_LIVRE' ? 'Ver no Mercado Livre' : plat === 'SHOPEE' ? 'Ver na Shopee' : plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'FACEBOOK' ? 'Ver no Facebook' : plat === 'OLX' ? 'Ver na OLX' : 'Ver Oferta'}
+                      {plat === 'KABUM' ? 'Ver no KaBuM' : plat === 'AMERICANAS' ? 'Ver na Americanas' : plat === 'SHEIN' ? 'Ver na SHEIN' : plat === 'MAGALU' ? 'Ver no Magalu' : plat === 'AMAZON' ? 'Ver na Amazon' : plat === 'MERCADO_LIVRE' ? 'Ver no Mercado Livre' : plat === 'SHOPEE' ? 'Ver na Shopee' : plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'FACEBOOK' ? 'Ver no Facebook' : plat === 'OLX' ? 'Ver na OLX' : 'Ver Oferta'}
                     </Text>
                     <Ionicons name="arrow-forward" size={13} color={THEME.primary} style={{ marginLeft: 5 }} />
                   </TouchableOpacity>
@@ -1763,7 +1817,7 @@ function MonitorListScreen({ navigation }) {
             if (m.modo === 'noticia') {
               estratDesc = 'Notícia';
             } else if (modoEstrat === 'maior_desconto') {
-              const apenas1 = m.palavras && (m.palavras.includes('ml_apenas_maior_desconto:true') || m.palavras.includes('shopee_apenas_maior_desconto:true') || m.palavras.includes('amz_apenas_maior_desconto:true') || m.palavras.includes('magalu_apenas_maior_desconto:true'));
+              const apenas1 = m.palavras && (m.palavras.includes('ml_apenas_maior_desconto:true') || m.palavras.includes('shopee_apenas_maior_desconto:true') || m.palavras.includes('amz_apenas_maior_desconto:true') || m.palavras.includes('magalu_apenas_maior_desconto:true') || m.palavras.includes('kabum_apenas_maior_desconto:true') || m.palavras.includes('ame_apenas_maior_desconto:true') || m.palavras.includes('shein_apenas_maior_desconto:true'));
               estratDesc = apenas1 ? 'Único Maior Desconto' : 'Maior Desconto';
             } else if (modoEstrat === 'menor_preco') {
               estratDesc = 'Menor Preço';
@@ -1965,6 +2019,93 @@ function MonitorListScreen({ navigation }) {
                               <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
                                 <Ionicons name="globe-outline" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
                                 <Text style={[styles.locationChipText, { color: '#3B82F6', fontWeight: '700' }]}>Internacional</Text>
+                              </View>
+                            )}
+                          </>
+                        );
+                      })()}
+                      {plataforma === 'KABUM' && (() => {
+                        const palavrasStr = (m.palavras || '').toLowerCase();
+                        const temFrete = palavrasStr.includes('kabum_frete_gratis:true');
+                        const temAval = palavrasStr.includes('kabum_melhor_avaliacao:true');
+
+                        return (
+                          <>
+                            {temFrete && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
+                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
+                              </View>
+                            )}
+                            {temAval && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
+                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
+                              </View>
+                            )}
+                          </>
+                        );
+                      })()}
+                      {plataforma === 'AMERICANAS' && (() => {
+                        const palavrasStr = (m.palavras || '').toLowerCase();
+                        const temRapida = palavrasStr.includes('ame_entrega_rapida:true') || palavrasStr.includes('americanas_entrega_rapida:true') || palavrasStr.includes('ame_full:true');
+                        const temFrete = palavrasStr.includes('ame_frete_gratis:true') || palavrasStr.includes('americanas_frete_gratis:true');
+                        const temAval = palavrasStr.includes('ame_melhor_avaliacao:true') || palavrasStr.includes('americanas_melhor_avaliacao:true');
+
+                        return (
+                          <>
+                            {temRapida && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(230, 0, 20, 0.45)', backgroundColor: 'rgba(230, 0, 20, 0.12)' }]}>
+                                <Ionicons name="flash" size={10} color="#E60014" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#E60014', fontWeight: '800' }]}>Entrega Rápida</Text>
+                              </View>
+                            )}
+                            {temFrete && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
+                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
+                              </View>
+                            )}
+                            {temAval && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
+                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
+                              </View>
+                            )}
+                          </>
+                        );
+                      })()}
+                      {plataforma === 'SHEIN' && (() => {
+                        const palavrasStr = (m.palavras || '').toLowerCase();
+                        const temNac = palavrasStr.includes('shein_nacional:true');
+                        const temInter = palavrasStr.includes('shein_internacional:true');
+                        const temMaisVendidos = palavrasStr.includes('shein_mais_vendidos:true');
+                        const temAval = palavrasStr.includes('shein_melhor_avaliacao:true');
+
+                        return (
+                          <>
+                            {temNac && !temInter && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
+                                <Ionicons name="flag-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Nacional</Text>
+                              </View>
+                            )}
+                            {temInter && !temNac && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
+                                <Ionicons name="globe-outline" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
+                                <Text style={[styles.locationChipText, { color: '#3B82F6', fontWeight: '700' }]}>Internacional</Text>
+                              </View>
+                            )}
+                            {temMaisVendidos && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(245, 158, 11, 0.45)', backgroundColor: 'rgba(245, 158, 11, 0.12)' }]}>
+                                <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#F59E0B', fontWeight: '800' }]}>Mais Vendidos</Text>
+                              </View>
+                            )}
+                            {temAval && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
+                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
                               </View>
                             )}
                           </>
@@ -2173,9 +2314,9 @@ function AlertsScreen({ navigation }) {
 
       {/* CHIPS DE FILTRO POR PLATAFORMA */}
       <View style={styles.filterChipRow}>
-        {['TODAS', 'OLX', 'FACEBOOK', 'MERCADO_LIVRE', 'SHOPEE', 'AMAZON', 'MAGALU', 'ZOOM', 'OUTROS'].map(k => {
+        {['TODAS', 'OLX', 'FACEBOOK', 'MERCADO_LIVRE', 'SHOPEE', 'AMAZON', 'MAGALU', 'KABUM', 'AMERICANAS', 'SHEIN', 'ZOOM', 'OUTROS'].map(k => {
           const isSelected = filtroPlataforma === k;
-          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'FACEBOOK' ? 'Facebook' : k === 'MERCADO_LIVRE' ? 'Mercado Livre' : k === 'SHOPEE' ? 'Shopee' : k === 'AMAZON' ? 'Amazon' : k === 'MAGALU' ? 'Magalu' : k === 'ZOOM' ? 'Zoom' : 'OLX';
+          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'FACEBOOK' ? 'Facebook' : k === 'MERCADO_LIVRE' ? 'Mercado Livre' : k === 'SHOPEE' ? 'Shopee' : k === 'AMAZON' ? 'Amazon' : k === 'MAGALU' ? 'Magalu' : k === 'KABUM' ? 'KaBuM!' : k === 'AMERICANAS' ? 'Americanas' : k === 'SHEIN' ? 'SHEIN' : k === 'ZOOM' ? 'Zoom' : 'OLX';
           return (
             <TouchableOpacity 
               key={k}
@@ -2231,6 +2372,15 @@ function AlertsScreen({ navigation }) {
                 const magaluInfo = plat === 'MAGALU'
                   ? parseMagaluInfo(res.title, res.url)
                   : null;
+                const kabumInfo = plat === 'KABUM'
+                  ? parseKabumInfo(res.title, res.url)
+                  : null;
+                const ameInfo = plat === 'AMERICANAS'
+                  ? parseAmericanasInfo(res.title, res.url)
+                  : null;
+                const sheinInfo = plat === 'SHEIN'
+                  ? parseSheinInfo(res.title, res.url)
+                  : null;
                 const displayTitle = plat === 'SHOPEE' 
                   ? shopeeInfo.cleanTitle 
                   : plat === 'MERCADO_LIVRE' && mlInfo 
@@ -2239,6 +2389,12 @@ function AlertsScreen({ navigation }) {
                   ? amzInfo.cleanTitle
                   : plat === 'MAGALU' && magaluInfo
                   ? magaluInfo.cleanTitle
+                  : plat === 'KABUM' && kabumInfo
+                  ? kabumInfo.cleanTitle
+                  : plat === 'AMERICANAS' && ameInfo
+                  ? ameInfo.cleanTitle
+                  : plat === 'SHEIN' && sheinInfo
+                  ? sheinInfo.cleanTitle
                   : res.title;
 
                 return (
@@ -2293,6 +2449,39 @@ function AlertsScreen({ navigation }) {
                         )}
                         {plat === 'MAGALU' && magaluInfo && magaluInfo.score && (
                           <ShopeeRatingBadge score={magaluInfo.score} />
+                        )}
+                        {plat === 'KABUM' && kabumInfo && kabumInfo.isFreteGratis && (
+                          <KabumFreeShippingBadge />
+                        )}
+                        {plat === 'KABUM' && kabumInfo && kabumInfo.desconto && (
+                          <KabumDiscountBadge discount={kabumInfo.desconto} />
+                        )}
+                        {plat === 'KABUM' && kabumInfo && kabumInfo.score && (
+                          <ShopeeRatingBadge score={kabumInfo.score} />
+                        )}
+                        {plat === 'AMERICANAS' && ameInfo && ameInfo.isEntregaRapida && (
+                          <AmericanasFastDeliveryBadge />
+                        )}
+                        {plat === 'AMERICANAS' && ameInfo && ameInfo.isFreteGratis && (
+                          <AmericanasFreeShippingBadge />
+                        )}
+                        {plat === 'AMERICANAS' && ameInfo && ameInfo.desconto && (
+                          <AmericanasDiscountBadge discount={ameInfo.desconto} />
+                        )}
+                        {plat === 'AMERICANAS' && ameInfo && ameInfo.score && (
+                          <ShopeeRatingBadge score={ameInfo.score} />
+                        )}
+                        {plat === 'SHEIN' && sheinInfo && sheinInfo.origem && (
+                          <ShopeeOriginBadge origem={sheinInfo.origem} />
+                        )}
+                        {plat === 'SHEIN' && sheinInfo && sheinInfo.isMaisVendidos && (
+                          <SheinBestSellerBadge />
+                        )}
+                        {plat === 'SHEIN' && sheinInfo && sheinInfo.desconto && (
+                          <SheinDiscountBadge discount={sheinInfo.desconto} />
+                        )}
+                        {plat === 'SHEIN' && sheinInfo && sheinInfo.score && (
+                          <ShopeeRatingBadge score={sheinInfo.score} />
                         )}
                         <View style={styles.robotTag}>
                           <Ionicons name="checkmark-circle" size={13} color={THEME.success} style={{ marginRight: 4 }} />
@@ -2433,7 +2622,7 @@ function CreateMonitorScreen({ navigation, route }) {
 
   const [modo, setModo] = useState(editando?.modo === 'noticia' ? 'noticia' : 'produto');
   const estratInicial = editando 
-    ? ((platInicial === 'MERCADO_LIVRE' || platInicial === 'SHOPEE' || platInicial === 'AMAZON' || platInicial === 'MAGALU') && identificarEstrategia(editando) === 'mais_recentes' 
+    ? ((platInicial === 'MERCADO_LIVRE' || platInicial === 'SHOPEE' || platInicial === 'AMAZON' || platInicial === 'MAGALU' || platInicial === 'KABUM' || platInicial === 'AMERICANAS' || platInicial === 'SHEIN') && identificarEstrategia(editando) === 'mais_recentes' 
         ? 'maior_desconto' 
         : identificarEstrategia(editando)) 
     : 'menor_preco';
@@ -2520,8 +2709,47 @@ function CreateMonitorScreen({ navigation, route }) {
     isMagaluEdit ? palavrasEdit.includes('magalu_internacional:true') : false
   );
 
+  // Filtros personalizáveis da KaBuM! (todos desmarcados por padrão)
+  const isKabumEdit = editando && platInicial === 'KABUM';
+  const [kabumFreteGratis, setKabumFreteGratis] = useState(
+    isKabumEdit ? palavrasEdit.includes('kabum_frete_gratis:true') : false
+  );
+  const [kabumMelhorAvaliacao, setKabumMelhorAvaliacao] = useState(
+    isKabumEdit ? palavrasEdit.includes('kabum_melhor_avaliacao:true') : false
+  );
+
+  // Filtros personalizáveis da Americanas (todos desmarcados por padrão)
+  const isAmeEdit = editando && platInicial === 'AMERICANAS';
+  const [ameEntregaRapida, setAmeEntregaRapida] = useState(
+    isAmeEdit ? (palavrasEdit.includes('ame_entrega_rapida:true') || palavrasEdit.includes('americanas_entrega_rapida:true') || palavrasEdit.includes('ame_full:true')) : false
+  );
+  const [ameFreteGratis, setAmeFreteGratis] = useState(
+    isAmeEdit ? (palavrasEdit.includes('ame_frete_gratis:true') || palavrasEdit.includes('americanas_frete_gratis:true')) : false
+  );
+  const [ameMelhorAvaliacao, setAmeMelhorAvaliacao] = useState(
+    isAmeEdit ? (palavrasEdit.includes('ame_melhor_avaliacao:true') || palavrasEdit.includes('americanas_melhor_avaliacao:true')) : false
+  );
+
+  // Filtros personalizáveis da SHEIN
+  const isSheinEdit = editando && platInicial === 'SHEIN';
+  const initSheinNacional = isSheinEdit
+    ? (palavrasEdit.includes('shein_nacional:true') || (!palavrasEdit.includes('shein_internacional:true')))
+    : true;
+  const initSheinInternacional = isSheinEdit
+    ? (palavrasEdit.includes('shein_internacional:true') || (!palavrasEdit.includes('shein_nacional:true')))
+    : true;
+
+  const [sheinNacional, setSheinNacional] = useState(initSheinNacional);
+  const [sheinInternacional, setSheinInternacional] = useState(initSheinInternacional);
+  const [sheinMaisVendidos, setSheinMaisVendidos] = useState(
+    isSheinEdit ? palavrasEdit.includes('shein_mais_vendidos:true') : false
+  );
+  const [sheinMelhorAvaliacao, setSheinMelhorAvaliacao] = useState(
+    isSheinEdit ? palavrasEdit.includes('shein_melhor_avaliacao:true') : false
+  );
+
   const [apenasMaiorDesconto, setApenasMaiorDesconto] = useState(
-    isMLEdit ? palavrasEdit.includes('ml_apenas_maior_desconto:true') : (isShopeeEdit ? (palavrasEdit.includes('shopee_apenas_maior_desconto:true') || palavrasEdit.includes('ml_apenas_maior_desconto:true')) : (isAmzEdit ? palavrasEdit.includes('amz_apenas_maior_desconto:true') : (isMagaluEdit ? palavrasEdit.includes('magalu_apenas_maior_desconto:true') : false)))
+    isMLEdit ? palavrasEdit.includes('ml_apenas_maior_desconto:true') : (isShopeeEdit ? (palavrasEdit.includes('shopee_apenas_maior_desconto:true') || palavrasEdit.includes('ml_apenas_maior_desconto:true')) : (isAmzEdit ? palavrasEdit.includes('amz_apenas_maior_desconto:true') : (isMagaluEdit ? palavrasEdit.includes('magalu_apenas_maior_desconto:true') : (isKabumEdit ? palavrasEdit.includes('kabum_apenas_maior_desconto:true') : (isAmeEdit ? (palavrasEdit.includes('ame_apenas_maior_desconto:true') || palavrasEdit.includes('americanas_apenas_maior_desconto:true')) : (isSheinEdit ? palavrasEdit.includes('shein_apenas_maior_desconto:true') : false))))))
   );
 
   const [nome, setNome] = useState(editando?.nome || '');
@@ -2602,6 +2830,19 @@ function CreateMonitorScreen({ navigation, route }) {
       if (estrategia === 'menor_preco') {
         urlFinal += '?sortType=price&sortOrientation=asc';
       }
+    } else if (plataforma === 'KABUM') {
+      let termoKabum = produto.trim().replace(/\s+/g, '-').toLowerCase();
+      urlFinal = `https://www.kabum.com.br/busca/${encodeURIComponent(termoKabum)}`;
+      if (estrategia === 'menor_preco') {
+        urlFinal += '?sort=price';
+      }
+    } else if (plataforma === 'AMERICANAS') {
+      let termoAme = produto.trim();
+      let orderParam = (estrategia === 'menor_preco') ? 'OrderByPriceASC' : (ameMelhorAvaliacao ? 'OrderByReviewRateDESC' : 'OrderByTopSaleDESC');
+      urlFinal = `https://www.americanas.com.br/api/catalog_system/pub/products/search?ft=${encodeURIComponent(termoAme)}&O=${orderParam}&_from=0&_to=49`;
+    } else if (plataforma === 'SHEIN') {
+      let termoShein = produto.trim().replace(/\s+/g, '-');
+      urlFinal = `https://br.shein.com/pdsearch/${encodeURIComponent(termoShein)}/`;
     } else {
       urlFinal = urls.trim();
     }
@@ -2662,6 +2903,33 @@ function CreateMonitorScreen({ navigation, route }) {
         if (magaluInternacional) tagsArray.push('magalu_internacional:true');
         if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
           tagsArray.push('magalu_apenas_maior_desconto:true');
+        }
+      }
+      if (plataforma === 'KABUM') {
+        if (kabumFreteGratis) tagsArray.push('kabum_frete_gratis:true');
+        if (kabumMelhorAvaliacao) tagsArray.push('kabum_melhor_avaliacao:true');
+        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
+          tagsArray.push('kabum_apenas_maior_desconto:true');
+        }
+      }
+      if (plataforma === 'AMERICANAS') {
+        if (ameEntregaRapida) tagsArray.push('ame_entrega_rapida:true');
+        if (ameFreteGratis) tagsArray.push('ame_frete_gratis:true');
+        if (ameMelhorAvaliacao) tagsArray.push('ame_melhor_avaliacao:true');
+        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
+          tagsArray.push('ame_apenas_maior_desconto:true');
+        }
+      }
+      if (plataforma === 'SHEIN') {
+        if (sheinNacional && !sheinInternacional) {
+          tagsArray.push('shein_nacional:true');
+        } else if (!sheinNacional && sheinInternacional) {
+          tagsArray.push('shein_internacional:true');
+        }
+        if (sheinMaisVendidos) tagsArray.push('shein_mais_vendidos:true');
+        if (sheinMelhorAvaliacao) tagsArray.push('shein_melhor_avaliacao:true');
+        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
+          tagsArray.push('shein_apenas_maior_desconto:true');
         }
       }
     }
@@ -2914,6 +3182,9 @@ function CreateMonitorScreen({ navigation, route }) {
             { key: 'SHOPEE', nome: 'Shopee', icon: 'bag-handle-outline', color: '#EE4D2D', locked: false },
             { key: 'AMAZON', nome: 'Amazon', icon: 'cart-outline', color: '#FF9900', locked: false },
             { key: 'MAGALU', nome: 'Magalu', icon: 'bag-handle-outline', color: '#0086FF', locked: false },
+            { key: 'KABUM', nome: 'KaBuM!', icon: 'hardware-chip-outline', color: '#FF6500', locked: false },
+            { key: 'AMERICANAS', nome: 'Americanas', icon: 'storefront-outline', color: '#E60014', locked: false },
+            { key: 'SHEIN', nome: 'SHEIN', icon: 'shirt-outline', color: '#FFFFFF', locked: false },
             { key: 'FACEBOOK', nome: 'Facebook Marketplace', icon: 'logo-facebook', color: '#1877F2', locked: false },
             { key: 'ZOOM', nome: 'Zoom', icon: 'search-outline', color: '#F59E0B', locked: false },
             { key: 'OUTROS', nome: 'Outros Sites', icon: 'globe-outline', color: '#06B6D4', locked: tier === TIERS.FREE }
@@ -2941,7 +3212,7 @@ function CreateMonitorScreen({ navigation, route }) {
                   if (p.key === 'ZOOM') {
                     if (estrategia === 'mais_recentes') setEstrategia('menor_preco');
                   }
-                  if (p.key === 'MERCADO_LIVRE' || p.key === 'SHOPEE' || p.key === 'AMAZON' || p.key === 'MAGALU') {
+                  if (p.key === 'MERCADO_LIVRE' || p.key === 'SHOPEE' || p.key === 'AMAZON' || p.key === 'MAGALU' || p.key === 'KABUM' || p.key === 'AMERICANAS' || p.key === 'SHEIN') {
                     if (estrategia === 'mais_recentes') setEstrategia('maior_desconto');
                   }
                   if (p.key !== 'OUTROS') setModo('produto');
@@ -2996,6 +3267,33 @@ function CreateMonitorScreen({ navigation, route }) {
             <Ionicons name="bag-handle-outline" size={16} color="#0086FF" style={{ marginRight: 8 }} />
             <Text style={styles.comparatorBannerText}>
               O Magazine Luiza (Magalu) monitora ofertas com entrega rápida Full, frete grátis, melhores avaliações dos clientes e captura dos maiores descontos promocionais (% OFF).
+            </Text>
+          </View>
+        )}
+
+        {plataforma === 'KABUM' && (
+          <View style={[styles.comparatorBanner, { borderColor: 'rgba(255, 101, 0, 0.35)', backgroundColor: 'rgba(255, 101, 0, 0.08)' }]}>
+            <Ionicons name="hardware-chip-outline" size={16} color="#FF6500" style={{ marginRight: 8 }} />
+            <Text style={styles.comparatorBannerText}>
+              O KaBuM! é especializado em tecnologia, hardware, computadores e celulares (apenas produtos novos e nacionais), com suporte a frete grátis, melhores avaliações dos clientes e maiores descontos promocionais (% OFF).
+            </Text>
+          </View>
+        )}
+
+        {plataforma === 'AMERICANAS' && (
+          <View style={[styles.comparatorBanner, { borderColor: 'rgba(230, 0, 20, 0.35)', backgroundColor: 'rgba(230, 0, 20, 0.08)' }]}>
+            <Ionicons name="storefront-outline" size={16} color="#E60014" style={{ marginRight: 8 }} />
+            <Text style={styles.comparatorBannerText}>
+              A Americanas monitora produtos com suporte a entrega rápida Full, frete grátis, melhores avaliações dos clientes e captura dos maiores descontos promocionais (% OFF).
+            </Text>
+          </View>
+        )}
+
+        {plataforma === 'SHEIN' && (
+          <View style={[styles.comparatorBanner, { borderColor: 'rgba(255, 255, 255, 0.35)', backgroundColor: 'rgba(255, 255, 255, 0.08)' }]}>
+            <Ionicons name="shirt-outline" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.comparatorBannerText}>
+              A SHEIN monitora moda e vestuário com opções de procedência nacional ou internacional, produtos Mais Vendidos na Shein, melhores avaliações dos clientes e maiores descontos promocionais (% OFF).
             </Text>
           </View>
         )}
@@ -3203,6 +3501,12 @@ function CreateMonitorScreen({ navigation, route }) {
                   ? "O robô buscará este produto na Amazon aplicando os filtros configurados."
                   : plataforma === 'MAGALU'
                   ? "O robô buscará este produto no Magazine Luiza aplicando os filtros configurados."
+                  : plataforma === 'KABUM'
+                  ? "O robô buscará este produto no KaBuM! aplicando os filtros configurados."
+                  : plataforma === 'AMERICANAS'
+                  ? "O robô buscará este produto na Americanas aplicando os filtros configurados."
+                  : plataforma === 'SHEIN'
+                  ? "O robô buscará este produto na SHEIN aplicando os filtros configurados."
                   : plataforma === 'ZOOM'
                   ? "O comparador filtrará os preços de lojas confiáveis com este termo."
                   : "O robô buscará este produto na página cadastrada."}
@@ -3810,8 +4114,300 @@ function CreateMonitorScreen({ navigation, route }) {
               </Surface>
             )}
 
-            {/* ESTRATÉGIA: MAIOR DESCONTO (MERCADO LIVRE, SHOPEE, AMAZON E MAGALU) */}
-            {(plataforma === 'MERCADO_LIVRE' || plataforma === 'SHOPEE' || plataforma === 'AMAZON' || plataforma === 'MAGALU') && (
+            {/* OPÇÕES E FILTROS DO KABUM */}
+            {plataforma === 'KABUM' && (
+              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(255, 101, 0, 0.3)' }]}>
+                <View style={styles.shopeeOptionsHeader}>
+                  <Ionicons name="hardware-chip-outline" size={15} color="#FF6500" style={{ marginRight: 6 }} />
+                  <Text style={[styles.shopeeOptionsTitle, { color: '#FF6500' }]}>FILTROS DO KABUM!</Text>
+                </View>
+                <Text style={styles.shopeeOptionsDesc}>
+                  Personalize sua busca selecionando os filtros desejados (desmarcados por padrão):
+                </Text>
+
+                <View style={styles.checkboxContainer}>
+                  {/* 1. Frete Grátis */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, kabumFreteGratis && styles.checkboxRowItemActive]}
+                    onPress={() => setKabumFreteGratis(!kabumFreteGratis)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={kabumFreteGratis ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={kabumFreteGratis ? "#10B981" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, kabumFreteGratis && styles.checkboxItemTitleActive]}>
+                          Frete Grátis
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Apenas anúncios com frete grátis</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* 2. Melhor Avaliação Positiva */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, kabumMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setKabumMelhorAvaliacao(!kabumMelhorAvaliacao)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={kabumMelhorAvaliacao ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={kabumMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, kabumMelhorAvaliacao && styles.checkboxItemTitleActive]}>
+                          Melhor Avaliação Positiva
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas (4.0 a 5.0 estrelas) e aprovação de clientes</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </Surface>
+            )}
+
+            {/* OPÇÕES E FILTROS DA AMERICANAS */}
+            {plataforma === 'AMERICANAS' && (
+              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(230, 0, 20, 0.3)' }]}>
+                <View style={styles.shopeeOptionsHeader}>
+                  <Ionicons name="storefront-outline" size={15} color="#E60014" style={{ marginRight: 6 }} />
+                  <Text style={[styles.shopeeOptionsTitle, { color: '#E60014' }]}>FILTROS DA AMERICANAS</Text>
+                </View>
+                <Text style={styles.shopeeOptionsDesc}>
+                  Personalize sua busca selecionando os filtros desejados (desmarcados por padrão):
+                </Text>
+
+                <View style={styles.checkboxContainer}>
+                  {/* 1. Entrega Mais Rápida */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, ameEntregaRapida && styles.checkboxRowItemActive]}
+                    onPress={() => setAmeEntregaRapida(!ameEntregaRapida)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={ameEntregaRapida ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={ameEntregaRapida ? "#E60014" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, ameEntregaRapida && styles.checkboxItemTitleActive]}>
+                          Entrega Mais Rápida
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(230, 0, 20, 0.15)', borderColor: 'rgba(230, 0, 20, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#E60014' }}>⚡ FULL</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Apenas anúncios vendidos e entregues pela Americanas</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* 2. Frete Grátis */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, ameFreteGratis && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setAmeFreteGratis(!ameFreteGratis)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={ameFreteGratis ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={ameFreteGratis ? "#10B981" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, ameFreteGratis && styles.checkboxItemTitleActive]}>
+                          Frete Grátis
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Apenas anúncios elegíveis para frete grátis</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* 3. Melhor Avaliação Positiva */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, ameMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setAmeMelhorAvaliacao(!ameMelhorAvaliacao)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={ameMelhorAvaliacao ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={ameMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, ameMelhorAvaliacao && styles.checkboxItemTitleActive]}>
+                          Melhor Avaliação Positiva
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas (4.0 a 5.0 estrelas) e satisfação de clientes</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </Surface>
+            )}
+
+            {/* OPÇÕES E FILTROS DA SHEIN */}
+            {plataforma === 'SHEIN' && (
+              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(255, 255, 255, 0.3)' }]}>
+                <View style={styles.shopeeOptionsHeader}>
+                  <Ionicons name="shirt-outline" size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+                  <Text style={[styles.shopeeOptionsTitle, { color: '#FFFFFF' }]}>FILTROS DA SHEIN</Text>
+                </View>
+                <Text style={styles.shopeeOptionsDesc}>
+                  Personalize sua busca selecionando procedência e filtros da SHEIN:
+                </Text>
+
+                <View style={styles.checkboxContainer}>
+                  {/* Opção Nacional */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, sheinNacional && styles.checkboxRowItemActive]}
+                    onPress={() => {
+                      if (sheinNacional && !sheinInternacional) {
+                        showAlert({
+                          title: "Seleção Obrigatória",
+                          message: "Ao menos uma opção de procedência (Nacional ou Internacional) deve permanecer ativa.",
+                          type: "warning",
+                          icon: "alert-circle"
+                        });
+                        return;
+                      }
+                      setSheinNacional(!sheinNacional);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={sheinNacional ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={sheinNacional ? "#10B981" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, sheinNacional && styles.checkboxItemTitleActive]}>
+                          Nacional
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>BRASIL</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Anúncios com envio rápido de estoques nacionais</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* Opção Internacional */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, sheinInternacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => {
+                      if (!sheinNacional && sheinInternacional) {
+                        showAlert({
+                          title: "Seleção Obrigatória",
+                          message: "Ao menos uma opção de procedência (Nacional ou Internacional) deve permanecer ativa.",
+                          type: "warning",
+                          icon: "alert-circle"
+                        });
+                        return;
+                      }
+                      setSheinInternacional(!sheinInternacional);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={sheinInternacional ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={sheinInternacional ? "#3B82F6" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, sheinInternacional && styles.checkboxItemTitleActive]}>
+                          Internacional
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#3B82F6' }}>EXTERIOR</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Peças importadas do catálogo global da SHEIN</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* Opção Mais Vendidos na Shein */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, sheinMaisVendidos && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setSheinMaisVendidos(!sheinMaisVendidos)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={sheinMaisVendidos ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={sheinMaisVendidos ? "#F59E0B" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, sheinMaisVendidos && styles.checkboxItemTitleActive]}>
+                          Mais Vendidos Na Shein
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: 'rgba(245, 158, 11, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#F59E0B' }}>🔥 HOT</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra exclusivamente as peças e roupas mais populares e compradas</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* Opção Melhor Avaliação Positiva */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, sheinMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setSheinMelhorAvaliacao(!sheinMelhorAvaliacao)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={sheinMelhorAvaliacao ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={sheinMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, sheinMelhorAvaliacao && styles.checkboxItemTitleActive]}>
+                          Por Melhor Avaliação Positiva
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas e avaliações positivas de usuárias</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </Surface>
+            )}
+
+            {/* ESTRATÉGIA: MAIOR DESCONTO (MERCADO LIVRE, SHOPEE, AMAZON, MAGALU, KABUM, AMERICANAS E SHEIN) */}
+            {(plataforma === 'MERCADO_LIVRE' || plataforma === 'SHOPEE' || plataforma === 'AMAZON' || plataforma === 'MAGALU' || plataforma === 'KABUM' || plataforma === 'AMERICANAS' || plataforma === 'SHEIN') && (
               <TouchableOpacity 
                 style={[styles.strategyCard, estrategia === 'maior_desconto' && styles.strategyCardActive]}
                 onPress={() => setEstrategia('maior_desconto')}
@@ -3888,7 +4484,7 @@ function CreateMonitorScreen({ navigation, route }) {
             </TouchableOpacity>
 
             {/* ESTRATÉGIA: MAIS RECENTES */}
-            {plataforma !== 'ZOOM' && plataforma !== 'MERCADO_LIVRE' && plataforma !== 'SHOPEE' && plataforma !== 'AMAZON' && plataforma !== 'MAGALU' && (
+            {plataforma !== 'ZOOM' && plataforma !== 'MERCADO_LIVRE' && plataforma !== 'SHOPEE' && plataforma !== 'AMAZON' && plataforma !== 'MAGALU' && plataforma !== 'KABUM' && plataforma !== 'AMERICANAS' && plataforma !== 'SHEIN' && (
               <TouchableOpacity 
                 style={[styles.strategyCard, estrategia === 'mais_recentes' && styles.strategyCardActive]}
                 onPress={() => setEstrategia('mais_recentes')}

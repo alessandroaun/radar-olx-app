@@ -455,6 +455,171 @@ export const parseMagaluInfo = (title = '', url = '') => {
   return { cleanTitle, isFull, isFreteGratis, desconto, score, origem };
 };
 
+export const KabumFreeShippingBadge = () => (
+  <View style={styles.kabumFreeShippingBadge}>
+    <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+    <Text style={styles.kabumFreeShippingBadgeText}>Frete Grátis</Text>
+  </View>
+);
+
+export const KabumDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.kabumDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#FF6500" style={{ marginRight: 3 }} />
+      <Text style={styles.kabumDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const parseKabumInfo = (title = '', url = '') => {
+  let cleanTitle = title || '';
+  let isFreteGratis = cleanTitle.includes('• 🚚 Frete Grátis') || cleanTitle.includes('[Frete Grátis]');
+  let desconto = null;
+  let score = null;
+
+  const starMatch = cleanTitle.match(/(?:•\s*)?(?:\[⭐\s*([1-5](?:\.[0-9]+)?)\]|⭐\s*([1-5](?:\.[0-9]+)?))/);
+  if (starMatch) {
+    score = starMatch[1] || starMatch[2];
+    cleanTitle = cleanTitle.replace(starMatch[0], '').trim();
+  }
+
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/•\s*🚚\s*Frete\s*Grátis/gi, '')
+    .replace(/\[Frete\s*Grátis\]/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, isFreteGratis, desconto, score };
+};
+
+export const AmericanasFastDeliveryBadge = () => (
+  <View style={styles.ameFastBadge}>
+    <Ionicons name="flash" size={10} color="#E60014" style={{ marginRight: 3 }} />
+    <Text style={styles.ameFastBadgeText}>Entrega Rápida</Text>
+  </View>
+);
+
+export const AmericanasFreeShippingBadge = () => (
+  <View style={styles.ameFreeShippingBadge}>
+    <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+    <Text style={styles.ameFreeShippingBadgeText}>Frete Grátis</Text>
+  </View>
+);
+
+export const AmericanasDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.ameDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#E60014" style={{ marginRight: 3 }} />
+      <Text style={styles.ameDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const parseAmericanasInfo = (title = '', url = '') => {
+  let cleanTitle = title || '';
+  let isEntregaRapida = cleanTitle.includes('• ⚡ Entrega Rápida') || cleanTitle.includes('[Entrega Rápida]');
+  let isFreteGratis = cleanTitle.includes('• 🚚 Frete Grátis') || cleanTitle.includes('[Frete Grátis]');
+  let desconto = null;
+  let score = null;
+
+  const starMatch = cleanTitle.match(/(?:•\s*)?(?:\[⭐\s*([1-5](?:\.[0-9]+)?)\]|⭐\s*([1-5](?:\.[0-9]+)?))/);
+  if (starMatch) {
+    score = starMatch[1] || starMatch[2];
+    cleanTitle = cleanTitle.replace(starMatch[0], '').trim();
+  }
+
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/•\s*⚡\s*Entrega\s*Rápida/gi, '')
+    .replace(/\[Entrega\s*Rápida\]/gi, '')
+    .replace(/•\s*🚚\s*Frete\s*Grátis/gi, '')
+    .replace(/\[Frete\s*Grátis\]/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, isEntregaRapida, isFreteGratis, desconto, score };
+};
+
+export const SheinBestSellerBadge = () => (
+  <View style={styles.sheinBestSellerBadge}>
+    <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 3 }} />
+    <Text style={styles.sheinBestSellerBadgeText}>Mais Vendidos</Text>
+  </View>
+);
+
+export const SheinDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.sheinDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#E2E8F0" style={{ marginRight: 3 }} />
+      <Text style={styles.sheinDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const parseSheinInfo = (title = '', url = '') => {
+  let cleanTitle = title || '';
+  let origem = null;
+  let isMaisVendidos = cleanTitle.includes('• 🔥 Mais Vendidos') || cleanTitle.includes('[Mais Vendidos]');
+  let desconto = null;
+  let score = null;
+
+  if (cleanTitle.includes('• 📍 Internacional') || cleanTitle.includes('[INTER]')) {
+    origem = 'Internacional';
+  } else if (cleanTitle.includes('• 📍 Nacional') || cleanTitle.includes('[NAC]')) {
+    origem = 'Nacional';
+  }
+
+  const starMatch = cleanTitle.match(/(?:•\s*)?(?:\[⭐\s*([1-5](?:\.[0-9]+)?)\]|⭐\s*([1-5](?:\.[0-9]+)?))/);
+  if (starMatch) {
+    score = starMatch[1] || starMatch[2];
+    cleanTitle = cleanTitle.replace(starMatch[0], '').trim();
+  }
+
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/•\s*📍\s*Nacional/gi, '')
+    .replace(/\[NAC\]/gi, '')
+    .replace(/•\s*📍\s*Internacional/gi, '')
+    .replace(/\[INTER\]/gi, '')
+    .replace(/•\s*🔥\s*Mais\s*Vendidos/gi, '')
+    .replace(/\[Mais\s*Vendidos\]/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, origem, isMaisVendidos, desconto, score };
+};
+
 export const StrategyBadge = ({ text, color = THEME.textMuted }) => (
   <View style={styles.strategyBadge}>
     <Ionicons name="sparkles-outline" size={11} color={THEME.primary} style={{ marginRight: 4 }} />
@@ -961,6 +1126,125 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     color: '#0086FF',
+    letterSpacing: 0.3
+  },
+  kabumFreeShippingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  kabumFreeShippingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.3
+  },
+  kabumDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 101, 0, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 101, 0, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  kabumDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#FF6500',
+    letterSpacing: 0.3
+  },
+  ameFastBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(230, 0, 20, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(230, 0, 20, 0.4)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  ameFastBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#E60014',
+    letterSpacing: 0.3
+  },
+  ameFreeShippingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  ameFreeShippingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.3
+  },
+  ameDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(230, 0, 20, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(230, 0, 20, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  ameDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#E60014',
+    letterSpacing: 0.3
+  },
+  sheinBestSellerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  sheinBestSellerBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#F59E0B',
+    letterSpacing: 0.3
+  },
+  sheinDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.30)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  sheinDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#E2E8F0',
     letterSpacing: 0.3
   },
   strategyBadge: {
