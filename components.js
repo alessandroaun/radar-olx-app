@@ -620,6 +620,180 @@ export const parseSheinInfo = (title = '', url = '') => {
   return { cleanTitle, origem, isMaisVendidos, desconto, score };
 };
 
+export const FastShopDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.fastshopDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#E30613" style={{ marginRight: 3 }} />
+      <Text style={styles.fastshopDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const parseFastShopInfo = (title = '', url = '') => {
+  let cleanTitle = title || '';
+  let desconto = null;
+  let score = null;
+
+  const starMatch = cleanTitle.match(/(?:•\s*)?(?:\[⭐\s*([1-5](?:\.[0-9]+)?)\]|⭐\s*([1-5](?:\.[0-9]+)?))/);
+  if (starMatch) {
+    score = starMatch[1] || starMatch[2];
+    cleanTitle = cleanTitle.replace(starMatch[0], '').trim();
+  }
+
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, desconto, score };
+};
+
+export const CarrefourFreeShippingBadge = () => (
+  <View style={styles.carrefourFreeShippingBadge}>
+    <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+    <Text style={styles.carrefourFreeShippingBadgeText}>Frete Grátis</Text>
+  </View>
+);
+
+export const CarrefourInstallmentBadge = ({ parcelamento }) => {
+  if (!parcelamento) return null;
+  return (
+    <View style={styles.carrefourInstallmentBadge}>
+      <Ionicons name="card-outline" size={10} color="#60A5FA" style={{ marginRight: 3 }} />
+      <Text style={styles.carrefourInstallmentBadgeText}>{parcelamento}</Text>
+    </View>
+  );
+};
+
+export const CarrefourDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.carrefourDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
+      <Text style={styles.carrefourDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const CarrefourBestSellerBadge = () => (
+  <View style={styles.carrefourBestSellerBadge}>
+    <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 3 }} />
+    <Text style={styles.carrefourBestSellerBadgeText}>Mais Vendidos</Text>
+  </View>
+);
+
+export const parseCarrefourInfo = (title = '', url = '') => {
+  let cleanTitle = title || '';
+  let isFreteGratis = cleanTitle.includes('• 🚚 Frete Grátis') || cleanTitle.includes('[Frete Grátis]');
+  let isMaisVendidos = cleanTitle.includes('• 🔥 Mais Vendidos') || cleanTitle.includes('[Mais Vendidos]');
+  let parcelamento = null;
+  let desconto = null;
+
+  const parcMatch = cleanTitle.match(/(?:•\s*)?(?:\[💳\s*([^\]]+)\]|💳\s*([^•\n]+))/);
+  if (parcMatch) {
+    parcelamento = (parcMatch[1] || parcMatch[2]).trim();
+    cleanTitle = cleanTitle.replace(parcMatch[0], '').trim();
+  }
+
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/•\s*🚚\s*Frete\s*Grátis/gi, '')
+    .replace(/\[Frete\s*Grátis\]/gi, '')
+    .replace(/•\s*🔥\s*Mais\s*Vendidos/gi, '')
+    .replace(/\[Mais\s*Vendidos\]/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, isFreteGratis, isMaisVendidos, parcelamento, desconto };
+};
+
+export const CasasBahiaFreeShippingBadge = () => (
+  <View style={styles.casasbahiaFreeShippingBadge}>
+    <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
+    <Text style={styles.casasbahiaFreeShippingBadgeText}>Frete Grátis</Text>
+  </View>
+);
+
+export const CasasBahiaInstallmentBadge = ({ parcelamento }) => {
+  if (!parcelamento) return null;
+  return (
+    <View style={styles.casasbahiaInstallmentBadge}>
+      <Ionicons name="card-outline" size={10} color="#60A5FA" style={{ marginRight: 3 }} />
+      <Text style={styles.casasbahiaInstallmentBadgeText}>{parcelamento}</Text>
+    </View>
+  );
+};
+
+export const CasasBahiaDiscountBadge = ({ discount }) => {
+  if (!discount) return null;
+  const discClean = String(discount).replace('-', '').replace('OFF', '').replace('off', '').trim();
+  const label = `(-${discClean} OFF)`;
+  return (
+    <View style={styles.casasbahiaDiscountBadge}>
+      <Ionicons name="pricetag" size={10} color="#60A5FA" style={{ marginRight: 3 }} />
+      <Text style={styles.casasbahiaDiscountBadgeText}>{label}</Text>
+    </View>
+  );
+};
+
+export const CasasBahiaBestSellerBadge = () => (
+  <View style={styles.casasbahiaBestSellerBadge}>
+    <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 3 }} />
+    <Text style={styles.casasbahiaBestSellerBadgeText}>Mais Vendidos</Text>
+  </View>
+);
+
+export const parseCasasBahiaInfo = (title = '', url = '') => {
+  let cleanTitle = title || '';
+  let isFreteGratis = cleanTitle.includes('• 🚚 Frete Grátis') || cleanTitle.includes('[Frete Grátis]');
+  let isMaisVendidos = cleanTitle.includes('• 🔥 Mais Vendidos') || cleanTitle.includes('[Mais Vendidos]');
+  let parcelamento = null;
+  let desconto = null;
+
+  const parcMatch = cleanTitle.match(/(?:•\s*)?(?:\[💳\s*([^\]]+)\]|💳\s*([^•\n]+))/);
+  if (parcMatch) {
+    parcelamento = (parcMatch[1] || parcMatch[2]).trim();
+    cleanTitle = cleanTitle.replace(parcMatch[0], '').trim();
+  }
+
+  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  if (discMatch) {
+    const raw = discMatch[1].replace(/\[|\]/g, '').replace(/off/i, '').replace('-', '').trim();
+    desconto = raw;
+    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+  }
+
+  cleanTitle = cleanTitle
+    .replace(/•\s*🚚\s*Frete\s*Grátis/gi, '')
+    .replace(/\[Frete\s*Grátis\]/gi, '')
+    .replace(/•\s*🔥\s*Mais\s*Vendidos/gi, '')
+    .replace(/\[Mais\s*Vendidos\]/gi, '')
+    .replace(/\s*•\s*$/, '')
+    .replace(/^\s*•\s*/, '')
+    .trim();
+
+  return { cleanTitle, isFreteGratis, isMaisVendidos, parcelamento, desconto };
+};
+
 export const StrategyBadge = ({ text, color = THEME.textMuted }) => (
   <View style={styles.strategyBadge}>
     <Ionicons name="sparkles-outline" size={11} color={THEME.primary} style={{ marginRight: 4 }} />
@@ -1245,6 +1419,159 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     color: '#E2E8F0',
+    letterSpacing: 0.3
+  },
+  fastshopDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(227, 6, 19, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(227, 6, 19, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  fastshopDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#E30613',
+    letterSpacing: 0.3
+  },
+  carrefourFreeShippingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  carrefourFreeShippingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.3
+  },
+  carrefourInstallmentBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  carrefourInstallmentBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#60A5FA',
+    letterSpacing: 0.3
+  },
+  carrefourDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 79, 159, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 79, 159, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  carrefourDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#3B82F6',
+    letterSpacing: 0.3
+  },
+  carrefourBestSellerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  carrefourBestSellerBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#F59E0B',
+    letterSpacing: 0.3
+  },
+  casasbahiaFreeShippingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  casasbahiaFreeShippingBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.3
+  },
+  casasbahiaInstallmentBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.35)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  casasbahiaInstallmentBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#60A5FA',
+    letterSpacing: 0.3
+  },
+  casasbahiaDiscountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 43, 127, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 43, 127, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  casasbahiaDiscountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#60A5FA',
+    letterSpacing: 0.3
+  },
+  casasbahiaBestSellerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: THEME.radius.sm,
+    marginRight: 6
+  },
+  casasbahiaBestSellerBadgeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#F59E0B',
     letterSpacing: 0.3
   },
   strategyBadge: {

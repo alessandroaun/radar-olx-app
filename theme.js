@@ -103,6 +103,27 @@ export const THEME = {
       border: 'rgba(255, 255, 255, 0.35)',
       icon: 'shirt-outline'
     },
+    FASTSHOP: {
+      nome: 'Fast Shop',
+      color: '#E30613',        // Vermelho Fast Shop
+      bg: 'rgba(227, 6, 19, 0.12)',
+      border: 'rgba(227, 6, 19, 0.35)',
+      icon: 'flash-outline'
+    },
+    CARREFOUR: {
+      nome: 'Carrefour',
+      color: '#004F9F',        // Azul Carrefour
+      bg: 'rgba(0, 79, 159, 0.15)',
+      border: 'rgba(0, 79, 159, 0.40)',
+      icon: 'cart-outline'
+    },
+    CASASBAHIA: {
+      nome: 'Casas Bahia',
+      color: '#002B7F',        // Azul Casas Bahia
+      bg: 'rgba(0, 43, 127, 0.18)',
+      border: 'rgba(0, 43, 127, 0.45)',
+      icon: 'home-outline'
+    },
     OUTROS: {
       nome: 'Web & Notícias',
       color: '#06B6D4',        // Ciano

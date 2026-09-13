@@ -28,7 +28,10 @@ import {
   MagaluFullBadge, MagaluFreeShippingBadge, MagaluDiscountBadge, parseMagaluInfo,
   KabumFreeShippingBadge, KabumDiscountBadge, parseKabumInfo,
   AmericanasFastDeliveryBadge, AmericanasFreeShippingBadge, AmericanasDiscountBadge, parseAmericanasInfo,
-  SheinBestSellerBadge, SheinDiscountBadge, parseSheinInfo
+  SheinBestSellerBadge, SheinDiscountBadge, parseSheinInfo,
+  FastShopDiscountBadge, parseFastShopInfo,
+  CarrefourFreeShippingBadge, CarrefourInstallmentBadge, CarrefourDiscountBadge, CarrefourBestSellerBadge, parseCarrefourInfo,
+  CasasBahiaFreeShippingBadge, CasasBahiaInstallmentBadge, CasasBahiaDiscountBadge, CasasBahiaBestSellerBadge, parseCasasBahiaInfo
 } from './components';
 import { TierService, TIERS, TIER_LIMITS } from './tierService';
 import { 
@@ -1015,6 +1018,9 @@ function RadarProvider({ children }) {
 
 function identificarPlataforma(url) {
   const u = (url || '').toLowerCase();
+  if (u.includes('fastshop.com.br')) return 'FASTSHOP';
+  if (u.includes('carrefour.com.br')) return 'CARREFOUR';
+  if (u.includes('casasbahia.com.br')) return 'CASASBAHIA';
   if (u.includes('kabum.com.br')) return 'KABUM';
   if (u.includes('americanas.com.br')) return 'AMERICANAS';
   if (u.includes('shein.com') || u.includes('shein.top')) return 'SHEIN';
@@ -1367,6 +1373,15 @@ function DashboardScreen({ navigation }) {
             const sheinInfo = plat === 'SHEIN'
               ? parseSheinInfo(item.title, item.url)
               : null;
+            const fastshopInfo = plat === 'FASTSHOP'
+              ? parseFastShopInfo(item.title, item.url)
+              : null;
+            const carrefourInfo = plat === 'CARREFOUR'
+              ? parseCarrefourInfo(item.title, item.url)
+              : null;
+            const casasbahiaInfo = plat === 'CASASBAHIA'
+              ? parseCasasBahiaInfo(item.title, item.url)
+              : null;
             const displayTitle = plat === 'SHOPEE' 
               ? shopeeInfo.cleanTitle 
               : plat === 'MERCADO_LIVRE' && mlInfo 
@@ -1381,6 +1396,12 @@ function DashboardScreen({ navigation }) {
               ? ameInfo.cleanTitle
               : plat === 'SHEIN' && sheinInfo
               ? sheinInfo.cleanTitle
+              : plat === 'FASTSHOP' && fastshopInfo
+              ? fastshopInfo.cleanTitle
+              : plat === 'CARREFOUR' && carrefourInfo
+              ? carrefourInfo.cleanTitle
+              : plat === 'CASASBAHIA' && casasbahiaInfo
+              ? casasbahiaInfo.cleanTitle
               : item.title;
 
             return (
@@ -1469,6 +1490,36 @@ function DashboardScreen({ navigation }) {
                     {plat === 'SHEIN' && sheinInfo && sheinInfo.score && (
                       <ShopeeRatingBadge score={sheinInfo.score} />
                     )}
+                    {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.desconto && (
+                      <FastShopDiscountBadge discount={fastshopInfo.desconto} />
+                    )}
+                    {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.score && (
+                      <ShopeeRatingBadge score={fastshopInfo.score} />
+                    )}
+                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isFreteGratis && (
+                      <CarrefourFreeShippingBadge />
+                    )}
+                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.parcelamento && (
+                      <CarrefourInstallmentBadge parcelamento={carrefourInfo.parcelamento} />
+                    )}
+                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isMaisVendidos && (
+                      <CarrefourBestSellerBadge />
+                    )}
+                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.desconto && (
+                      <CarrefourDiscountBadge discount={carrefourInfo.desconto} />
+                    )}
+                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isFreteGratis && (
+                      <CasasBahiaFreeShippingBadge />
+                    )}
+                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.parcelamento && (
+                      <CasasBahiaInstallmentBadge parcelamento={casasbahiaInfo.parcelamento} />
+                    )}
+                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isMaisVendidos && (
+                      <CasasBahiaBestSellerBadge />
+                    )}
+                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.desconto && (
+                      <CasasBahiaDiscountBadge discount={casasbahiaInfo.desconto} />
+                    )}
                   </View>
                   <Text style={styles.opportunityDate}>
                     {new Date(item.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} • Hoje
@@ -1501,7 +1552,7 @@ function DashboardScreen({ navigation }) {
                     activeOpacity={0.8}
                   >
                     <Text style={styles.btnOpenOfferText}>
-                      {plat === 'KABUM' ? 'Ver no KaBuM' : plat === 'AMERICANAS' ? 'Ver na Americanas' : plat === 'SHEIN' ? 'Ver na SHEIN' : plat === 'MAGALU' ? 'Ver no Magalu' : plat === 'AMAZON' ? 'Ver na Amazon' : plat === 'MERCADO_LIVRE' ? 'Ver no Mercado Livre' : plat === 'SHOPEE' ? 'Ver na Shopee' : plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'FACEBOOK' ? 'Ver no Facebook' : plat === 'OLX' ? 'Ver na OLX' : 'Ver Oferta'}
+                      {plat === 'FASTSHOP' ? 'Ver na Fast Shop' : plat === 'CARREFOUR' ? 'Ver no Carrefour' : plat === 'CASASBAHIA' ? 'Ver na Casas Bahia' : plat === 'KABUM' ? 'Ver no KaBuM' : plat === 'AMERICANAS' ? 'Ver na Americanas' : plat === 'SHEIN' ? 'Ver na SHEIN' : plat === 'MAGALU' ? 'Ver no Magalu' : plat === 'AMAZON' ? 'Ver na Amazon' : plat === 'MERCADO_LIVRE' ? 'Ver no Mercado Livre' : plat === 'SHOPEE' ? 'Ver na Shopee' : plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'FACEBOOK' ? 'Ver no Facebook' : plat === 'OLX' ? 'Ver na OLX' : 'Ver Oferta'}
                     </Text>
                     <Ionicons name="arrow-forward" size={13} color={THEME.primary} style={{ marginLeft: 5 }} />
                   </TouchableOpacity>
@@ -2111,6 +2162,79 @@ function MonitorListScreen({ navigation }) {
                           </>
                         );
                       })()}
+                      {plataforma === 'FASTSHOP' && (() => {
+                        const palavrasStr = (m.palavras || '').toLowerCase();
+                        const temAval = palavrasStr.includes('fastshop_melhor_avaliacao:true');
+
+                        return (
+                          <>
+                            {temAval && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
+                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
+                              </View>
+                            )}
+                          </>
+                        );
+                      })()}
+                      {plataforma === 'CARREFOUR' && (() => {
+                        const palavrasStr = (m.palavras || '').toLowerCase();
+                        const temFrete = palavrasStr.includes('carrefour_frete_gratis:true');
+                        const temParc = palavrasStr.includes('carrefour_parcelamento:true');
+                        const temMaisVendidos = palavrasStr.includes('carrefour_mais_vendidos:true');
+
+                        return (
+                          <>
+                            {temFrete && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
+                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
+                              </View>
+                            )}
+                            {temParc && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
+                                <Ionicons name="card-outline" size={10} color="#3B82F6" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#60A5FA', fontWeight: '700' }]}>Sem Juros</Text>
+                              </View>
+                            )}
+                            {temMaisVendidos && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(245, 158, 11, 0.45)', backgroundColor: 'rgba(245, 158, 11, 0.12)' }]}>
+                                <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#F59E0B', fontWeight: '800' }]}>Mais Vendidos</Text>
+                              </View>
+                            )}
+                          </>
+                        );
+                      })()}
+                      {plataforma === 'CASASBAHIA' && (() => {
+                        const palavrasStr = (m.palavras || '').toLowerCase();
+                        const temFrete = palavrasStr.includes('casasbahia_frete_gratis:true');
+                        const temParc = palavrasStr.includes('casasbahia_parcelamento:true');
+                        const temMaisVendidos = palavrasStr.includes('casasbahia_mais_vendidos:true');
+
+                        return (
+                          <>
+                            {temFrete && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
+                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
+                              </View>
+                            )}
+                            {temParc && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
+                                <Ionicons name="card-outline" size={10} color="#3B82F6" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#60A5FA', fontWeight: '700' }]}>Sem Juros</Text>
+                              </View>
+                            )}
+                            {temMaisVendidos && (
+                              <View style={[styles.locationChip, { borderColor: 'rgba(245, 158, 11, 0.45)', backgroundColor: 'rgba(245, 158, 11, 0.12)' }]}>
+                                <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 2 }} />
+                                <Text style={[styles.locationChipText, { color: '#F59E0B', fontWeight: '800' }]}>Mais Vendidos</Text>
+                              </View>
+                            )}
+                          </>
+                        );
+                      })()}
                     </View>
                   </View>
                   <Switch 
@@ -2314,9 +2438,9 @@ function AlertsScreen({ navigation }) {
 
       {/* CHIPS DE FILTRO POR PLATAFORMA */}
       <View style={styles.filterChipRow}>
-        {['TODAS', 'OLX', 'FACEBOOK', 'MERCADO_LIVRE', 'SHOPEE', 'AMAZON', 'MAGALU', 'KABUM', 'AMERICANAS', 'SHEIN', 'ZOOM', 'OUTROS'].map(k => {
+        {['TODAS', 'OLX', 'FACEBOOK', 'MERCADO_LIVRE', 'SHOPEE', 'AMAZON', 'MAGALU', 'KABUM', 'AMERICANAS', 'SHEIN', 'FASTSHOP', 'CARREFOUR', 'CASASBAHIA', 'ZOOM', 'OUTROS'].map(k => {
           const isSelected = filtroPlataforma === k;
-          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'FACEBOOK' ? 'Facebook' : k === 'MERCADO_LIVRE' ? 'Mercado Livre' : k === 'SHOPEE' ? 'Shopee' : k === 'AMAZON' ? 'Amazon' : k === 'MAGALU' ? 'Magalu' : k === 'KABUM' ? 'KaBuM!' : k === 'AMERICANAS' ? 'Americanas' : k === 'SHEIN' ? 'SHEIN' : k === 'ZOOM' ? 'Zoom' : 'OLX';
+          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'FACEBOOK' ? 'Facebook' : k === 'MERCADO_LIVRE' ? 'Mercado Livre' : k === 'SHOPEE' ? 'Shopee' : k === 'AMAZON' ? 'Amazon' : k === 'MAGALU' ? 'Magalu' : k === 'KABUM' ? 'KaBuM!' : k === 'AMERICANAS' ? 'Americanas' : k === 'SHEIN' ? 'SHEIN' : k === 'FASTSHOP' ? 'Fast Shop' : k === 'CARREFOUR' ? 'Carrefour' : k === 'CASASBAHIA' ? 'Casas Bahia' : k === 'ZOOM' ? 'Zoom' : 'OLX';
           return (
             <TouchableOpacity 
               key={k}
@@ -2381,6 +2505,15 @@ function AlertsScreen({ navigation }) {
                 const sheinInfo = plat === 'SHEIN'
                   ? parseSheinInfo(res.title, res.url)
                   : null;
+                const fastshopInfo = plat === 'FASTSHOP'
+                  ? parseFastShopInfo(res.title, res.url)
+                  : null;
+                const carrefourInfo = plat === 'CARREFOUR'
+                  ? parseCarrefourInfo(res.title, res.url)
+                  : null;
+                const casasbahiaInfo = plat === 'CASASBAHIA'
+                  ? parseCasasBahiaInfo(res.title, res.url)
+                  : null;
                 const displayTitle = plat === 'SHOPEE' 
                   ? shopeeInfo.cleanTitle 
                   : plat === 'MERCADO_LIVRE' && mlInfo 
@@ -2395,6 +2528,12 @@ function AlertsScreen({ navigation }) {
                   ? ameInfo.cleanTitle
                   : plat === 'SHEIN' && sheinInfo
                   ? sheinInfo.cleanTitle
+                  : plat === 'FASTSHOP' && fastshopInfo
+                  ? fastshopInfo.cleanTitle
+                  : plat === 'CARREFOUR' && carrefourInfo
+                  ? carrefourInfo.cleanTitle
+                  : plat === 'CASASBAHIA' && casasbahiaInfo
+                  ? casasbahiaInfo.cleanTitle
                   : res.title;
 
                 return (
@@ -2482,6 +2621,36 @@ function AlertsScreen({ navigation }) {
                         )}
                         {plat === 'SHEIN' && sheinInfo && sheinInfo.score && (
                           <ShopeeRatingBadge score={sheinInfo.score} />
+                        )}
+                        {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.desconto && (
+                          <FastShopDiscountBadge discount={fastshopInfo.desconto} />
+                        )}
+                        {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.score && (
+                          <ShopeeRatingBadge score={fastshopInfo.score} />
+                        )}
+                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isFreteGratis && (
+                          <CarrefourFreeShippingBadge />
+                        )}
+                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.parcelamento && (
+                          <CarrefourInstallmentBadge parcelamento={carrefourInfo.parcelamento} />
+                        )}
+                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isMaisVendidos && (
+                          <CarrefourBestSellerBadge />
+                        )}
+                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.desconto && (
+                          <CarrefourDiscountBadge discount={carrefourInfo.desconto} />
+                        )}
+                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isFreteGratis && (
+                          <CasasBahiaFreeShippingBadge />
+                        )}
+                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.parcelamento && (
+                          <CasasBahiaInstallmentBadge parcelamento={casasbahiaInfo.parcelamento} />
+                        )}
+                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isMaisVendidos && (
+                          <CasasBahiaBestSellerBadge />
+                        )}
+                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.desconto && (
+                          <CasasBahiaDiscountBadge discount={casasbahiaInfo.desconto} />
                         )}
                         <View style={styles.robotTag}>
                           <Ionicons name="checkmark-circle" size={13} color={THEME.success} style={{ marginRight: 4 }} />
@@ -2622,7 +2791,7 @@ function CreateMonitorScreen({ navigation, route }) {
 
   const [modo, setModo] = useState(editando?.modo === 'noticia' ? 'noticia' : 'produto');
   const estratInicial = editando 
-    ? ((platInicial === 'MERCADO_LIVRE' || platInicial === 'SHOPEE' || platInicial === 'AMAZON' || platInicial === 'MAGALU' || platInicial === 'KABUM' || platInicial === 'AMERICANAS' || platInicial === 'SHEIN') && identificarEstrategia(editando) === 'mais_recentes' 
+    ? ((platInicial === 'MERCADO_LIVRE' || platInicial === 'SHOPEE' || platInicial === 'AMAZON' || platInicial === 'MAGALU' || platInicial === 'KABUM' || platInicial === 'AMERICANAS' || platInicial === 'SHEIN' || platInicial === 'FASTSHOP' || platInicial === 'CARREFOUR' || platInicial === 'CASASBAHIA') && identificarEstrategia(editando) === 'mais_recentes' 
         ? 'maior_desconto' 
         : identificarEstrategia(editando)) 
     : 'menor_preco';
@@ -2748,8 +2917,38 @@ function CreateMonitorScreen({ navigation, route }) {
     isSheinEdit ? palavrasEdit.includes('shein_melhor_avaliacao:true') : false
   );
 
+  // Filtros personalizáveis da Fast Shop (desmarcado por padrão)
+  const isFastShopEdit = editando && platInicial === 'FASTSHOP';
+  const [fastshopMelhorAvaliacao, setFastshopMelhorAvaliacao] = useState(
+    isFastShopEdit ? palavrasEdit.includes('fastshop_melhor_avaliacao:true') : false
+  );
+
+  // Filtros personalizáveis do Carrefour (desmarcados por padrão)
+  const isCarrefourEdit = editando && platInicial === 'CARREFOUR';
+  const [carrefourFreteGratis, setCarrefourFreteGratis] = useState(
+    isCarrefourEdit ? palavrasEdit.includes('carrefour_frete_gratis:true') : false
+  );
+  const [carrefourParcelamento, setCarrefourParcelamento] = useState(
+    isCarrefourEdit ? palavrasEdit.includes('carrefour_parcelamento:true') : false
+  );
+  const [carrefourMaisVendidos, setCarrefourMaisVendidos] = useState(
+    isCarrefourEdit ? palavrasEdit.includes('carrefour_mais_vendidos:true') : false
+  );
+
+  // Filtros personalizáveis da Casas Bahia (desmarcados por padrão)
+  const isCasasBahiaEdit = editando && platInicial === 'CASASBAHIA';
+  const [casasbahiaFreteGratis, setCasasBahiaFreteGratis] = useState(
+    isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_frete_gratis:true') : false
+  );
+  const [casasbahiaParcelamento, setCasasBahiaParcelamento] = useState(
+    isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_parcelamento:true') : false
+  );
+  const [casasbahiaMaisVendidos, setCasasBahiaMaisVendidos] = useState(
+    isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_mais_vendidos:true') : false
+  );
+
   const [apenasMaiorDesconto, setApenasMaiorDesconto] = useState(
-    isMLEdit ? palavrasEdit.includes('ml_apenas_maior_desconto:true') : (isShopeeEdit ? (palavrasEdit.includes('shopee_apenas_maior_desconto:true') || palavrasEdit.includes('ml_apenas_maior_desconto:true')) : (isAmzEdit ? palavrasEdit.includes('amz_apenas_maior_desconto:true') : (isMagaluEdit ? palavrasEdit.includes('magalu_apenas_maior_desconto:true') : (isKabumEdit ? palavrasEdit.includes('kabum_apenas_maior_desconto:true') : (isAmeEdit ? (palavrasEdit.includes('ame_apenas_maior_desconto:true') || palavrasEdit.includes('americanas_apenas_maior_desconto:true')) : (isSheinEdit ? palavrasEdit.includes('shein_apenas_maior_desconto:true') : false))))))
+    isMLEdit ? palavrasEdit.includes('ml_apenas_maior_desconto:true') : (isShopeeEdit ? (palavrasEdit.includes('shopee_apenas_maior_desconto:true') || palavrasEdit.includes('ml_apenas_maior_desconto:true')) : (isAmzEdit ? palavrasEdit.includes('amz_apenas_maior_desconto:true') : (isMagaluEdit ? palavrasEdit.includes('magalu_apenas_maior_desconto:true') : (isKabumEdit ? palavrasEdit.includes('kabum_apenas_maior_desconto:true') : (isAmeEdit ? (palavrasEdit.includes('ame_apenas_maior_desconto:true') || palavrasEdit.includes('americanas_apenas_maior_desconto:true')) : (isSheinEdit ? palavrasEdit.includes('shein_apenas_maior_desconto:true') : (isFastShopEdit ? palavrasEdit.includes('fastshop_apenas_maior_desconto:true') : (isCarrefourEdit ? palavrasEdit.includes('carrefour_apenas_maior_desconto:true') : (isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_apenas_maior_desconto:true') : false)))))))))
   );
 
   const [nome, setNome] = useState(editando?.nome || '');
@@ -2843,6 +3042,16 @@ function CreateMonitorScreen({ navigation, route }) {
     } else if (plataforma === 'SHEIN') {
       let termoShein = produto.trim().replace(/\s+/g, '-');
       urlFinal = `https://br.shein.com/pdsearch/${encodeURIComponent(termoShein)}/`;
+    } else if (plataforma === 'FASTSHOP') {
+      let termoFs = produto.trim();
+      urlFinal = `https://site.fastshop.com.br/s?q=${encodeURIComponent(termoFs)}&fuzzy=0&operator=and&facets=fuzzy%2Coperator&page=0`;
+    } else if (plataforma === 'CARREFOUR') {
+      let termoCrf = produto.trim();
+      urlFinal = `https://www.carrefour.com.br/busca/${encodeURIComponent(termoCrf)}`;
+    } else if (plataforma === 'CASASBAHIA') {
+      let termoCb = produto.trim();
+      let slugCb = termoCb.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      urlFinal = `https://www.casasbahia.com.br/${encodeURIComponent(slugCb)}/b`;
     } else {
       urlFinal = urls.trim();
     }
@@ -2930,6 +3139,28 @@ function CreateMonitorScreen({ navigation, route }) {
         if (sheinMelhorAvaliacao) tagsArray.push('shein_melhor_avaliacao:true');
         if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
           tagsArray.push('shein_apenas_maior_desconto:true');
+        }
+      }
+      if (plataforma === 'FASTSHOP') {
+        if (fastshopMelhorAvaliacao) tagsArray.push('fastshop_melhor_avaliacao:true');
+        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
+          tagsArray.push('fastshop_apenas_maior_desconto:true');
+        }
+      }
+      if (plataforma === 'CARREFOUR') {
+        if (carrefourFreteGratis) tagsArray.push('carrefour_frete_gratis:true');
+        if (carrefourParcelamento) tagsArray.push('carrefour_parcelamento:true');
+        if (carrefourMaisVendidos) tagsArray.push('carrefour_mais_vendidos:true');
+        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
+          tagsArray.push('carrefour_apenas_maior_desconto:true');
+        }
+      }
+      if (plataforma === 'CASASBAHIA') {
+        if (casasbahiaFreteGratis) tagsArray.push('casasbahia_frete_gratis:true');
+        if (casasbahiaParcelamento) tagsArray.push('casasbahia_parcelamento:true');
+        if (casasbahiaMaisVendidos) tagsArray.push('casasbahia_mais_vendidos:true');
+        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
+          tagsArray.push('casasbahia_apenas_maior_desconto:true');
         }
       }
     }
@@ -3185,6 +3416,9 @@ function CreateMonitorScreen({ navigation, route }) {
             { key: 'KABUM', nome: 'KaBuM!', icon: 'hardware-chip-outline', color: '#FF6500', locked: false },
             { key: 'AMERICANAS', nome: 'Americanas', icon: 'storefront-outline', color: '#E60014', locked: false },
             { key: 'SHEIN', nome: 'SHEIN', icon: 'shirt-outline', color: '#FFFFFF', locked: false },
+            { key: 'FASTSHOP', nome: 'Fast Shop', icon: 'flash-outline', color: '#E30613', locked: false },
+            { key: 'CARREFOUR', nome: 'Carrefour', icon: 'cart-outline', color: '#004F9F', locked: false },
+            { key: 'CASASBAHIA', nome: 'Casas Bahia', icon: 'home-outline', color: '#002B7F', locked: false },
             { key: 'FACEBOOK', nome: 'Facebook Marketplace', icon: 'logo-facebook', color: '#1877F2', locked: false },
             { key: 'ZOOM', nome: 'Zoom', icon: 'search-outline', color: '#F59E0B', locked: false },
             { key: 'OUTROS', nome: 'Outros Sites', icon: 'globe-outline', color: '#06B6D4', locked: tier === TIERS.FREE }
@@ -3212,7 +3446,7 @@ function CreateMonitorScreen({ navigation, route }) {
                   if (p.key === 'ZOOM') {
                     if (estrategia === 'mais_recentes') setEstrategia('menor_preco');
                   }
-                  if (p.key === 'MERCADO_LIVRE' || p.key === 'SHOPEE' || p.key === 'AMAZON' || p.key === 'MAGALU' || p.key === 'KABUM' || p.key === 'AMERICANAS' || p.key === 'SHEIN') {
+                  if (p.key === 'MERCADO_LIVRE' || p.key === 'SHOPEE' || p.key === 'AMAZON' || p.key === 'MAGALU' || p.key === 'KABUM' || p.key === 'AMERICANAS' || p.key === 'SHEIN' || p.key === 'FASTSHOP' || p.key === 'CARREFOUR' || p.key === 'CASASBAHIA') {
                     if (estrategia === 'mais_recentes') setEstrategia('maior_desconto');
                   }
                   if (p.key !== 'OUTROS') setModo('produto');
@@ -3294,6 +3528,33 @@ function CreateMonitorScreen({ navigation, route }) {
             <Ionicons name="shirt-outline" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
             <Text style={styles.comparatorBannerText}>
               A SHEIN monitora moda e vestuário com opções de procedência nacional ou internacional, produtos Mais Vendidos na Shein, melhores avaliações dos clientes e maiores descontos promocionais (% OFF).
+            </Text>
+          </View>
+        )}
+
+        {plataforma === 'FASTSHOP' && (
+          <View style={[styles.comparatorBanner, { borderColor: 'rgba(227, 6, 19, 0.35)', backgroundColor: 'rgba(227, 6, 19, 0.08)' }]}>
+            <Ionicons name="flash-outline" size={16} color="#E30613" style={{ marginRight: 8 }} />
+            <Text style={styles.comparatorBannerText}>
+              A Fast Shop monitora eletrônicos e eletrodomésticos com suporte a filtro de melhores avaliações dos clientes e captura dos maiores descontos promocionais (% OFF).
+            </Text>
+          </View>
+        )}
+
+        {plataforma === 'CARREFOUR' && (
+          <View style={[styles.comparatorBanner, { borderColor: 'rgba(0, 79, 159, 0.35)', backgroundColor: 'rgba(0, 79, 159, 0.08)' }]}>
+            <Ionicons name="cart-outline" size={16} color="#004F9F" style={{ marginRight: 8 }} />
+            <Text style={styles.comparatorBannerText}>
+              O Carrefour monitora produtos com suporte a frete grátis, parcelamento sem juros, itens mais vendidos da loja e captura dos maiores descontos promocionais (% OFF).
+            </Text>
+          </View>
+        )}
+
+        {plataforma === 'CASASBAHIA' && (
+          <View style={[styles.comparatorBanner, { borderColor: 'rgba(0, 43, 127, 0.35)', backgroundColor: 'rgba(0, 43, 127, 0.08)' }]}>
+            <Ionicons name="home-outline" size={16} color="#002B7F" style={{ marginRight: 8 }} />
+            <Text style={styles.comparatorBannerText}>
+              A Casas Bahia monitora eletrodomésticos, móveis e tecnologia com suporte a frete grátis, parcelamento sem juros, itens mais vendidos da loja e maiores descontos promocionais (% OFF).
             </Text>
           </View>
         )}
@@ -3507,6 +3768,12 @@ function CreateMonitorScreen({ navigation, route }) {
                   ? "O robô buscará este produto na Americanas aplicando os filtros configurados."
                   : plataforma === 'SHEIN'
                   ? "O robô buscará este produto na SHEIN aplicando os filtros configurados."
+                  : plataforma === 'FASTSHOP'
+                  ? "O robô buscará este produto na Fast Shop aplicando os filtros configurados."
+                  : plataforma === 'CARREFOUR'
+                  ? "O robô buscará este produto no Carrefour aplicando os filtros configurados."
+                  : plataforma === 'CASASBAHIA'
+                  ? "O robô buscará este produto na Casas Bahia aplicando os filtros configurados."
                   : plataforma === 'ZOOM'
                   ? "O comparador filtrará os preços de lojas confiáveis com este termo."
                   : "O robô buscará este produto na página cadastrada."}
@@ -4406,8 +4673,228 @@ function CreateMonitorScreen({ navigation, route }) {
               </Surface>
             )}
 
-            {/* ESTRATÉGIA: MAIOR DESCONTO (MERCADO LIVRE, SHOPEE, AMAZON, MAGALU, KABUM, AMERICANAS E SHEIN) */}
-            {(plataforma === 'MERCADO_LIVRE' || plataforma === 'SHOPEE' || plataforma === 'AMAZON' || plataforma === 'MAGALU' || plataforma === 'KABUM' || plataforma === 'AMERICANAS' || plataforma === 'SHEIN') && (
+            {/* OPÇÕES E FILTROS DA FAST SHOP */}
+            {plataforma === 'FASTSHOP' && (
+              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(227, 6, 19, 0.3)' }]}>
+                <View style={styles.shopeeOptionsHeader}>
+                  <Ionicons name="flash-outline" size={15} color="#E30613" style={{ marginRight: 6 }} />
+                  <Text style={[styles.shopeeOptionsTitle, { color: '#E30613' }]}>FILTROS DA FAST SHOP</Text>
+                </View>
+                <Text style={styles.shopeeOptionsDesc}>
+                  Personalize sua busca na Fast Shop selecionando os filtros desejados:
+                </Text>
+
+                <View style={styles.checkboxContainer}>
+                  {/* Melhor Avaliação Positiva */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, fastshopMelhorAvaliacao && styles.checkboxRowItemActive]}
+                    onPress={() => setFastshopMelhorAvaliacao(!fastshopMelhorAvaliacao)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={fastshopMelhorAvaliacao ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={fastshopMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, fastshopMelhorAvaliacao && styles.checkboxItemTitleActive]}>
+                          Por Melhor Avaliação Positiva
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra exclusivamente ofertas com alta pontuação de avaliação dos clientes</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </Surface>
+            )}
+
+            {/* OPÇÕES E FILTROS DO CARREFOUR */}
+            {plataforma === 'CARREFOUR' && (
+              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(0, 79, 159, 0.3)' }]}>
+                <View style={styles.shopeeOptionsHeader}>
+                  <Ionicons name="cart-outline" size={15} color="#004F9F" style={{ marginRight: 6 }} />
+                  <Text style={[styles.shopeeOptionsTitle, { color: '#004F9F' }]}>FILTROS DO CARREFOUR</Text>
+                </View>
+                <Text style={styles.shopeeOptionsDesc}>
+                  Personalize sua busca no Carrefour selecionando os filtros desejados:
+                </Text>
+
+                <View style={styles.checkboxContainer}>
+                  {/* 1. Frete Grátis */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, carrefourFreteGratis && styles.checkboxRowItemActive]}
+                    onPress={() => setCarrefourFreteGratis(!carrefourFreteGratis)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={carrefourFreteGratis ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={carrefourFreteGratis ? "#10B981" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, carrefourFreteGratis && styles.checkboxItemTitleActive]}>
+                          Apenas com Frete Grátis
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Apenas anúncios elegíveis para frete grátis</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* 2. Parcelamento Sem Juros */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, carrefourParcelamento && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setCarrefourParcelamento(!carrefourParcelamento)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={carrefourParcelamento ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={carrefourParcelamento ? "#3B82F6" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, carrefourParcelamento && styles.checkboxItemTitleActive]}>
+                          Parcelamento Sem Juros
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#60A5FA' }}>💳 SEM JUROS</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra apenas ofertas com opção de parcelamento sem juros</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* 3. Mais Vendidos da Loja */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, carrefourMaisVendidos && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setCarrefourMaisVendidos(!carrefourMaisVendidos)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={carrefourMaisVendidos ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={carrefourMaisVendidos ? "#F59E0B" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, carrefourMaisVendidos && styles.checkboxItemTitleActive]}>
+                          Mais Vendidos da Loja
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: 'rgba(245, 158, 11, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#F59E0B' }}>🔥 HOT</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra os produtos mais populares e comprados no Carrefour</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </Surface>
+            )}
+
+            {/* OPÇÕES E FILTROS DAS CASAS BAHIA */}
+            {plataforma === 'CASASBAHIA' && (
+              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(0, 43, 127, 0.35)' }]}>
+                <View style={styles.shopeeOptionsHeader}>
+                  <Ionicons name="home-outline" size={15} color="#002B7F" style={{ marginRight: 6 }} />
+                  <Text style={[styles.shopeeOptionsTitle, { color: '#60A5FA' }]}>FILTROS DAS CASAS BAHIA</Text>
+                </View>
+                <Text style={styles.shopeeOptionsDesc}>
+                  Personalize sua busca na Casas Bahia selecionando os filtros desejados:
+                </Text>
+
+                <View style={styles.checkboxContainer}>
+                  {/* 1. Frete Grátis */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, casasbahiaFreteGratis && styles.checkboxRowItemActive]}
+                    onPress={() => setCasasBahiaFreteGratis(!casasbahiaFreteGratis)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={casasbahiaFreteGratis ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={casasbahiaFreteGratis ? "#10B981" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, casasbahiaFreteGratis && styles.checkboxItemTitleActive]}>
+                          Apenas com Frete Grátis
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Apenas anúncios elegíveis para frete grátis</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* 2. Parcelamento Sem Juros */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, casasbahiaParcelamento && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setCasasBahiaParcelamento(!casasbahiaParcelamento)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={casasbahiaParcelamento ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={casasbahiaParcelamento ? "#3B82F6" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, casasbahiaParcelamento && styles.checkboxItemTitleActive]}>
+                          Parcelamento Sem Juros
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#60A5FA' }}>💳 SEM JUROS</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra apenas ofertas com opção de parcelamento sem juros</Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* 3. Mais Vendidos da Loja */}
+                  <TouchableOpacity 
+                    style={[styles.checkboxRowItem, casasbahiaMaisVendidos && styles.checkboxRowItemActive, { marginTop: 8 }]}
+                    onPress={() => setCasasBahiaMaisVendidos(!casasbahiaMaisVendidos)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={casasbahiaMaisVendidos ? "checkbox" : "square-outline"} 
+                      size={20} 
+                      color={casasbahiaMaisVendidos ? "#F59E0B" : THEME.textSubtle} 
+                      style={{ marginRight: 10 }} 
+                    />
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.row}>
+                        <Text style={[styles.checkboxItemTitle, casasbahiaMaisVendidos && styles.checkboxItemTitleActive]}>
+                          Mais Vendidos da Loja
+                        </Text>
+                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: 'rgba(245, 158, 11, 0.35)' }]}>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#F59E0B' }}>🔥 HOT</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.checkboxItemSub}>Filtra os produtos mais populares e comprados na Casas Bahia</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </Surface>
+            )}
+
+            {/* ESTRATÉGIA: MAIOR DESCONTO (MERCADO LIVRE, SHOPEE, AMAZON, MAGALU, KABUM, AMERICANAS, SHEIN, FAST SHOP, CARREFOUR E CASAS BAHIA) */}
+            {(plataforma === 'MERCADO_LIVRE' || plataforma === 'SHOPEE' || plataforma === 'AMAZON' || plataforma === 'MAGALU' || plataforma === 'KABUM' || plataforma === 'AMERICANAS' || plataforma === 'SHEIN' || plataforma === 'FASTSHOP' || plataforma === 'CARREFOUR' || plataforma === 'CASASBAHIA') && (
               <TouchableOpacity 
                 style={[styles.strategyCard, estrategia === 'maior_desconto' && styles.strategyCardActive]}
                 onPress={() => setEstrategia('maior_desconto')}
@@ -4484,7 +4971,7 @@ function CreateMonitorScreen({ navigation, route }) {
             </TouchableOpacity>
 
             {/* ESTRATÉGIA: MAIS RECENTES */}
-            {plataforma !== 'ZOOM' && plataforma !== 'MERCADO_LIVRE' && plataforma !== 'SHOPEE' && plataforma !== 'AMAZON' && plataforma !== 'MAGALU' && plataforma !== 'KABUM' && plataforma !== 'AMERICANAS' && plataforma !== 'SHEIN' && (
+            {plataforma !== 'ZOOM' && plataforma !== 'MERCADO_LIVRE' && plataforma !== 'SHOPEE' && plataforma !== 'AMAZON' && plataforma !== 'MAGALU' && plataforma !== 'KABUM' && plataforma !== 'AMERICANAS' && plataforma !== 'SHEIN' && plataforma !== 'FASTSHOP' && plataforma !== 'CARREFOUR' && plataforma !== 'CASASBAHIA' && (
               <TouchableOpacity 
                 style={[styles.strategyCard, estrategia === 'mais_recentes' && styles.strategyCardActive]}
                 onPress={() => setEstrategia('mais_recentes')}
