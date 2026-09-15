@@ -2,10 +2,11 @@ import React, { useState, useEffect, createContext, useContext, useCallback, use
 import { 
   View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, 
   Alert, Platform, StatusBar, ActivityIndicator, Switch, Dimensions, 
-  Linking, RefreshControl, Modal, FlatList, Image, Vibration 
+  Linking, RefreshControl, Modal, FlatList, Image, Vibration, 
+  Animated, Easing, KeyboardAvoidingView 
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { NavigationContainer, DarkTheme } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
@@ -13,15 +14,17 @@ import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BlurView } from 'expo-blur';
+import * as Clipboard from 'expo-clipboard';
 
 import { supabase, supabaseAuth } from './supabase'; 
 import { setupNotifications, registerPushToken, testLocalNotification, subscribeNotificationEvents, checkIsExpoGo } from './notificationService';
-import { OLX_ESTADOS, LISTA_ESTADOS, gerarUrlOlx } from './olxData';
+import { OLX_ESTADOS, LISTA_ESTADOS, gerarUrlOlx, FACEBOOK_ESTADOS_CIDADES, LISTA_ESTADOS_FACEBOOK, FACEBOOK_REGIOES, gerarUrlFacebook } from './olxData';
 import { getOrCreateDeviceId, registerDeviceInSupabase, migrateDeviceMonitorsToAccount, resetDeviceOnLogout } from './deviceService';
 import { THEME } from './theme';
 import { 
-  Surface, PrimaryButton, IconButton, StatusBadge, PlatformBadge, 
+  AppTopHeader, Surface, PrimaryButton, IconButton, StatusBadge, PlatformBadge, 
   StrategyBadge, SectionHeader, MetricBox, TierBadge,
+  StoreLogoBadge, ProductDealCard, PlatformCircle, PlatformBubble, FrequencySelector,
   ShopeeOriginBadge, ShopeeDiscountBadge, ShopeeRatingBadge, parseShopeeInfo,
   MLFullBadge, MLFreeShippingBadge, MLDiscountBadge, parseMLInfo,
   AmazonPrimeBadge, AmazonFreeShippingBadge, AmazonDiscountBadge, parseAmazonInfo,
@@ -33,6 +36,7 @@ import {
   CarrefourFreeShippingBadge, CarrefourInstallmentBadge, CarrefourDiscountBadge, CarrefourBestSellerBadge, parseCarrefourInfo,
   CasasBahiaFreeShippingBadge, CasasBahiaInstallmentBadge, CasasBahiaDiscountBadge, CasasBahiaBestSellerBadge, parseCasasBahiaInfo
 } from './components';
+import { RecommendationEngine, LOJAS_RECOMENDACOES, calcularFreteGratisInfo } from './recommendationService';
 import { TierService, TIERS, TIER_LIMITS } from './tierService';
 import { 
   LockOverlay, LockBadge, FreemiumModal, CelebrationModal, 
@@ -75,21 +79,53 @@ class RadarAPI {
     if (ownerId) {
       query = query.eq('usuario_id', ownerId);
     }
+    // Isolamento estrito: Meus Radares exibe exclusivamente os radares criados pelo usuário
+    query = query.neq('modo', 'pesquisa_inteligente').neq('modo', 'promocoes').neq('modo', 'recomendacoes');
     const { data, error } = await query;
     if (error) throw error;
-    return data || [];
+    return (data || []).filter(m => 
+      m.modo !== 'pesquisa_inteligente' && 
+      m.modo !== 'promocoes' && 
+      m.modo !== 'recomendacoes' &&
+      !m.nome?.startsWith('Pesquisa:') &&
+      !m.produto?.startsWith('Pesquisa:') &&
+      !m.produto?.startsWith('SISTEMA_') &&
+      !m.nome?.startsWith('SISTEMA_')
+    );
   }
 
   static async createMonitor(dados) {
-    const { data, error } = await supabase.from('monitores').insert([dados]).select();
-    if (error) throw error;
-    return data ? data[0] : null;
+    const payload = { ...dados };
+    try {
+      const { data, error } = await supabase.from('monitores').insert([payload]).select();
+      if (error) throw error;
+      return data ? data[0] : null;
+    } catch (err) {
+      if (err?.code === 'PGRST204' || String(err?.message || '').includes('column')) {
+        delete payload.notificar_por_loja;
+        const { data, error } = await supabase.from('monitores').insert([payload]).select();
+        if (error) throw error;
+        return data ? data[0] : null;
+      }
+      throw err;
+    }
   }
 
   static async updateMonitor(id, dados) {
-    const { data, error } = await supabase.from('monitores').update(dados).eq('id', id).select();
-    if (error) throw error;
-    return data ? data[0] : null;
+    const payload = { ...dados };
+    try {
+      const { data, error } = await supabase.from('monitores').update(payload).eq('id', id).select();
+      if (error) throw error;
+      return data ? data[0] : null;
+    } catch (err) {
+      if (err?.code === 'PGRST204' || String(err?.message || '').includes('column')) {
+        delete payload.notificar_por_loja;
+        const { data, error } = await supabase.from('monitores').update(payload).eq('id', id).select();
+        if (error) throw error;
+        return data ? data[0] : null;
+      }
+      throw err;
+    }
   }
 
   static async toggleMonitor(id, status) {
@@ -196,6 +232,23 @@ function RadarProvider({ children }) {
   const [sweepCooldownSeconds, setSweepCooldownSeconds] = useState(0);
   const [antiSpamCooldowns, setAntiSpamCooldowns] = useState({});
   const [varrendoMonitorId, setVarrendoMonitorId] = useState(null);
+  const [notifModalVisible, setNotifModalVisible] = useState(false);
+  const [settingsModalVisible, setSettingsModalVisible] = useState(false);
+  const [authModalVisible, setAuthModalVisible] = useState(false);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  const [userProfile, setUserProfile] = useState(null);
+  const notifInitializedRef = useRef(false);
+
+  // Carrega perfil salvo no cache local do aparelho
+  useEffect(() => {
+    AsyncStorage.getItem('@achoai_user_profile_cache').then(cached => {
+      if (cached) {
+        try {
+          setUserProfile(JSON.parse(cached));
+        } catch (e) {}
+      }
+    });
+  }, []);
 
   const [alertConfig, setAlertConfig] = useState({
     visible: false,
@@ -273,7 +326,11 @@ function RadarProvider({ children }) {
         RadarAPI.getLogs(8, monitorIds)
       ]);
 
-      if (dadosResultados && dadosResultados.length > lastResultsCountRef.current && hasLoadedRef.current) {
+      if (!notifInitializedRef.current && dadosResultados && dadosResultados.length > 0) {
+        setUnreadNotifCount(dadosResultados.length);
+        notifInitializedRef.current = true;
+      } else if (dadosResultados && dadosResultados.length > lastResultsCountRef.current && hasLoadedRef.current) {
+        setUnreadNotifCount(prev => prev + (dadosResultados.length - lastResultsCountRef.current));
         try {
           Vibration.vibrate(Platform.OS === 'android' ? [0, 80, 50, 100] : 100);
         } catch (e) {}
@@ -303,16 +360,8 @@ function RadarProvider({ children }) {
     const eligibility = await TierService.canActivateTrial(currentDev, currentUser, pushTokenRef.current);
     setTrialEligibility(eligibility);
 
-    // Se acabou de expirar, aciona modal e pausa radares excedentes (> 1)
+    // Se acabou de expirar, recarrega dados sem pausar nenhum radar nem travar usuário
     if (state.justExpired) {
-      setTrialExpiredModalVisible(true);
-      try {
-        const dadosMonitores = await RadarAPI.getMonitors(currentDev);
-        const { monitoresToPause } = TierService.pruneExcessRadars(dadosMonitores, TIERS.FREE);
-        for (const m of monitoresToPause) {
-          await RadarAPI.updateMonitor(m.id, { ativo: false });
-        }
-      } catch (e) {}
       fetchData(currentDev, true);
     }
 
@@ -383,6 +432,14 @@ function RadarProvider({ children }) {
       // Atualiza o estado de tier para ver se esta conta possui plano Premium
       await refreshTierState(currentDevId, authUser);
 
+      // Salva nome e foto estritamente na memória cache do aparelho (NUNCA no banco)
+      const fullName = authUser?.user_metadata?.full_name || authUser?.user_metadata?.name || '';
+      const firstName = fullName ? fullName.trim().split(' ')[0] : (authUser?.email ? authUser.email.split('@')[0] : '');
+      const photoUrl = authUser?.user_metadata?.avatar_url || authUser?.user_metadata?.picture || null;
+      const perfil = { name: firstName, photoUrl };
+      setUserProfile(perfil);
+      await AsyncStorage.setItem('@achoai_user_profile_cache', JSON.stringify(perfil));
+
       // Se o usuário for Premium ou Admin, migra os radares para a conta Google sincronizar
       if (currentDevId && (tierRef.current === TIERS.PREMIUM || tierRef.current === TIERS.ADMIN)) {
         await migrateDeviceMonitorsToAccount(currentDevId, authUser.id, currentToken);
@@ -410,6 +467,8 @@ function RadarProvider({ children }) {
 
       setUser(null);
       userRef.current = null;
+      setUserProfile(null);
+      await AsyncStorage.removeItem('@achoai_user_profile_cache');
 
       setMonitores([]);
       setResultados([]);
@@ -450,25 +509,7 @@ function RadarProvider({ children }) {
       }
     }
 
-    // 3. Checa limite de cooldown de 60 minutos do Plano Free
-    if (tierRef.current === TIERS.FREE) {
-      const cooldown = await TierService.getSweepCooldown(TIERS.FREE);
-      if (cooldown > 0) {
-        const min = Math.floor(cooldown / 60);
-        const sec = cooldown % 60;
-        showAlert({
-          title: "Limite do Plano Free",
-          message: `No plano Free, o robô pode ser acionado manualmente 1 vez a cada 60 minutos.\n\nAguarde ${min > 0 ? `${min}m ` : ''}${sec}s ou faça upgrade para o AchôAI Premium para varrer quantas vezes quiser sem tempo de espera!`,
-          type: "warning",
-          icon: "lock-closed",
-          confirmText: "Ver Planos",
-          cancelText: "Aguardar",
-          showCancel: true,
-          onConfirm: () => setFreemiumModalVisible(true)
-        });
-        return false;
-      }
-    }
+    // 3. Limite de varredura: Equalizado sem cooldown para todos os usuários
 
     try {
       setVarrendoMonitorId(monitorId);
@@ -498,10 +539,7 @@ function RadarProvider({ children }) {
         });
       }
 
-      if (tierRef.current === TIERS.FREE) {
-        await TierService.recordSweep();
-        setSweepCooldownSeconds(3600);
-      }
+      // Sem cooldown de 60m para Free: igualado a Premium
 
       // Recarrega todos os dados atualizados com novas ofertas e logs silenciosamente
       await fetchData(null, true);
@@ -520,20 +558,16 @@ function RadarProvider({ children }) {
     }
   }, [varrendoMonitorId, antiSpamCooldowns, fetchData, showAlert]);
 
-  // Abertura de ofertas: Free abre dentro do app com cadeado; Premium abre link externo direto
+  // Abertura de ofertas: Link externo direto para todos os usuários (Free e Premium)
   const handleOpenAd = useCallback((item) => {
     if (!item) return;
-    if (tierRef.current === TIERS.FREE) {
-      setSelectedAdItem(item);
-      setAdDetailModalVisible(true);
-    } else {
-      if (item.url) {
-        Linking.openURL(formatarUrlAfiliado(item.url)).catch(() => showAlert({
-          title: "Aviso",
-          message: "Não foi possível abrir o link da oferta.",
-          type: "error"
-        }));
-      }
+    const targetUrl = item.url || item.link;
+    if (targetUrl) {
+      Linking.openURL(formatarUrlAfiliado(targetUrl)).catch(() => showAlert({
+        title: "Aviso",
+        message: "Não foi possível abrir o link da oferta.",
+        type: "error"
+      }));
     }
   }, [showAlert]);
 
@@ -739,6 +773,12 @@ function RadarProvider({ children }) {
       if (event === 'SIGNED_IN' && authUser && currentDevId) {
         setUser(authUser);
         userRef.current = authUser;
+        const fullName = authUser?.user_metadata?.full_name || authUser?.user_metadata?.name || '';
+        const firstName = fullName ? fullName.trim().split(' ')[0] : (authUser?.email ? authUser.email.split('@')[0] : '');
+        const photoUrl = authUser?.user_metadata?.avatar_url || authUser?.user_metadata?.picture || null;
+        const perfil = { name: firstName, photoUrl };
+        setUserProfile(perfil);
+        AsyncStorage.setItem('@achoai_user_profile_cache', JSON.stringify(perfil)).catch(() => {});
         await refreshTierState(currentDevId, authUser);
         if (tierRef.current === TIERS.PREMIUM || tierRef.current === TIERS.ADMIN) {
           await migrateDeviceMonitorsToAccount(currentDevId, authUser.id, currentToken);
@@ -747,6 +787,8 @@ function RadarProvider({ children }) {
       } else if (event === 'SIGNED_OUT') {
         setUser(null);
         userRef.current = null;
+        setUserProfile(null);
+        AsyncStorage.removeItem('@achoai_user_profile_cache').catch(() => {});
         setMonitores([]);
         setResultados([]);
         setAtividades([]);
@@ -757,20 +799,11 @@ function RadarProvider({ children }) {
       () => { fetchData(null, true); },
       (response) => {
         const data = response?.notification?.request?.content?.data;
-        const title = response?.notification?.request?.content?.title;
-        if (data?.url) {
-          if (tierRef.current === TIERS.FREE) {
-            setSelectedAdItem({
-              id: `notif_${Date.now()}`,
-              title: title || 'Oferta Detectada pelo Robô',
-              price: null,
-              url: data.url,
-              created_at: new Date().toISOString()
-            });
-            setAdDetailModalVisible(true);
-          } else {
-            Linking.openURL(formatarUrlAfiliado(data.url)).catch(() => {});
-          }
+        const targetUrl = data?.url || data?.link;
+        if (targetUrl) {
+          Linking.openURL(formatarUrlAfiliado(targetUrl)).catch((err) => {
+            console.log('[Radar] Erro ao abrir URL da notificação push:', err);
+          });
         }
       }
     );
@@ -816,6 +849,7 @@ function RadarProvider({ children }) {
               if (prev.some(r => r.id === payload.new.id)) return prev;
               return [payload.new, ...prev].slice(0, 40);
             });
+            setUnreadNotifCount(prev => prev + 1);
             try {
               Vibration.vibrate(Platform.OS === 'android' ? [0, 80, 50, 100] : 100);
             } catch (e) {}
@@ -934,10 +968,46 @@ function RadarProvider({ children }) {
     });
   }, [currentOwnerId, fetchData, showAlert]);
 
+  const openNotif = useCallback(() => {
+    setNotifModalVisible(true);
+    setUnreadNotifCount(0);
+  }, []);
+
+  const closeNotif = useCallback(() => {
+    setNotifModalVisible(false);
+  }, []);
+
+  const openSettings = useCallback(() => {
+    setSettingsModalVisible(true);
+  }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsModalVisible(false);
+  }, []);
+
+  const openAuthModal = useCallback(() => {
+    setAuthModalVisible(true);
+  }, []);
+
+  const closeAuthModal = useCallback(() => {
+    setAuthModalVisible(false);
+  }, []);
+
+  const limparNotificacoes = useCallback(async () => {
+    setResultados([]);
+    setUnreadNotifCount(0);
+    showAlert({
+      title: "Notificações Limpas",
+      message: "Todas as notificações foram limpas com sucesso.",
+      type: "success",
+      icon: "checkmark-circle"
+    });
+  }, [showAlert]);
+
   return (
     <RadarContext.Provider value={{ 
       monitores, resultados, atividades, pushToken, setPushToken, deviceId, user, currentOwnerId,
-      notificacoesAtivas, alternarNotificacoes,
+      notificacoesAtivas, alternarNotificacoes, testLocalNotification,
       loading, refreshing, onRefresh, fetchData, linkAccount, logoutUser,
       // Freemium context
       tier, tierState, trialEligibility, activatingTrial, subscribing,
@@ -948,7 +1018,12 @@ function RadarProvider({ children }) {
       closeUpgradeModal: () => setFreemiumModalVisible(false),
       handleActivateTrial, handleSubscribePremium,
       refreshTierState,
-      showAlert, hideAlert
+      showAlert, hideAlert,
+      // Header and Modals controls
+      openNotif, closeNotif, openSettings, closeSettings,
+      openAuthModal, closeAuthModal, authModalVisible,
+      unreadNotifCount, limparNotificacoes,
+      userProfile, setUserProfile
     }}>
       {children}
       <FreemiumModal 
@@ -1007,6 +1082,19 @@ function RadarProvider({ children }) {
         showCancel={alertConfig.showCancel}
         onClose={hideAlert}
       />
+      <NotificationsModal
+        visible={notifModalVisible}
+        onClose={closeNotif}
+        onClearAll={limparNotificacoes}
+      />
+      <SettingsDrawerModal
+        visible={settingsModalVisible}
+        onClose={closeSettings}
+      />
+      <AuthTutorialModal
+        visible={authModalVisible}
+        onClose={closeAuthModal}
+      />
     </RadarContext.Provider>
   );
 }
@@ -1018,19 +1106,19 @@ function RadarProvider({ children }) {
 
 function identificarPlataforma(url) {
   const u = (url || '').toLowerCase();
-  if (u.includes('fastshop.com.br')) return 'FASTSHOP';
-  if (u.includes('carrefour.com.br')) return 'CARREFOUR';
-  if (u.includes('casasbahia.com.br')) return 'CASASBAHIA';
-  if (u.includes('kabum.com.br')) return 'KABUM';
-  if (u.includes('americanas.com.br')) return 'AMERICANAS';
-  if (u.includes('shein.com') || u.includes('shein.top')) return 'SHEIN';
-  if (u.includes('magazineluiza.com.br') || u.includes('magalu.com')) return 'MAGALU';
-  if (u.includes('amazon.com.br') || u.includes('amazon.com') || u.includes('amzn.to')) return 'AMAZON';
-  if (u.includes('facebook.com')) return 'FACEBOOK';
+  if (u.includes('fastshop.com.br') || u.includes('fastshop.')) return 'FASTSHOP';
+  if (u.includes('carrefour.com.br') || u.includes('carrefour.')) return 'CARREFOUR';
+  if (u.includes('casasbahia.com.br') || u.includes('casasbahia.')) return 'CASASBAHIA';
+  if (u.includes('kabum.com.br') || u.includes('kabum.')) return 'KABUM';
+  if (u.includes('americanas.com.br') || u.includes('americanas.')) return 'AMERICANAS';
+  if (u.includes('shein.com') || u.includes('shein.top') || u.includes('shein.com.br') || u.includes('shein.')) return 'SHEIN';
+  if (u.includes('magazineluiza.com.br') || u.includes('magalu.com') || u.includes('magalu.')) return 'MAGALU';
+  if (u.includes('amazon.com.br') || u.includes('amazon.com') || u.includes('amzn.to') || u.includes('a.co')) return 'AMAZON';
+  if (u.includes('facebook.com') || u.includes('fb.me') || u.includes('fb.com')) return 'FACEBOOK';
   if (u.includes('zoom.com.br')) return 'ZOOM';
-  if (u.includes('shopee.com.br')) return 'SHOPEE';
-  if (u.includes('mercadolivre.com') || u.includes('mercadolivre.com.br')) return 'MERCADO_LIVRE';
-  if (u.includes('olx.com.br')) return 'OLX';
+  if (u.includes('shopee.com.br') || u.includes('shopee.com') || u.includes('shp.ee')) return 'SHOPEE';
+  if (u.includes('mercadolivre.com') || u.includes('mercadolivre.com.br') || u.includes('meli.la') || u.includes('mercadolivre')) return 'MERCADO_LIVRE';
+  if (u.includes('olx.com.br') || u.includes('olx.')) return 'OLX';
   return 'OUTROS';
 }
 
@@ -1088,9 +1176,22 @@ function extrairInfoOlx(url) {
   return { uf: ufEncontrada, regiaoSlug: regiaoEncontrada };
 }
 
-function formatarTempoRegressivo(proximaDataStr, now) {
-  if (!proximaDataStr) return 'Aguardando agendamento';
-  const diffMs = new Date(proximaDataStr).getTime() - now;
+function formatarTempoRegressivo(proximaDataStr, now, fallbackMin = 15, createdAt = null) {
+  let targetTime = null;
+  if (proximaDataStr) {
+    targetTime = new Date(proximaDataStr).getTime();
+  } else if (createdAt) {
+    const parsedCreated = new Date(createdAt).getTime();
+    if (!isNaN(parsedCreated) && parsedCreated > 0) {
+      targetTime = parsedCreated + (fallbackMin * 60 * 1000);
+    }
+  }
+
+  if (!targetTime || isNaN(targetTime)) {
+    targetTime = now + (fallbackMin * 60 * 1000);
+  }
+
+  const diffMs = targetTime - now;
   if (diffMs <= 0) return 'Varrendo em instantes...';
 
   const totalSegundos = Math.floor(diffMs / 1000);
@@ -1132,7 +1233,7 @@ function FrostedOverlay({ style, children }) {
   );
 }
 
-// Modal seletor moderno para Estado e Região
+// Modal seletor moderno e elegante para Estado e Região
 function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }) {
   const [busca, setBusca] = useState('');
 
@@ -1147,53 +1248,72 @@ function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }
 
   return (
     <Modal visible={visible} animationType="fade" transparent={true} onRequestClose={onClose}>
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalContent}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>{title}</Text>
-            <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-              <Ionicons name="close" size={20} color={THEME.textMuted} />
+      <View style={styles.dropdownModalOverlay}>
+        <TouchableOpacity 
+          style={StyleSheet.absoluteFill} 
+          activeOpacity={1} 
+          onPress={onClose} 
+        />
+        <View style={styles.dropdownModalCard}>
+          {/* Header do Seletor */}
+          <View style={styles.dropdownModalHeader}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 8 }}>
+              <View style={styles.dropdownIconCircle}>
+                <Ionicons name="location" size={18} color="#FF5722" />
+              </View>
+              <Text style={styles.dropdownModalTitle} numberOfLines={1}>
+                {title}
+              </Text>
+            </View>
+            <TouchableOpacity 
+              onPress={onClose} 
+              style={styles.dropdownCloseBtn} 
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="close" size={18} color="#64748B" />
             </TouchableOpacity>
           </View>
 
-          {(items && items.length > 6) && (
-            <View style={styles.modalSearchBox}>
-              <Ionicons name="search-outline" size={16} color={THEME.textSubtle} style={{ marginRight: 8 }} />
-              <TextInput 
-                style={styles.modalSearchInput}
-                placeholder="Filtrar opções..."
-                placeholderTextColor={THEME.textSubtle}
-                value={busca}
-                onChangeText={setBusca}
-                autoCorrect={false}
-              />
-              {busca.length > 0 && (
-                <TouchableOpacity onPress={() => setBusca('')}>
-                  <Ionicons name="close-circle" size={16} color={THEME.textSubtle} />
-                </TouchableOpacity>
-              )}
-            </View>
-          )}
+          {/* Campo de Busca de Estados/Cidades */}
+          <View style={styles.dropdownSearchBox}>
+            <Ionicons name="search-outline" size={16} color="#94A3B8" style={{ marginRight: 8 }} />
+            <TextInput 
+              style={styles.dropdownSearchInput}
+              placeholder="Filtrar por nome ou sigla..."
+              placeholderTextColor="#94A3B8"
+              value={busca}
+              onChangeText={setBusca}
+              autoCorrect={false}
+            />
+            {busca.length > 0 && (
+              <TouchableOpacity onPress={() => setBusca('')} style={{ padding: 4 }}>
+                <Ionicons name="close-circle" size={16} color="#94A3B8" />
+              </TouchableOpacity>
+            )}
+          </View>
 
+          {/* Lista de Opções */}
           <FlatList 
             data={filtrados}
             keyExtractor={(item, index) => item.uf || item.slug || String(index)}
+            ItemSeparatorComponent={() => <View style={styles.dropdownSeparator} />}
             renderItem={({ item }) => {
-              const isSelected = (item.uf && item.uf === selectedId) || (item.slug !== undefined && item.slug === selectedId);
+              const isSelected = (item.uf && item.uf === selectedId) || (item.slug !== undefined && item.slug === selectedId) || (item.id !== undefined && item.id === selectedId);
               return (
                 <TouchableOpacity 
-                  style={[styles.modalItem, isSelected && styles.modalItemSelected]}
+                  style={[styles.dropdownItem, isSelected && styles.dropdownItemSelected]}
                   onPress={() => { onSelect(item); onClose(); }}
                   activeOpacity={0.7}
                 >
-                  <Text style={[styles.modalItemText, isSelected && styles.modalItemTextSelected]}>
+                  <Text style={[styles.dropdownItemText, isSelected && styles.dropdownItemTextSelected]}>
                     {item.nome} {item.uf ? `(${item.uf})` : ''}
                   </Text>
-                  {isSelected && <Ionicons name="checkmark-circle" size={18} color={THEME.primary} />}
+                  {isSelected && <Ionicons name="checkmark-circle" size={18} color="#FF5722" />}
                 </TouchableOpacity>
               );
             }}
-            style={{ maxHeight: 340 }}
+            style={{ maxHeight: 380 }}
+            showsVerticalScrollIndicator={true}
           />
         </View>
       </View>
@@ -1202,4090 +1322,2861 @@ function SelectionModal({ visible, title, items, selectedId, onSelect, onClose }
 }
 
 // =====================================================================
-// 4. TELAS DO APLICATIVO
+// 4. TELAS DO APLICATIVO - ACHÔAI 2026 (INSPIRAÇÃO PECHINCHOU)
 // =====================================================================
 
-// --- TELA 1: HOME / DASHBOARD (VISÃO GERAL OPERACIONAL) ---
-function DashboardScreen({ navigation }) {
-  const { 
-    monitores, resultados, atividades, loading, refreshing, onRefresh, fetchData,
-    tier, openUpgradeModal, handleOpenAd, showAlert,
-    pausarOuRetomarVarreduras, pararVarredurasEmergencia, varrendoMonitorId
-  } = useContext(RadarContext);
-  const ativos = monitores.filter(m => m.ativo).length;
+const LOJAS_FILTRO = [
+  'TODOS',
+  'Mercado Livre',
+  'Shopee',
+  'Amazon',
+  'Magalu',
+  'KaBuM!',
+  'Americanas',
+  'Casas Bahia',
+  'Fast Shop',
+  'Carrefour',
+  'SHEIN'
+];
 
-  const [now, setNow] = useState(Date.now());
+const CUPONS_DATABASE = [
+  {
+    id: 'c1',
+    loja: 'Mercado Livre',
+    cupom: 'MELI15',
+    desconto: '15% OFF',
+    descricao: '15% de desconto em produtos selecionados no app.',
+    regras: 'Compras acima de R$ 199',
+    cor: '#FFE600',
+    url: 'https://www.mercadolivre.com.br'
+  },
+  {
+    id: 'c2',
+    loja: 'Shopee',
+    cupom: 'SHOPEE10',
+    desconto: 'R$ 10 OFF',
+    descricao: 'Economize R$ 10 na sua próxima compra.',
+    regras: 'Compras acima de R$ 50',
+    cor: '#EE4D2D',
+    url: 'https://shopee.com.br'
+  },
+  {
+    id: 'c3',
+    loja: 'Amazon',
+    cupom: 'PRIME15',
+    desconto: '15% OFF',
+    descricao: 'Ofertas exclusivas para assinantes Amazon Prime.',
+    regras: 'Válido em Eletrônicos e Informática',
+    cor: '#FF9900',
+    url: 'https://www.amazon.com.br'
+  },
+  {
+    id: 'c4',
+    loja: 'Magalu',
+    cupom: 'MAGALU20',
+    desconto: 'R$ 20 OFF',
+    descricao: 'R$ 20 de desconto no carrinho em compras acima de R$ 200.',
+    regras: 'Válido no app Magalu',
+    cor: '#0086FF',
+    url: 'https://www.magazineluiza.com.br'
+  },
+  {
+    id: 'c5',
+    loja: 'KaBuM!',
+    cupom: 'KABUM5',
+    desconto: '5% OFF',
+    descricao: '5% de desconto extra em Hardware e Periféricos Gamer.',
+    regras: 'Cumulativo com pagamento no Pix',
+    cor: '#FF6500',
+    url: 'https://www.kabum.com.br'
+  },
+  {
+    id: 'c6',
+    loja: 'Americanas',
+    cupom: 'VALE20',
+    desconto: 'R$ 20 OFF',
+    descricao: 'Economize R$ 20 no seu pedido pelo app.',
+    regras: 'Compras acima de R$ 150',
+    cor: '#E60014',
+    url: 'https://www.americanas.com.br'
+  },
+  {
+    id: 'c7',
+    loja: 'SHEIN',
+    cupom: 'SHEINBR15',
+    desconto: '15% OFF',
+    descricao: '15% de desconto em Moda Feminina e Masculina.',
+    regras: 'Sem valor mínimo de compra',
+    cor: '#222222',
+    url: 'https://br.shein.com'
+  },
+  {
+    id: 'c8',
+    loja: 'Fast Shop',
+    cupom: 'FASTPIX',
+    desconto: '10% OFF',
+    descricao: 'Até 10% de desconto adicional no pagamento à vista via Pix.',
+    regras: 'Smart TVs e Smartphones selecionados',
+    cor: '#E31B23',
+    url: 'https://www.fastshop.com.br'
+  },
+  {
+    id: 'c9',
+    loja: 'Carrefour',
+    cupom: 'MERCADO30',
+    desconto: 'R$ 30 OFF',
+    descricao: 'R$ 30 OFF na primeira compra pelo aplicativo.',
+    regras: 'Compras acima de R$ 250',
+    cor: '#004A99',
+    url: 'https://www.carrefour.com.br'
+  },
+  {
+    id: 'c10',
+    loja: 'Casas Bahia',
+    cupom: 'BAHIA10',
+    desconto: '10% OFF',
+    descricao: '10% de desconto em Eletrodomésticos e Móveis.',
+    regras: 'Vendido e entregue por Casas Bahia',
+    cor: '#003399',
+    url: 'https://www.casasbahia.com.br'
+  }
+];
+
+// =====================================================================
+// ABA 1: HOME - HUB DE PROMOÇÕES EM TEMPO REAL (OFERTAS DO DIA & RELÂMPAGO)
+// =====================================================================
+const CATEGORIAS_ANIMACAO_ONBOARDING = [
+  { icon: "phone-portrait", label: "Smartphones & Tecnologia", cor: "#0284C7", bg: "#E0F2FE" },
+  { icon: "shirt", label: "Vestuário & Moda", cor: "#E11D48", bg: "#FFE4E6" },
+  { icon: "cube", label: "Eletroportáteis & Casa", cor: "#EA580C", bg: "#FFEDD5" },
+  { icon: "headset", label: "Áudio, Games & Tech", cor: "#7C3AED", bg: "#EDE9FE" },
+  { icon: "sparkles", label: "Casa, Beleza & Limpeza", cor: "#16A34A", bg: "#DCFCE7" },
+  { icon: "tv", label: "Smart TVs & Telas", cor: "#D97706", bg: "#FEF3C7" }
+];
+
+function HomePromotionsScreen({ navigation }) {
+  const { user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, unreadNotifCount, userProfile, openAuthModal } = useContext(RadarContext);
+  const effectiveUserId = currentOwnerId || user?.id || deviceId;
+  const [lojaAtiva, setLojaAtiva] = useState('TODOS');
+  const [deals, setDeals] = useState([]);
+  const [carregando, setCarregando] = useState(false);
+  const [isOnboardingSweep, setIsOnboardingSweep] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [catIndex, setCatIndex] = useState(0);
+
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const progressAnim = useRef(new Animated.Value(0)).current;
+  const iconScaleAnim = useRef(new Animated.Value(1)).current;
+
+  const FIRST_HOME_KEY = '@achoai_first_home_sweep_done_v7';
+  const [filtroOrdenacao, setFiltroOrdenacao] = useState('todos');
+  const [dropdownAberto, setDropdownAberto] = useState(false);
+
+  const FILTRO_OPCOES = [
+    { key: 'todos', label: 'Padrão (Top 5 + Lojas)', icon: 'sparkles' },
+    { key: 'maior_desconto', label: 'Maiores Descontos (% OFF)', icon: 'flash' },
+    { key: 'frete_gratis', label: 'Apenas Frete Grátis', icon: 'car' },
+    { key: 'menor_preco', label: 'Menor Preço (R$)', icon: 'trending-down' }
+  ];
+
+  const onboardingSteps = [
+    { label: "Conectando aos servidores de alta performance...", sub: "Iniciando inteligência artificial AchôAI" },
+    { label: "Varrendo ofertas nas 10 maiores plataformas oficiais...", sub: "Shopee, Mercado Livre, Amazon, Magalu, Casas Bahia, KaBuM!, SHEIN e mais" },
+    { label: "Garimpando melhores preços e fotos verificadas...", sub: "Descartando anúncios falsos e filtrando lojas oficiais" },
+    { label: "Quase lá! Montando sua vitrine de super ofertas...", sub: "Organizando as melhores oportunidades do momento" }
+  ];
+
+  // Radar Pulse Animation
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
+    if (!isOnboardingSweep) return;
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.25,
+          duration: 850,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 850,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [isOnboardingSweep, pulseAnim]);
+
+  // Alternância suave de categorias animadas a cada 1.6s
+  useEffect(() => {
+    if (!isOnboardingSweep) return;
+    const catTimer = setInterval(() => {
+      Animated.sequence([
+        Animated.timing(iconScaleAnim, { toValue: 1.1, duration: 250, useNativeDriver: true }),
+        Animated.timing(iconScaleAnim, { toValue: 1, duration: 150, useNativeDriver: true })
+      ]).start();
+      setCatIndex(prev => (prev + 1) % CATEGORIAS_ANIMACAO_ONBOARDING.length);
+    }, 1600);
+    return () => clearInterval(catTimer);
+  }, [isOnboardingSweep, iconScaleAnim]);
+
+  const carregarPromocoes = useCallback(async (force = false) => {
+    try {
+      if (force) setCarregando(true);
+      const proms = await RecommendationEngine.carregarPromocoesHome(force);
+      // REGRA CRÍTICA: Filtragem estrita anti-OLX e anti-Facebook
+      let semUsados = (proms || []).filter(item => {
+        const url = (item.url || '').toLowerCase();
+        const loja = (item.loja || '').toLowerCase();
+        return !url.includes('olx.com') && !url.includes('facebook.com') && loja !== 'olx' && loja !== 'facebook';
+      });
+
+      // Garante organização dinâmica e aleatória a cada atualização (pull-to-refresh)
+      if (semUsados.length > 0) {
+        for (let i = semUsados.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [semUsados[i], semUsados[j]] = [semUsados[j], semUsados[i]];
+        }
+      }
+
+      setDeals(semUsados);
+      return semUsados;
+    } catch (e) {
+      console.log('[HomePromotions] Erro ao carregar promoções:', e);
+      return [];
+    } finally {
+      setCarregando(false);
+    }
   }, []);
 
+  // Inicialização e Onboarding em Tela Cheia no primeiro lançamento
   useEffect(() => {
-    const unsub = navigation.addListener('focus', () => { fetchData(null, true); });
-    return unsub;
-  }, [navigation, fetchData]);
+    let timerStep1, timerStep2, timerStep3, timerFinal;
 
-  const segProx = calcularSegundosProximaVarredura(monitores, now);
-  const segProxFormatado = useMemo(() => {
-    if (segProx === null) return '--';
-    if (segProx <= 0) return 'Agora';
-    if (segProx > 60) return `${Math.ceil(segProx / 60)}m`;
-    return `${segProx}s`;
-  }, [segProx]);
+    const iniciarHome = async () => {
+      try {
+        const jaFezSweep = await AsyncStorage.getItem(FIRST_HOME_KEY);
+        if (!jaFezSweep) {
+          setIsOnboardingSweep(true);
+          setOnboardingStep(0);
+          progressAnim.setValue(0);
 
-  const handleNovoRadarPress = () => {
-    if (tier === TIERS.FREE && monitores.length >= 1) {
-      showAlert({
-        title: "Limite do Plano Free",
-        message: "Usuários do plano Free podem criar até 1 radar por vez. Desbloqueie até 5 radares simultâneos e varreduras ultra rápidas assinando o AchôAI Premium!",
-        type: "warning",
-        icon: "lock-closed",
-        confirmText: "Conhecer Premium",
-        cancelText: "Entendi",
-        showCancel: true,
-        onConfirm: openUpgradeModal
-      });
-    } else {
-      navigation.navigate('Criar');
+          // Dispara a varredura horária no backend
+          RecommendationEngine.solicitarVarreduraPromocoes();
+
+          Animated.timing(progressAnim, {
+            toValue: 1,
+            duration: 10000,
+            useNativeDriver: false,
+          }).start();
+
+          timerStep1 = setTimeout(() => setOnboardingStep(1), 2500);
+          timerStep2 = setTimeout(() => setOnboardingStep(2), 5200);
+          timerStep3 = setTimeout(() => setOnboardingStep(3), 7800);
+
+          timerFinal = setTimeout(async () => {
+            await carregarPromocoes(true);
+            await AsyncStorage.setItem(FIRST_HOME_KEY, 'true');
+            setIsOnboardingSweep(false);
+          }, 10000);
+        } else {
+          // Carrega do cache para resposta imediata (0ms) e sincroniza ofertas atualizadas do Supabase em seguida
+          await carregarPromocoes(false);
+          carregarPromocoes(true);
+        }
+      } catch (err) {
+        console.log('[HomePromotions] Erro na inicialização:', err);
+        setIsOnboardingSweep(false);
+        carregarPromocoes(true);
+      }
+    };
+
+    iniciarHome();
+
+    return () => {
+      if (timerStep1) clearTimeout(timerStep1);
+      if (timerStep2) clearTimeout(timerStep2);
+      if (timerStep3) clearTimeout(timerStep3);
+      if (timerFinal) clearTimeout(timerFinal);
+    };
+  }, [carregarPromocoes]);
+
+  const dealsFiltrados = useMemo(() => {
+    let list = deals;
+    if (lojaAtiva !== 'TODOS') {
+      list = list.filter(item => item.loja && item.loja.toLowerCase().includes(lojaAtiva.toLowerCase()));
     }
+
+    if (filtroOrdenacao === 'frete_gratis') {
+      list = list.filter(item => {
+        const info = calcularFreteGratisInfo(item.loja, item.preco, item.destaque_label, item.titulo);
+        return info.temFreteGratis;
+      });
+    } else if (filtroOrdenacao === 'maior_desconto') {
+      list = [...list].sort((a, b) => (b.desconto_pct || 0) - (a.desconto_pct || 0));
+    } else if (filtroOrdenacao === 'menor_preco') {
+      list = [...list].sort((a, b) => (a.preco || 0) - (b.preco || 0));
+    }
+
+    return list;
+  }, [deals, lojaAtiva, filtroOrdenacao]);
+
+  const handleDealClick = (deal) => {
+    if (!deal) return;
+    RecommendationEngine.registrarClique(deal.titulo || deal.title, effectiveUserId, deal.loja);
+
+    let targetUrl = deal.url;
+    if (!targetUrl || /^https?:\/\/(www\.)?(shopee|mercadolivre|amazon|magazineluiza|kabum|casasbahia|fastshop|americanas|carrefour|shein)\.com(\.br)?\/?$/i.test(targetUrl)) {
+      targetUrl = RecommendationEngine.gerarUrlBuscaLoja(deal.loja, deal.titulo || deal.title);
+    }
+    const finalUrl = formatarUrlAfiliado(targetUrl);
+    Linking.openURL(finalUrl).catch(() => {
+      showAlert({
+        title: "Aviso",
+        message: "Não foi possível abrir o link da oferta.",
+        type: "error"
+      });
+    });
   };
+
+  const handleToggleFavorite = (item) => {
+    RecommendationEngine.registrarFavorito(item?.titulo || item?.title, effectiveUserId, item?.loja);
+  };
+
+  const catAtual = CATEGORIAS_ANIMACAO_ONBOARDING[catIndex] || CATEGORIAS_ANIMACAO_ONBOARDING[0];
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
-      
-      {/* BRAND BAR SUPERIOR COM LOGO 3D REAL, STATUS E TIER BADGE */}
-      <View style={styles.brandHeader}>
-        <View style={styles.brandGroup}>
-          <Image 
-            source={require('./assets/android-icon-foreground.png')} 
-            style={styles.brandLogoImage} 
-            resizeMode="contain" 
-          />
-          <View style={styles.brandTextGroup}>
-            <View style={styles.row}>
-              <Text style={styles.brandName}>AchôAI</Text>
-              <View style={{ marginLeft: 8 }}>
-                <TierBadge tier={tier} onPress={openUpgradeModal} size="sm" />
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+
+      {/* TELA DE CARREGAMENTO ENQUANTO O ONBOARDING RODA */}
+      <Modal
+        visible={isOnboardingSweep}
+        animationType="fade"
+        transparent={false}
+        statusBarTranslucent={true}
+        onRequestClose={() => {}}
+      >
+        <View style={styles.fullscreenOnboardingOverlay}>
+          <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+          <View style={styles.onboardingSweepCenterBox}>
+            {/* Ícone Vetorial de Categoria Animado e Pulsante */}
+            <Animated.View style={[styles.onboardingCategoryIconBox, { backgroundColor: catAtual.bg, transform: [{ scale: iconScaleAnim }] }]}>
+              <Ionicons name={catAtual.icon} size={38} color={catAtual.cor} />
+            </Animated.View>
+            <Text style={[styles.onboardingCategoryBadgeText, { color: catAtual.cor }]}>{catAtual.label}</Text>
+
+            {/* Radar Pulsante */}
+            <View style={styles.onboardingPulseWrapper}>
+              <Animated.View 
+                style={[
+                  styles.onboardingPulseRing, 
+                  { transform: [{ scale: pulseAnim }] }
+                ]} 
+              />
+              <View style={styles.onboardingPulseCore}>
+                <Ionicons name="flame" size={38} color="#FFFFFF" />
               </View>
             </View>
-            <View style={styles.livePulseRow}>
-              <View style={styles.livePulseDot} />
-              <Text style={styles.livePulseText}>Robô Online</Text>
+
+            {/* Selo AchôAI */}
+            <View style={styles.onboardingBadge}>
+              <Ionicons name="sparkles" size={13} color="#FF5722" style={{ marginRight: 5 }} />
+              <Text style={styles.onboardingBadgeText}>AchôAI • Radar de Ofertas</Text>
+            </View>
+
+            {/* Textos Dinâmicos por Etapa */}
+            <Text style={styles.onboardingTitle}>
+              {onboardingSteps[onboardingStep]?.label}
+            </Text>
+            <Text style={styles.onboardingSub}>
+              {onboardingSteps[onboardingStep]?.sub}
+            </Text>
+
+            {/* Barra de Progresso Suave (0% a 100% em 10s) */}
+            <View style={styles.onboardingProgressTrack}>
+              <Animated.View 
+                style={[
+                  styles.onboardingProgressBar,
+                  {
+                    width: progressAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: ['0%', '100%']
+                    })
+                  }
+                ]} 
+              />
+            </View>
+
+            <View style={styles.onboardingFooterRow}>
+              <Ionicons name="shield-checkmark" size={14} color="#16A34A" style={{ marginRight: 6 }} />
+              <Text style={styles.onboardingFooterText}>
+                Varredura oficial nas 10 maiores plataformas do Brasil
+              </Text>
             </View>
           </View>
         </View>
+      </Modal>
 
-        <TouchableOpacity 
-          style={styles.btnHeaderAction}
-          onPress={handleNovoRadarPress}
-          activeOpacity={0.8}
+      {/* HEADER COMPARTILHADO E ENCAPSULADO (AchôAI Top Bar) */}
+      <AppTopHeader 
+        user={user} 
+        userProfile={userProfile}
+        onPressProfile={() => user ? openSettings() : openAuthModal()}
+        onOpenNotif={openNotif} 
+        onOpenSettings={openSettings} 
+        unreadCount={unreadNotifCount} 
+      />
+
+      {/* FILTRO DE PLATAFORMAS HORIZONTAL (COMPACTO) */}
+      <View style={{ height: 36, marginBottom: 2 }}>
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterPillsContainer}
         >
-          <Ionicons name="add" size={17} color="#08090D" style={{ marginRight: 2 }} />
-          <Text style={styles.btnHeaderActionText}>Novo Radar</Text>
-        </TouchableOpacity>
+          {LOJAS_FILTRO.map((loja) => {
+            const isSelected = lojaAtiva === loja;
+            return (
+              <TouchableOpacity
+                key={loja}
+                style={[
+                  styles.filterPill,
+                  isSelected && styles.filterPillActive
+                ]}
+                onPress={() => {
+                  try { Vibration.vibrate(15); } catch(e) {}
+                  setLojaAtiva(loja);
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.filterPillText, isSelected && styles.filterPillTextActive]}>
+                  {loja}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
       </View>
 
-      <ScrollView 
-        contentContainerStyle={styles.scrollArea}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* MÉTRICAS OPERACIONAIS */}
-        <View style={styles.metricsRow}>
-          <MetricBox 
-            icon="pulse"
-            value={ativos}
-            label="Radares"
-            sublabel="Monitorando"
-            color={THEME.primary}
-            bg={THEME.primaryGlow}
+      {/* FEED DE PROMOÇÕES VIRTUALIZADO DE ALTA PERFORMANCE (60 FPS SEM DELAY) */}
+      <FlatList
+        data={dealsFiltrados}
+        keyExtractor={(item) => String(item.id || item.url || Math.random())}
+        renderItem={({ item }) => (
+          <ProductDealCard
+            item={item}
+            onPress={() => handleDealClick(item)}
+            onToggleFavorite={handleToggleFavorite}
           />
-          <MetricBox 
-            icon="pricetag"
-            value={resultados.length}
-            label="Oportunidades"
-            sublabel="Capturadas"
-            color={THEME.success}
-            bg={THEME.successBg}
-          />
-          {tier === TIERS.FREE ? (
-            <MetricBox 
-              icon="lock-closed"
-              value="3 Horas"
-              label="Próxima Busca"
-              sublabel="Upgrade ⚡"
-              color={THEME.primary}
-              bg={THEME.primaryGlow}
-              onPress={openUpgradeModal}
-            />
-          ) : (
-            <MetricBox 
-              icon="timer-outline"
-              value={segProxFormatado}
-              label="Próxima Busca"
-              sublabel="Ciclo do Robô"
-              color={THEME.info}
-              bg={THEME.infoBg}
-            />
-          )}
-        </View>
-
-        {/* SEÇÃO: ÚLTIMAS OPORTUNIDADES */}
-        <SectionHeader 
-          title="Últimas Oportunidades" 
-          icon="sparkles"
-          actionText={resultados.length > 0 ? `Ver Todas (${resultados.length})` : null}
-          onAction={() => navigation.navigate('Alertas')}
-        />
-
-        {resultados.length === 0 ? (
-          <Surface style={styles.emptyCard}>
-            <View style={styles.emptyIconCircle}>
-              <Ionicons name="scan-outline" size={28} color={THEME.primary} />
-            </View>
-            <Text style={styles.emptyCardTitle}>Nenhuma oportunidade capturada ainda</Text>
-            <Text style={styles.emptyCardSub}>
-              O robô de busca analisa as plataformas nos intervalos configurados e avisará com vibração e alerta assim que encontrar novidades.
-            </Text>
-          </Surface>
-        ) : (
-          resultados.slice(0, 3).map(item => {
-            const plat = identificarPlataforma(item.url);
-            const shopeeInfo = plat === 'SHOPEE' 
-              ? parseShopeeInfo(item.title, item.url) 
-              : { cleanTitle: item.title, origem: null, desconto: null, score: null, vendidos: null };
-            const mlInfo = plat === 'MERCADO_LIVRE'
-              ? parseMLInfo(item.title, item.url)
-              : null;
-            const amzInfo = plat === 'AMAZON'
-              ? parseAmazonInfo(item.title, item.url)
-              : null;
-            const magaluInfo = plat === 'MAGALU'
-              ? parseMagaluInfo(item.title, item.url)
-              : null;
-            const kabumInfo = plat === 'KABUM'
-              ? parseKabumInfo(item.title, item.url)
-              : null;
-            const ameInfo = plat === 'AMERICANAS'
-              ? parseAmericanasInfo(item.title, item.url)
-              : null;
-            const sheinInfo = plat === 'SHEIN'
-              ? parseSheinInfo(item.title, item.url)
-              : null;
-            const fastshopInfo = plat === 'FASTSHOP'
-              ? parseFastShopInfo(item.title, item.url)
-              : null;
-            const carrefourInfo = plat === 'CARREFOUR'
-              ? parseCarrefourInfo(item.title, item.url)
-              : null;
-            const casasbahiaInfo = plat === 'CASASBAHIA'
-              ? parseCasasBahiaInfo(item.title, item.url)
-              : null;
-            const displayTitle = plat === 'SHOPEE' 
-              ? shopeeInfo.cleanTitle 
-              : plat === 'MERCADO_LIVRE' && mlInfo 
-              ? mlInfo.cleanTitle 
-              : plat === 'AMAZON' && amzInfo
-              ? amzInfo.cleanTitle
-              : plat === 'MAGALU' && magaluInfo
-              ? magaluInfo.cleanTitle
-              : plat === 'KABUM' && kabumInfo
-              ? kabumInfo.cleanTitle
-              : plat === 'AMERICANAS' && ameInfo
-              ? ameInfo.cleanTitle
-              : plat === 'SHEIN' && sheinInfo
-              ? sheinInfo.cleanTitle
-              : plat === 'FASTSHOP' && fastshopInfo
-              ? fastshopInfo.cleanTitle
-              : plat === 'CARREFOUR' && carrefourInfo
-              ? carrefourInfo.cleanTitle
-              : plat === 'CASASBAHIA' && casasbahiaInfo
-              ? casasbahiaInfo.cleanTitle
-              : item.title;
-
-            return (
-              <Surface key={item.id} style={styles.opportunityCard}>
-                <View style={styles.opportunityHeader}>
-                  <View style={styles.opportunityHeaderTags}>
-                    <PlatformBadge platformKey={plat} />
-                    {plat === 'SHOPEE' && shopeeInfo.origem && (
-                      <ShopeeOriginBadge origem={shopeeInfo.origem} />
-                    )}
-                    {plat === 'SHOPEE' && shopeeInfo.desconto && (
-                      <ShopeeDiscountBadge discount={shopeeInfo.desconto} />
-                    )}
-                    {plat === 'SHOPEE' && (shopeeInfo.score || shopeeInfo.vendidos) && (
-                      <ShopeeRatingBadge score={shopeeInfo.score} vendidos={shopeeInfo.vendidos} />
-                    )}
-                    {plat === 'MERCADO_LIVRE' && mlInfo && mlInfo.isFull && (
-                      <MLFullBadge />
-                    )}
-                    {plat === 'MERCADO_LIVRE' && mlInfo && mlInfo.isFreteGratis && (
-                      <MLFreeShippingBadge />
-                    )}
-                    {plat === 'MERCADO_LIVRE' && mlInfo && mlInfo.desconto && (
-                      <MLDiscountBadge discount={mlInfo.desconto} />
-                    )}
-                    {plat === 'AMAZON' && amzInfo && amzInfo.origem && (
-                      <ShopeeOriginBadge origem={amzInfo.origem} />
-                    )}
-                    {plat === 'AMAZON' && amzInfo && amzInfo.isPrime && (
-                      <AmazonPrimeBadge />
-                    )}
-                    {plat === 'AMAZON' && amzInfo && amzInfo.isFreteGratis && !amzInfo.isPrime && (
-                      <AmazonFreeShippingBadge />
-                    )}
-                    {plat === 'AMAZON' && amzInfo && amzInfo.desconto && (
-                      <AmazonDiscountBadge discount={amzInfo.desconto} />
-                    )}
-                    {plat === 'AMAZON' && amzInfo && amzInfo.score && (
-                      <ShopeeRatingBadge score={amzInfo.score} />
-                    )}
-                    {plat === 'MAGALU' && magaluInfo && magaluInfo.origem && (
-                      <ShopeeOriginBadge origem={magaluInfo.origem} />
-                    )}
-                    {plat === 'MAGALU' && magaluInfo && magaluInfo.isFull && (
-                      <MagaluFullBadge />
-                    )}
-                    {plat === 'MAGALU' && magaluInfo && magaluInfo.isFreteGratis && (
-                      <MagaluFreeShippingBadge />
-                    )}
-                    {plat === 'MAGALU' && magaluInfo && magaluInfo.desconto && (
-                      <MagaluDiscountBadge discount={magaluInfo.desconto} />
-                    )}
-                    {plat === 'MAGALU' && magaluInfo && magaluInfo.score && (
-                      <ShopeeRatingBadge score={magaluInfo.score} />
-                    )}
-                    {plat === 'KABUM' && kabumInfo && kabumInfo.isFreteGratis && (
-                      <KabumFreeShippingBadge />
-                    )}
-                    {plat === 'KABUM' && kabumInfo && kabumInfo.desconto && (
-                      <KabumDiscountBadge discount={kabumInfo.desconto} />
-                    )}
-                    {plat === 'KABUM' && kabumInfo && kabumInfo.score && (
-                      <ShopeeRatingBadge score={kabumInfo.score} />
-                    )}
-                    {plat === 'AMERICANAS' && ameInfo && ameInfo.isEntregaRapida && (
-                      <AmericanasFastDeliveryBadge />
-                    )}
-                    {plat === 'AMERICANAS' && ameInfo && ameInfo.isFreteGratis && (
-                      <AmericanasFreeShippingBadge />
-                    )}
-                    {plat === 'AMERICANAS' && ameInfo && ameInfo.desconto && (
-                      <AmericanasDiscountBadge discount={ameInfo.desconto} />
-                    )}
-                    {plat === 'AMERICANAS' && ameInfo && ameInfo.score && (
-                      <ShopeeRatingBadge score={ameInfo.score} />
-                    )}
-                    {plat === 'SHEIN' && sheinInfo && sheinInfo.origem && (
-                      <ShopeeOriginBadge origem={sheinInfo.origem} />
-                    )}
-                    {plat === 'SHEIN' && sheinInfo && sheinInfo.isMaisVendidos && (
-                      <SheinBestSellerBadge />
-                    )}
-                    {plat === 'SHEIN' && sheinInfo && sheinInfo.desconto && (
-                      <SheinDiscountBadge discount={sheinInfo.desconto} />
-                    )}
-                    {plat === 'SHEIN' && sheinInfo && sheinInfo.score && (
-                      <ShopeeRatingBadge score={sheinInfo.score} />
-                    )}
-                    {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.desconto && (
-                      <FastShopDiscountBadge discount={fastshopInfo.desconto} />
-                    )}
-                    {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.score && (
-                      <ShopeeRatingBadge score={fastshopInfo.score} />
-                    )}
-                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isFreteGratis && (
-                      <CarrefourFreeShippingBadge />
-                    )}
-                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.parcelamento && (
-                      <CarrefourInstallmentBadge parcelamento={carrefourInfo.parcelamento} />
-                    )}
-                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isMaisVendidos && (
-                      <CarrefourBestSellerBadge />
-                    )}
-                    {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.desconto && (
-                      <CarrefourDiscountBadge discount={carrefourInfo.desconto} />
-                    )}
-                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isFreteGratis && (
-                      <CasasBahiaFreeShippingBadge />
-                    )}
-                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.parcelamento && (
-                      <CasasBahiaInstallmentBadge parcelamento={casasbahiaInfo.parcelamento} />
-                    )}
-                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isMaisVendidos && (
-                      <CasasBahiaBestSellerBadge />
-                    )}
-                    {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.desconto && (
-                      <CasasBahiaDiscountBadge discount={casasbahiaInfo.desconto} />
-                    )}
-                  </View>
-                  <Text style={styles.opportunityDate}>
-                    {new Date(item.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} • Hoje
-                  </Text>
-                </View>
-
-                <Text style={styles.opportunityTitle} numberOfLines={2}>{displayTitle}</Text>
-
-                <View style={styles.opportunityFooter}>
-                  {item.price !== null && Number(item.price) > 0 ? (
-                    <View style={styles.priceContainer}>
-                      <Text style={styles.pricePrefix}>R$</Text>
-                      <Text style={styles.priceNumber}>{Number(item.price).toFixed(2)}</Text>
-                    </View>
-                  ) : (
-                    <Text style={styles.priceConsult}>Sob Consulta</Text>
-                  )}
-
-                  <TouchableOpacity 
-                    style={styles.btnOpenOffer}
-                    onPress={() => {
-                      if (item.url) {
-                        Linking.openURL(formatarUrlAfiliado(item.url)).catch(() => showAlert({
-                          title: "Erro",
-                          message: "Não foi possível abrir o link da oferta.",
-                          type: "error"
-                        }));
-                      }
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.btnOpenOfferText}>
-                      {plat === 'FASTSHOP' ? 'Ver na Fast Shop' : plat === 'CARREFOUR' ? 'Ver no Carrefour' : plat === 'CASASBAHIA' ? 'Ver na Casas Bahia' : plat === 'KABUM' ? 'Ver no KaBuM' : plat === 'AMERICANAS' ? 'Ver na Americanas' : plat === 'SHEIN' ? 'Ver na SHEIN' : plat === 'MAGALU' ? 'Ver no Magalu' : plat === 'AMAZON' ? 'Ver na Amazon' : plat === 'MERCADO_LIVRE' ? 'Ver no Mercado Livre' : plat === 'SHOPEE' ? 'Ver na Shopee' : plat === 'ZOOM' ? 'Ver no Zoom' : plat === 'FACEBOOK' ? 'Ver no Facebook' : plat === 'OLX' ? 'Ver na OLX' : 'Ver Oferta'}
-                    </Text>
-                    <Ionicons name="arrow-forward" size={13} color={THEME.primary} style={{ marginLeft: 5 }} />
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            );
-          })
         )}
-
-        {/* SEÇÃO: HISTÓRICO DE VARREDURAS (TELEMETRIA EM TEMPO REAL) */}
-        <SectionHeader 
-          title="Histórico de Varreduras" 
-          icon="hardware-chip-outline"
-        />
-
-        <Surface style={[styles.telemetryCard, { position: 'relative', overflow: 'hidden', minHeight: 180 }]}>
-          <View style={styles.telemetryTargetContainer}>
-            {atividades.length === 0 ? (
-              <View style={{ paddingVertical: 10 }}>
-                <View style={styles.telemetryRow}>
-                  <View style={[styles.telemetryDot, { backgroundColor: THEME.success }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
-                      Robô AchôAI conectado e operando em segundo plano
-                    </Text>
-                    <View style={styles.telemetryMetaRow}>
-                      <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>Hoje</Text>
-                      <Text style={styles.telemetrySeparator}>•</Text>
-                      <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Sistema</Text>
-                    </View>
-                  </View>
-                </View>
-                <View style={styles.telemetryRow}>
-                  <View style={[styles.telemetryDot, { backgroundColor: THEME.primary }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
-                      Varredura inteligente programada para as plataformas ativas
-                    </Text>
-                    <View style={styles.telemetryMetaRow}>
-                      <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>Hoje</Text>
-                      <Text style={styles.telemetrySeparator}>•</Text>
-                      <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Robô AchôAI</Text>
-                    </View>
-                  </View>
-                </View>
-                <View style={[styles.telemetryRow, { borderBottomWidth: 0 }]}>
-                  <View style={[styles.telemetryDot, { backgroundColor: THEME.info }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
-                      Aguardando próximo ciclo de varredura...
-                    </Text>
-                    <View style={styles.telemetryMetaRow}>
-                      <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>Hoje</Text>
-                      <Text style={styles.telemetrySeparator}>•</Text>
-                      <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Agendador</Text>
-                    </View>
-                  </View>
-                </View>
-              </View>
-            ) : (
-              atividades.slice(0, 6).map((at, idx) => {
-                const dotColor = at.level === 'SUCCESS' ? THEME.success 
-                               : at.level === 'ERROR' ? THEME.danger 
-                               : at.level === 'WARNING' ? THEME.warning 
-                               : THEME.info;
-                return (
-                  <View key={at.id || idx} style={[styles.telemetryRow, idx === Math.min(atividades.length, 6) - 1 && { borderBottomWidth: 0 }]}>
-                    <View style={[styles.telemetryDot, { backgroundColor: dotColor }]} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.telemetryMessage, tier === TIERS.FREE && styles.blurredTelemetryMessage]}>
-                        {at.message}
-                      </Text>
-                      <View style={styles.telemetryMetaRow}>
-                        <Text style={[styles.telemetryTime, tier === TIERS.FREE && styles.blurredTime]}>
-                          {new Date(at.created_at).toLocaleTimeString('pt-BR')}
-                        </Text>
-                        <Text style={styles.telemetrySeparator}>•</Text>
-                        <Text style={[styles.telemetrySource, tier === TIERS.FREE && styles.blurredTime]}>Robô AchôAI</Text>
-                      </View>
-                    </View>
-                  </View>
-                );
-              })
-            )}
-          </View>
-
-          {/* OVERLAY DESFOCADO COM CADEADO E FROSTED GLASS SE FOR FREE */}
-          {tier === TIERS.FREE && (
-            <FrostedOverlay style={[StyleSheet.absoluteFill, styles.frostedOverlay]}>
-              <View style={styles.frostedLockContent}>
-                <View style={styles.frostedLockCircle}>
-                  <Ionicons name="lock-closed" size={24} color="#FFF" />
-                </View>
-                <Text style={styles.frostedLockTitle}>Histórico em Tempo Real</Text>
-                <Text style={styles.frostedLockSub}>
-                  O robô está trabalhando em segundo plano. Desbloqueie a telemetria ao vivo com o AchôAI Premium.
+        contentContainerStyle={styles.feedScrollContent}
+        showsVerticalScrollIndicator={false}
+        initialNumToRender={6}
+        maxToRenderPerBatch={8}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS === 'android'}
+        refreshControl={
+          <RefreshControl
+            refreshing={carregando}
+            onRefresh={() => carregarPromocoes(true)}
+            colors={['#FF5722']}
+            tintColor="#FF5722"
+          />
+        }
+        ListHeaderComponent={
+          <View>
+            <View style={styles.pechFeedSectionTitleRow}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                <Ionicons name="flame" size={18} color="#FF5722" style={{ marginRight: 6 }} />
+                <Text style={styles.pechFeedSectionTitle}>
+                  {lojaAtiva === 'TODOS' ? 'Promoções do Momento' : `Ofertas de ${lojaAtiva}`}
                 </Text>
-                <TouchableOpacity 
-                  style={styles.btnFrostedUnlock}
-                  onPress={openUpgradeModal}
-                  activeOpacity={0.85}
-                >
-                  <Ionicons name="sparkles" size={14} color="#08090D" style={{ marginRight: 6 }} />
-                  <Text style={styles.btnFrostedUnlockText}>Desbloquear com Premium</Text>
-                </TouchableOpacity>
               </View>
-            </FrostedOverlay>
-          )}
-        </Surface>
 
-        {/* SEÇÃO: CONTROLES DE VARREDURA (PAUSAR / PARAR) */}
-        <SectionHeader 
-          title="Controles de Varredura" 
-          icon="shield-checkmark-outline"
-        />
+              {/* Botão de Lista de Filtros Suspensos ao Lado do Título */}
+              <TouchableOpacity 
+                style={styles.dropdownFilterBtn}
+                onPress={() => {
+                  try { Vibration.vibrate(15); } catch(e) {}
+                  setDropdownAberto(prev => !prev);
+                }}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="funnel" size={12} color="#FF5722" style={{ marginRight: 4 }} />
+                <Text style={styles.dropdownFilterBtnText}>
+                  {FILTRO_OPCOES.find(f => f.key === filtroOrdenacao)?.label.split(' ')[0] || 'Filtrar'}
+                </Text>
+                <Ionicons 
+                  name={dropdownAberto ? "chevron-up" : "chevron-down"} 
+                  size={13} 
+                  color="#64748B" 
+                  style={{ marginLeft: 3 }} 
+                />
+              </TouchableOpacity>
+            </View>
 
-        <Surface style={styles.emergencyControlsCard}>
-          <View style={styles.emergencyHeaderRow}>
-            <View style={[styles.statusIndicatorDot, { backgroundColor: varrendoMonitorId ? THEME.primary : ativos > 0 ? THEME.success : THEME.warning }]} />
-            <Text style={styles.emergencyStatusText}>
-              {varrendoMonitorId 
-                ? 'Varredura em andamento pelo robô...' 
-                : ativos > 0 
-                  ? `${ativos} radar${ativos > 1 ? 'es' : ''} operando normalmente` 
-                  : 'Todas as varreduras estão pausadas'}
-            </Text>
-          </View>
-          <Text style={styles.emergencyCardDesc}>
-            Controle a atividade do robô instantaneamente. Você pode pausar temporariamente as buscas programadas ou interromper qualquer varredura com segurança.
-          </Text>
+            {/* Menu Suspenso de Filtros em Formato de Lista */}
+            {dropdownAberto && (
+              <View style={styles.dropdownListBox}>
+                <Text style={styles.dropdownListHeaderTitle}>FILTRAR PROMOÇÕES POR:</Text>
+                {FILTRO_OPCOES.map(op => {
+                  const isSel = filtroOrdenacao === op.key;
+                  return (
+                    <TouchableOpacity
+                      key={op.key}
+                      style={[styles.dropdownListItem, isSel && styles.dropdownListItemActive]}
+                      onPress={() => {
+                        try { Vibration.vibrate(15); } catch(e) {}
+                        setFiltroOrdenacao(op.key);
+                        setDropdownAberto(false);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons 
+                        name={op.icon} 
+                        size={15} 
+                        color={isSel ? '#FF5722' : '#64748B'} 
+                        style={{ marginRight: 8 }} 
+                      />
+                      <Text style={[styles.dropdownListItemText, isSel && styles.dropdownListItemTextActive]}>
+                        {op.label}
+                      </Text>
+                      {isSel && (
+                        <Ionicons name="checkmark-circle" size={16} color="#FF5722" style={{ marginLeft: 'auto' }} />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
 
-          <View style={styles.emergencyButtonsRow}>
-            <TouchableOpacity 
-              style={[
-                styles.btnEmergencyAction, 
-                ativos > 0 ? styles.btnPauseMode : styles.btnResumeMode
-              ]}
-              onPress={pausarOuRetomarVarreduras}
-              activeOpacity={0.8}
-            >
-              <Ionicons 
-                name={ativos > 0 ? "pause-circle" : "play-circle"} 
-                size={18} 
-                color={ativos > 0 ? "#F59E0B" : THEME.primary} 
-                style={{ marginRight: 6 }} 
-              />
-              <Text style={[
-                styles.btnEmergencyText, 
-                { color: ativos > 0 ? "#F59E0B" : THEME.primary }
-              ]}>
-                {ativos > 0 ? "Pausar" : "Retomar"}
+            <View style={styles.dealsCountRow}>
+              <Text style={styles.dealsCountText}>
+                Exibindo {dealsFiltrados.length} ofertas
               </Text>
-            </TouchableOpacity>
-
+            </View>
+          </View>
+        }
+        ListEmptyComponent={
+          <View style={styles.emptyFeedBox}>
+            <Ionicons name="search-outline" size={36} color={THEME.textMuted} />
+            <Text style={styles.emptyTitle}>Nenhuma oferta para esta loja no momento</Text>
             <TouchableOpacity 
-              style={[styles.btnEmergencyAction, styles.btnStopMode]}
-              onPress={pararVarredurasEmergencia}
-              activeOpacity={0.8}
+              style={styles.emptyResetBtn}
+              onPress={() => setLojaAtiva('TODOS')}
             >
-              <Ionicons name="stop-circle" size={18} color="#EF4444" style={{ marginRight: 6 }} />
-              <Text style={[styles.btnEmergencyText, { color: '#EF4444' }]}>
-                Parar
-              </Text>
+              <Text style={styles.emptyResetBtnText}>Ver Todas as Lojas</Text>
             </TouchableOpacity>
           </View>
-        </Surface>
-
-        <View style={{ height: 80 }} />
-      </ScrollView>
+        }
+      />
     </View>
   );
 }
 
+// =====================================================================
+// ABA 4: RECOMENDADOS PARA VOCÊ (AFINIDADE & PESOS PERSONALIZADOS)
+// =====================================================================
+function RecommendationsFeedScreen({ navigation }) {
+  const { user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, unreadNotifCount, userProfile, openAuthModal } = useContext(RadarContext);
+  const effectiveUserId = currentOwnerId || user?.id || deviceId;
+  const [lojaAtiva, setLojaAtiva] = useState('TODOS');
+  const [deals, setDeals] = useState([]);
+  const [carregando, setCarregando] = useState(false);
+  const [filtroOrdenacao, setFiltroOrdenacao] = useState('todos');
+  const [dropdownAberto, setDropdownAberto] = useState(false);
 
-// --- TELA 2: RADARES ATIVOS ---
-function MonitorListScreen({ navigation }) {
-  const { 
-    monitores, loading, refreshing, onRefresh, fetchData,
-    tier, sweepCooldownSeconds, dispararVarreduraManual, openUpgradeModal,
-    antiSpamCooldowns, varrendoMonitorId, showAlert 
-  } = useContext(RadarContext);
-  const [testandoId, setTestandoId] = useState(null);
+  const FILTRO_OPCOES = [
+    { key: 'todos', label: 'Padrão (Mais Relevantes)', icon: 'sparkles' },
+    { key: 'maior_desconto', label: 'Maiores Descontos (% OFF)', icon: 'flash' },
+    { key: 'frete_gratis', label: 'Apenas Frete Grátis', icon: 'car' },
+    { key: 'menor_preco', label: 'Menor Preço (R$)', icon: 'trending-down' }
+  ];
+
+  const carregarFeed = useCallback(async (force = false) => {
+    try {
+      if (force) setCarregando(true);
+      const recs = await RecommendationEngine.carregarRecomendacoes(force, effectiveUserId);
+      const semUsados = (recs || []).filter(item => {
+        const url = (item.url || '').toLowerCase();
+        const loja = (item.loja || '').toLowerCase();
+        return !url.includes('olx.com') && !url.includes('facebook.com') && loja !== 'olx' && loja !== 'facebook';
+      });
+      setDeals(semUsados);
+      return semUsados;
+    } catch (e) {
+      console.log('[RecommendationsFeed] Erro ao carregar feed:', e);
+      return [];
+    } finally {
+      setCarregando(false);
+    }
+  }, [effectiveUserId]);
+
+  useEffect(() => {
+    carregarFeed(false);
+  }, [carregarFeed]);
+
+  const dealsFiltrados = useMemo(() => {
+    let list = deals;
+    if (lojaAtiva !== 'TODOS') {
+      list = list.filter(item => item.loja && item.loja.toLowerCase().includes(lojaAtiva.toLowerCase()));
+    }
+
+    if (filtroOrdenacao === 'frete_gratis') {
+      list = list.filter(item => {
+        const info = calcularFreteGratisInfo(item.loja, item.preco, item.destaque_label, item.titulo);
+        return info.temFreteGratis;
+      });
+    } else if (filtroOrdenacao === 'maior_desconto') {
+      list = [...list].sort((a, b) => (b.desconto_pct || 0) - (a.desconto_pct || 0));
+    } else if (filtroOrdenacao === 'menor_preco') {
+      list = [...list].sort((a, b) => {
+        const pA = parseFloat(a.preco || a.price) || 0;
+        const pB = parseFloat(b.preco || b.price) || 0;
+        return pA - pB;
+      });
+    } else {
+      list = [...list].sort((a, b) => (b.score || 0) - (a.score || 0));
+    }
+
+    return list;
+  }, [deals, lojaAtiva, filtroOrdenacao]);
+
+  const handleDealClick = (deal) => {
+    if (!deal) return;
+    RecommendationEngine.registrarClique(deal.titulo || deal.title, effectiveUserId, deal.loja);
+
+    let targetUrl = deal.url;
+    if (!targetUrl || /^https?:\/\/(www\.)?(shopee|mercadolivre|amazon|magazineluiza|kabum|casasbahia|fastshop|americanas|carrefour|shein)\.com(\.br)?\/?$/i.test(targetUrl)) {
+      targetUrl = RecommendationEngine.gerarUrlBuscaLoja(deal.loja, deal.titulo || deal.title);
+    }
+    const finalUrl = formatarUrlAfiliado(targetUrl);
+    Linking.openURL(finalUrl).catch(() => {
+      showAlert({
+        title: "Aviso",
+        message: "Não foi possível abrir o link da oferta.",
+        type: "error"
+      });
+    });
+  };
+
+  const handleToggleFavorite = (item) => {
+    RecommendationEngine.registrarFavorito(item?.titulo || item?.title, effectiveUserId, item?.loja);
+  };
+
+  return (
+    <View style={styles.screen}>
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+
+      {/* Header com Saudação 100% Idêntico ao Home (sem subtítulo no topo) */}
+      <AppTopHeader 
+        user={user} 
+        userProfile={userProfile}
+        onPressProfile={() => user ? openSettings() : openAuthModal()}
+        onOpenNotif={openNotif} 
+        onOpenSettings={openSettings} 
+        unreadCount={unreadNotifCount} 
+      />
+
+      {/* Filtro de Lojas Horizontal com tom Avermelhado */}
+      <View style={{ height: 42, marginBottom: 4 }}>
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterPillsContainer}
+        >
+          {LOJAS_FILTRO.map((loja) => {
+            const isSelected = lojaAtiva === loja;
+            return (
+              <TouchableOpacity
+                key={loja}
+                style={[
+                  styles.filterPill,
+                  isSelected && { backgroundColor: '#E11D48', borderColor: '#E11D48' }
+                ]}
+                onPress={() => {
+                  try { Vibration.vibrate(15); } catch(e) {}
+                  setLojaAtiva(loja);
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.filterPillText, isSelected && styles.filterPillTextActive]}>
+                  {loja}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
+
+      {/* Feed Virtualizado com FlatList */}
+      <FlatList
+        data={dealsFiltrados}
+        keyExtractor={(item) => String(item.id || item.url || Math.random())}
+        renderItem={({ item }) => (
+          <ProductDealCard
+            item={{ ...item, is_recomendacao: true, is_top5: false, is_destaque_top5: false }}
+            onPress={() => handleDealClick(item)}
+            onToggleFavorite={handleToggleFavorite}
+          />
+        )}
+        contentContainerStyle={styles.feedScrollContent}
+        showsVerticalScrollIndicator={false}
+        initialNumToRender={6}
+        maxToRenderPerBatch={8}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS === 'android'}
+        refreshControl={
+          <RefreshControl
+            refreshing={carregando}
+            onRefresh={() => carregarFeed(true)}
+            colors={['#E11D48']}
+            tintColor="#E11D48"
+          />
+        }
+        ListHeaderComponent={
+          <View>
+            <View style={styles.pechFeedSectionTitleRow}>
+              <View style={{ flex: 1, paddingRight: 6 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <Ionicons name="sparkles" size={18} color="#E11D48" style={{ marginRight: 6 }} />
+                  <Text style={styles.pechFeedSectionTitle}>
+                    {lojaAtiva === 'TODOS' ? 'Recomendados Para Você' : `Recomendações de ${lojaAtiva}`}
+                  </Text>
+                </View>
+                <Text style={{ fontSize: 11, color: '#64748B', marginTop: 2, marginLeft: 24 }}>
+                  Recomendações com base nos seus radares e perfil
+                </Text>
+              </View>
+
+              {/* Botão de Lista de Filtros Suspensos com Tema Avermelhado */}
+              <TouchableOpacity 
+                style={[styles.dropdownFilterBtn, { backgroundColor: '#FFF1F2', borderColor: '#FECDD3' }]}
+                onPress={() => {
+                  try { Vibration.vibrate(15); } catch(e) {}
+                  setDropdownAberto(prev => !prev);
+                }}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="funnel" size={12} color="#E11D48" style={{ marginRight: 4 }} />
+                <Text style={[styles.dropdownFilterBtnText, { color: '#E11D48' }]}>
+                  {FILTRO_OPCOES.find(f => f.key === filtroOrdenacao)?.label.split(' ')[0] || 'Filtrar'}
+                </Text>
+                <Ionicons 
+                  name={dropdownAberto ? "chevron-up" : "chevron-down"} 
+                  size={13} 
+                  color="#E11D48" 
+                  style={{ marginLeft: 3 }} 
+                />
+              </TouchableOpacity>
+            </View>
+
+            {/* Menu Suspenso de Filtros em Formato de Lista */}
+            {dropdownAberto && (
+              <View style={styles.dropdownListBox}>
+                <Text style={styles.dropdownListHeaderTitle}>FILTRAR RECOMENDAÇÕES POR:</Text>
+                {FILTRO_OPCOES.map(op => {
+                  const isSel = filtroOrdenacao === op.key;
+                  return (
+                    <TouchableOpacity
+                      key={op.key}
+                      style={[styles.dropdownListItem, isSel && { backgroundColor: '#FFF1F2' }]}
+                      onPress={() => {
+                        try { Vibration.vibrate(15); } catch(e) {}
+                        setFiltroOrdenacao(op.key);
+                        setDropdownAberto(false);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons 
+                        name={op.icon} 
+                        size={15} 
+                        color={isSel ? '#E11D48' : '#64748B'} 
+                        style={{ marginRight: 8 }} 
+                      />
+                      <Text style={[styles.dropdownListItemText, isSel && { color: '#E11D48', fontWeight: '800' }]}>
+                        {op.label}
+                      </Text>
+                      {isSel && (
+                        <Ionicons name="checkmark-circle" size={16} color="#E11D48" style={{ marginLeft: 'auto' }} />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            <View style={styles.dealsCountRow}>
+              <Text style={styles.dealsCountText}>
+                Exibindo {dealsFiltrados.length} recomendações
+              </Text>
+            </View>
+          </View>
+        }
+        ListEmptyComponent={
+          <View style={styles.emptyFeedBox}>
+            <Ionicons name="search-outline" size={36} color={THEME.textMuted} />
+            <Text style={styles.emptyTitle}>Nenhuma recomendação para esta loja no momento</Text>
+            <TouchableOpacity 
+              style={[styles.emptyResetBtn, { backgroundColor: '#E11D48' }]}
+              onPress={() => setLojaAtiva('TODOS')}
+            >
+              <Text style={styles.emptyResetBtnText}>Ver Todas as Lojas</Text>
+            </TouchableOpacity>
+          </View>
+        }
+      />
+    </View>
+  );
+}
+
+// =====================================================================
+// ABA 2: RADARES INTELIGENTES (GESTÃO & ONBOARDING)
+// =====================================================================
+function RadarsScreen({ navigation }) {
+  const { monitores, resultados, loading, refreshing, onRefresh, showAlert, user, openNotif, openSettings, unreadNotifCount, userProfile, openAuthModal, tier, tierState } = useContext(RadarContext);
+  const [expandedRadarId, setExpandedRadarId] = useState(null);
   const [now, setNow] = useState(Date.now());
+  const [testingRadarId, setTestingRadarId] = useState(null);
+
+  const isAdmin = Boolean(
+    tier === 'admin' || 
+    tierState?.tier === 'admin' || 
+    userProfile?.plano === 'admin' || 
+    userProfile?.tipo_usuario === 'admin' || 
+    user?.email?.toLowerCase().includes('admin')
+  );
+
+  const handleTestarRadar = async (monitor) => {
+    try {
+      try { Vibration.vibrate(25); } catch(e) {}
+      setTestingRadarId(monitor.id);
+      await RadarAPI.testMonitor(monitor.id);
+      showAlert({
+        title: "Varredura Disparada!",
+        message: `O radar "${monitor.nome || monitor.produto || 'Radar'}" foi agendado para execução prioritária imediata no servidor.`,
+        type: "success",
+        icon: "flash"
+      });
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      showAlert({ title: "Erro", message: "Não foi possível disparar o teste do radar.", type: "error" });
+    } finally {
+      setTimeout(() => setTestingRadarId(null), 2500);
+    }
+  };
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const alternarStatus = async (id, atual) => {
-    try {
-      await RadarAPI.toggleMonitor(id, !atual);
-      fetchData(null, true);
-    } catch (e) {
-      showAlert({
-        title: "Erro",
-        message: "Não foi possível atualizar o radar.",
-        type: "error"
-      });
-    }
+  const toggleExpand = (id) => {
+    try { Vibration.vibrate(20); } catch(e) {}
+    setExpandedRadarId(prev => prev === id ? null : id);
   };
 
-  const handleDispararVarrer = async (id) => {
-    setTestandoId(id);
-    await dispararVarreduraManual(id);
-    setTestandoId(null);
-  };
-
-  const handleCriarRadarPress = () => {
-    if (tier === TIERS.FREE && monitores.length >= 1) {
-      showAlert({
-        title: "Limite do Plano Free",
-        message: "Você atingiu o limite de 1 radar ativo no Plano Free. Desbloqueie até 5 radares simultâneos e varreduras ultra rápidas assinando o AchôAI Premium!",
-        type: "warning",
-        icon: "lock-closed",
-        confirmText: "Conhecer Premium",
-        cancelText: "Entendi",
-        showCancel: true,
-        onConfirm: openUpgradeModal
-      });
-    } else {
-      navigation.navigate('Criar');
-    }
-  };
-
-  const removerRadar = (id, nome) => {
+  const handleDeleteRadar = (monitor) => {
     showAlert({
       title: "Excluir Radar",
-      message: `Deseja realmente remover o monitor "${nome}"? Esta ação apagará as regras de varredura deste radar.`,
+      message: `Deseja realmente remover o radar "${monitor.nome || 'Radar'}"?`,
       type: "confirm_danger",
       icon: "trash-outline",
-      confirmText: "Sim, Excluir",
+      confirmText: "Excluir",
       cancelText: "Cancelar",
       showCancel: true,
       onConfirm: async () => {
         try {
-          await RadarAPI.deleteMonitor(id);
-          fetchData(null, true);
-        } catch (err) {
-          showAlert({
-            title: "Erro",
-            message: "Falha ao excluir o radar.",
-            type: "error"
-          });
+          await RadarAPI.deleteMonitor(monitor.id);
+          if (onRefresh) onRefresh();
+        } catch(e) {
+          showAlert({ title: "Erro", message: "Não foi possível excluir o radar.", type: "error" });
         }
       }
     });
   };
 
-  // Formata o tempo de espera do cooldown de 60 min
-  const formatarCooldown = (segundos) => {
-    const min = Math.floor(segundos / 60);
-    const sec = segundos % 60;
-    if (min > 0) return `${min}m ${sec}s`;
-    return `${sec}s`;
+  const handleToggleAtivo = async (monitor, val) => {
+    try {
+      try { Vibration.vibrate(20); } catch(e) {}
+      await RadarAPI.toggleMonitor(monitor.id, val);
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      showAlert({ title: "Erro", message: "Não foi possível alterar o status do radar.", type: "error" });
+    }
   };
+
+  // Se não tem radares: Onboarding Elegante em Tela Limpa
+  if (!loading && monitores.length === 0) {
+    return (
+      <View style={styles.screen}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+        <AppTopHeader 
+          user={user} 
+          userProfile={userProfile}
+          onPressProfile={() => user ? openSettings() : openAuthModal()}
+          onOpenNotif={openNotif} 
+          onOpenSettings={openSettings} 
+          unreadCount={unreadNotifCount} 
+        />
+        <View style={[styles.brandHeaderClean, { paddingTop: 6 }]}>
+          <Text style={styles.brandTitleText}>Radares Inteligentes</Text>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.onboardingContainer} showsVerticalScrollIndicator={false}>
+          <View style={styles.onboardingHeroIcon}>
+            <Ionicons name="radio" size={38} color="#FF5722" />
+          </View>
+
+          <Text style={styles.onboardingTitle}>Crie seu radar inteligente em poucos cliques</Text>
+          <Text style={styles.onboardingSubtitle}>
+            Acompanhe preços dos maiores e-commerces em tempo real e receba notificações imediatas assim que uma oferta for achada.
+          </Text>
+
+          <View style={styles.onboardingCardsWrap}>
+            <View style={styles.onboardingCard}>
+              <View style={[styles.onboardingCardIcon, { backgroundColor: '#EFF6FF' }]}>
+                <Ionicons name="flash-outline" size={22} color="#3B82F6" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 14 }}>
+                <Text style={styles.onboardingCardTitle}>Rastreamento 24h na Nuvem</Text>
+                <Text style={styles.onboardingCardDesc}>
+                  Nosso motor verifica as lojas automaticamente no intervalo que você escolher.
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.onboardingCard}>
+              <View style={[styles.onboardingCardIcon, { backgroundColor: '#FEF2F2' }]}>
+                <Ionicons name="pricetag-outline" size={22} color="#FF5722" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 14 }}>
+                <Text style={styles.onboardingCardTitle}>Preço Alvo Personalizado</Text>
+                <Text style={styles.onboardingCardDesc}>
+                  Defina o valor máximo que deseja pagar e seja notificado quando o preço cair.
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.onboardingCard}>
+              <View style={[styles.onboardingCardIcon, { backgroundColor: '#ECFDF5' }]}>
+                <Ionicons name="notifications-outline" size={22} color="#10B981" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 14 }}>
+                <Text style={styles.onboardingCardTitle}>Alertas Limpos e Diretos</Text>
+                <Text style={styles.onboardingCardDesc}>
+                  Notificações com fotos, preços e links diretos para a loja oficial, sem spam.
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={styles.onboardingCtaBtn}
+            onPress={() => navigation.navigate('Criar')}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="add-circle-outline" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.onboardingCtaBtnText}>Criar Primeiro Radar</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
-      {/* TOP HEADER */}
-      <View style={styles.screenHeader}>
+      {/* Header Padronizado */}
+      <AppTopHeader 
+        user={user} 
+        userProfile={userProfile}
+        onPressProfile={() => user ? openSettings() : openAuthModal()}
+        onOpenNotif={openNotif} 
+        onOpenSettings={openSettings} 
+        unreadCount={unreadNotifCount} 
+      />
+
+      {/* Título da Seção Meus Radares */}
+      <View style={[styles.brandHeaderClean, { paddingTop: 6 }]}>
         <View>
-          <Text style={styles.screenHeaderTitle}>Radares Ativos</Text>
-          <Text style={styles.screenHeaderSub}>
-            {monitores.length} {monitores.length === 1 ? 'radar configurado' : 'radares configurados'}
-            {tier === TIERS.FREE ? ' (Limite: 1)' : ' (Até 5)'}
-          </Text>
+          <View style={styles.row}>
+            <Text style={styles.brandTitleText}>Meus Radares</Text>
+            <View style={styles.countBadge}>
+              <Text style={styles.countBadgeText}>{monitores.length}</Text>
+            </View>
+          </View>
+          <Text style={styles.brandSubtitleText}>Gerencie suas varreduras ativas</Text>
         </View>
+
         <TouchableOpacity 
-          style={styles.headerBtnSquare}
-          onPress={handleCriarRadarPress}
-          activeOpacity={0.8}
+          style={styles.headerPrimaryBtn}
+          onPress={() => navigation.navigate('Criar')}
+          activeOpacity={0.85}
         >
-          <Ionicons name="add" size={22} color={THEME.primary} />
+          <Ionicons name="add" size={18} color="#FFFFFF" style={{ marginRight: 4 }} />
+          <Text style={styles.headerPrimaryBtnText}>Novo</Text>
         </TouchableOpacity>
       </View>
 
-      <ScrollView 
-        contentContainerStyle={styles.scrollArea}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
+      <ScrollView
+        contentContainerStyle={styles.radarsScrollContent}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl 
+            refreshing={refreshing} 
+            onRefresh={onRefresh}
+            colors={[THEME.primary]}
+            tintColor={THEME.primary}
+          />
+        }
       >
-        {loading && monitores.length === 0 ? (
-          <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 60 }} />
-        ) : monitores.length === 0 ? (
-          <View style={styles.emptyFullState}>
-            <View style={styles.emptyIconPulseCircle}>
-              <Ionicons name="radio-outline" size={42} color={THEME.primary} />
-            </View>
-            <Text style={styles.emptyStateTitle}>Nenhum Radar Configurado</Text>
-            <Text style={styles.emptyStateSub}>
-              Crie seu primeiro radar para monitorar anúncios na OLX, Zoom, Buscapé ou páginas de notícias com inteligência.
-            </Text>
-            <PrimaryButton 
-              title="Criar Primeiro Radar"
-              icon="add-circle-outline"
-              onPress={handleCriarRadarPress}
-              style={{ marginTop: 24, width: '100%', maxWidth: 260 }}
-            />
-          </View>
-        ) : (
-          monitores.map(m => {
-            const isProd = m.modo !== 'noticia';
-            const plataforma = identificarPlataforma(m.urls);
-            const modoEstrat = identificarEstrategia(m);
-            const temAlvo = m.preco_alvo !== null && m.preco_alvo !== undefined && Number(m.preco_alvo) > 0;
-            const alvo = temAlvo ? Number(m.preco_alvo) : 0;
-            const margem = Number(m.margem) || 15;
+        {monitores.map((monitor) => {
+          const isExpanded = expandedRadarId === monitor.id;
+          const itensEncontrados = resultados.filter(r => r.monitor_id === monitor.id);
+          const platNome = monitor.plataforma || identificarPlataforma(monitor.urls);
+          const intervaloMinutos = monitor.intervalo_valor || monitor.intervalo_minutos || 15;
+          const regr = formatarTempoRegressivo(
+            monitor.proxima_execucao || monitor.proxima_varredura, 
+            now, 
+            intervaloMinutos, 
+            monitor.created_at
+          );
 
-            let estratDesc = 'Mais Recentes';
-            if (m.modo === 'noticia') {
-              estratDesc = 'Notícia';
-            } else if (modoEstrat === 'maior_desconto') {
-              const apenas1 = m.palavras && (m.palavras.includes('ml_apenas_maior_desconto:true') || m.palavras.includes('shopee_apenas_maior_desconto:true') || m.palavras.includes('amz_apenas_maior_desconto:true') || m.palavras.includes('magalu_apenas_maior_desconto:true') || m.palavras.includes('kabum_apenas_maior_desconto:true') || m.palavras.includes('ame_apenas_maior_desconto:true') || m.palavras.includes('shein_apenas_maior_desconto:true'));
-              estratDesc = apenas1 ? 'Único Maior Desconto' : 'Maior Desconto';
-            } else if (modoEstrat === 'menor_preco') {
-              estratDesc = 'Menor Preço';
-            } else if (modoEstrat === 'por_preco' && temAlvo) {
-              estratDesc = `Alvo R$ ${alvo.toFixed(0)} (±${margem}%)`;
-            } else if (m.palavras && m.palavras.includes('ordenar_menor_preco')) {
-              estratDesc = 'Recentes (Menor Valor)';
-            }
-
-            const infoLocal = plataforma === 'OLX' ? extrairInfoOlx(m.urls) : null;
-            const estadoNome = infoLocal ? OLX_ESTADOS[infoLocal.uf]?.nome || infoLocal.uf : null;
-            const emCooldown = tier === TIERS.FREE && sweepCooldownSeconds > 0;
-
-            return (
-              <Surface key={m.id} style={styles.radarCard} elevated={m.ativo}>
-                {/* CABEÇALHO DO RADAR */}
-                <View style={styles.radarCardHeader}>
-                  <View style={[styles.radarModeIcon, { backgroundColor: isProd ? THEME.primaryGlow : THEME.infoBg }]}>
-                    <Ionicons name={isProd ? "cart-outline" : "newspaper-outline"} size={16} color={isProd ? THEME.primary : THEME.info} />
-                  </View>
-                  <View style={{ flex: 1, marginHorizontal: 10 }}>
-                    <Text style={styles.radarTitle} numberOfLines={1}>{m.nome}</Text>
-                    <View style={styles.radarTagsRow}>
-                      <PlatformBadge platformKey={plataforma} />
-                      <StrategyBadge text={estratDesc} />
-                      {estadoNome && (
-                        <View style={styles.locationChip}>
-                          <Ionicons name="location-outline" size={10} color={THEME.textMuted} style={{ marginRight: 2 }} />
-                          <Text style={styles.locationChipText}>{infoLocal.uf}</Text>
-                        </View>
-                      )}
-                      {plataforma === 'SHOPEE' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const urlStr = (m.urls || '').toLowerCase();
-                        const isOnlyNac = palavrasStr.includes('shopee_origem:nacional') || urlStr.includes('locations=-1');
-                        const isOnlyInter = palavrasStr.includes('shopee_origem:internacional');
-                        const temMelhorAval = palavrasStr.includes('shopee_melhor_avaliacao:true') || urlStr.includes('sortby=sales');
-
-                        let locBadge = null;
-                        if (isOnlyNac) {
-                          locBadge = (
-                            <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                              <Ionicons name="flag-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
-                              <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Nacional</Text>
-                            </View>
-                          );
-                        } else if (isOnlyInter) {
-                          locBadge = (
-                            <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
-                              <Ionicons name="globe-outline" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
-                              <Text style={[styles.locationChipText, { color: '#3B82F6', fontWeight: '700' }]}>Internacional</Text>
-                            </View>
-                          );
-                        } else {
-                          locBadge = (
-                            <>
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="flag-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Nacional</Text>
-                              </View>
-                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
-                                <Ionicons name="globe-outline" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#3B82F6', fontWeight: '700' }]}>Internacional</Text>
-                              </View>
-                            </>
-                          );
-                        }
-
-                        return (
-                          <>
-                            {locBadge}
-                            {temMelhorAval && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
-                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Top Avaliado</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'MERCADO_LIVRE' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const urlStr = (m.urls || '').toLowerCase();
-                        const temFull = palavrasStr.includes('ml_full:true') || urlStr.includes('_frete_full');
-                        const temFrete = palavrasStr.includes('ml_frete_gratis:true') || urlStr.includes('_custofrete_gratis');
-                        const temNovo = palavrasStr.includes('ml_novo:true') || urlStr.includes('/novo/');
-                        const temUsado = palavrasStr.includes('ml_usado:true') || urlStr.includes('/usado/');
-
-                        return (
-                          <>
-                            {temFull && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(0, 166, 80, 0.35)', backgroundColor: 'rgba(0, 166, 80, 0.08)' }]}>
-                                <Ionicons name="flash" size={10} color="#00A650" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#00A650', fontWeight: '700' }]}>FULL</Text>
-                              </View>
-                            )}
-                            {temFrete && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
-                              </View>
-                            )}
-                            {temNovo && !temUsado && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 230, 0, 0.35)', backgroundColor: 'rgba(255, 230, 0, 0.08)' }]}>
-                                <Text style={[styles.locationChipText, { color: '#FFE600', fontWeight: '700' }]}>Novo</Text>
-                              </View>
-                            )}
-                            {temUsado && !temNovo && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(148, 163, 184, 0.35)', backgroundColor: 'rgba(148, 163, 184, 0.08)' }]}>
-                                <Text style={[styles.locationChipText, { color: '#94A3B8', fontWeight: '700' }]}>Usado</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'AMAZON' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temFrete = palavrasStr.includes('amz_frete_gratis:true');
-                        const temAval = palavrasStr.includes('amz_melhor_avaliacao:true');
-                        const temNac = palavrasStr.includes('amz_nacional:true');
-                        const temInter = palavrasStr.includes('amz_internacional:true');
-                        const temNovo = palavrasStr.includes('amz_novo:true');
-                        const temUsado = palavrasStr.includes('amz_usado:true');
-
-                        return (
-                          <>
-                            {temFrete && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 153, 0, 0.35)', backgroundColor: 'rgba(255, 153, 0, 0.08)' }]}>
-                                <Ionicons name="car-outline" size={10} color="#FF9900" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FF9900', fontWeight: '700' }]}>Frete Grátis</Text>
-                              </View>
-                            )}
-                            {temAval && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
-                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
-                              </View>
-                            )}
-                            {temNac && !temInter && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="flag-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Nacional</Text>
-                              </View>
-                            )}
-                            {temInter && !temNac && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
-                                <Ionicons name="globe-outline" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#3B82F6', fontWeight: '700' }]}>Internacional</Text>
-                              </View>
-                            )}
-                            {temNovo && !temUsado && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 230, 0, 0.35)', backgroundColor: 'rgba(255, 230, 0, 0.08)' }]}>
-                                <Text style={[styles.locationChipText, { color: '#FFE600', fontWeight: '700' }]}>Novo</Text>
-                              </View>
-                            )}
-                            {temUsado && !temNovo && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(148, 163, 184, 0.35)', backgroundColor: 'rgba(148, 163, 184, 0.08)' }]}>
-                                <Text style={[styles.locationChipText, { color: '#94A3B8', fontWeight: '700' }]}>Usado</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'MAGALU' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temFull = palavrasStr.includes('magalu_entrega_rapida:true') || palavrasStr.includes('magalu_full:true');
-                        const temFrete = palavrasStr.includes('magalu_frete_gratis:true');
-                        const temAval = palavrasStr.includes('magalu_melhor_avaliacao:true');
-                        const temNac = palavrasStr.includes('magalu_nacional:true');
-                        const temInter = palavrasStr.includes('magalu_internacional:true');
-
-                        return (
-                          <>
-                            {temFull && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(0, 134, 255, 0.45)', backgroundColor: 'rgba(0, 134, 255, 0.12)' }]}>
-                                <Ionicons name="flash" size={10} color="#0086FF" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#0086FF', fontWeight: '800' }]}>Full</Text>
-                              </View>
-                            )}
-                            {temFrete && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
-                              </View>
-                            )}
-                            {temAval && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
-                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
-                              </View>
-                            )}
-                            {temNac && !temInter && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="flag-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Nacional</Text>
-                              </View>
-                            )}
-                            {temInter && !temNac && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
-                                <Ionicons name="globe-outline" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#3B82F6', fontWeight: '700' }]}>Internacional</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'KABUM' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temFrete = palavrasStr.includes('kabum_frete_gratis:true');
-                        const temAval = palavrasStr.includes('kabum_melhor_avaliacao:true');
-
-                        return (
-                          <>
-                            {temFrete && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
-                              </View>
-                            )}
-                            {temAval && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
-                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'AMERICANAS' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temRapida = palavrasStr.includes('ame_entrega_rapida:true') || palavrasStr.includes('americanas_entrega_rapida:true') || palavrasStr.includes('ame_full:true');
-                        const temFrete = palavrasStr.includes('ame_frete_gratis:true') || palavrasStr.includes('americanas_frete_gratis:true');
-                        const temAval = palavrasStr.includes('ame_melhor_avaliacao:true') || palavrasStr.includes('americanas_melhor_avaliacao:true');
-
-                        return (
-                          <>
-                            {temRapida && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(230, 0, 20, 0.45)', backgroundColor: 'rgba(230, 0, 20, 0.12)' }]}>
-                                <Ionicons name="flash" size={10} color="#E60014" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#E60014', fontWeight: '800' }]}>Entrega Rápida</Text>
-                              </View>
-                            )}
-                            {temFrete && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
-                              </View>
-                            )}
-                            {temAval && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
-                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'SHEIN' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temNac = palavrasStr.includes('shein_nacional:true');
-                        const temInter = palavrasStr.includes('shein_internacional:true');
-                        const temMaisVendidos = palavrasStr.includes('shein_mais_vendidos:true');
-                        const temAval = palavrasStr.includes('shein_melhor_avaliacao:true');
-
-                        return (
-                          <>
-                            {temNac && !temInter && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="flag-outline" size={10} color="#10B981" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Nacional</Text>
-                              </View>
-                            )}
-                            {temInter && !temNac && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
-                                <Ionicons name="globe-outline" size={10} color="#3B82F6" style={{ marginRight: 3 }} />
-                                <Text style={[styles.locationChipText, { color: '#3B82F6', fontWeight: '700' }]}>Internacional</Text>
-                              </View>
-                            )}
-                            {temMaisVendidos && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(245, 158, 11, 0.45)', backgroundColor: 'rgba(245, 158, 11, 0.12)' }]}>
-                                <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#F59E0B', fontWeight: '800' }]}>Mais Vendidos</Text>
-                              </View>
-                            )}
-                            {temAval && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
-                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'FASTSHOP' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temAval = palavrasStr.includes('fastshop_melhor_avaliacao:true');
-
-                        return (
-                          <>
-                            {temAval && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(255, 187, 0, 0.35)', backgroundColor: 'rgba(255, 187, 0, 0.08)' }]}>
-                                <Ionicons name="star" size={10} color="#FFBB00" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#FFBB00', fontWeight: '700' }]}>Melhor Avaliação</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'CARREFOUR' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temFrete = palavrasStr.includes('carrefour_frete_gratis:true');
-                        const temParc = palavrasStr.includes('carrefour_parcelamento:true');
-                        const temMaisVendidos = palavrasStr.includes('carrefour_mais_vendidos:true');
-
-                        return (
-                          <>
-                            {temFrete && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
-                              </View>
-                            )}
-                            {temParc && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
-                                <Ionicons name="card-outline" size={10} color="#3B82F6" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#60A5FA', fontWeight: '700' }]}>Sem Juros</Text>
-                              </View>
-                            )}
-                            {temMaisVendidos && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(245, 158, 11, 0.45)', backgroundColor: 'rgba(245, 158, 11, 0.12)' }]}>
-                                <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#F59E0B', fontWeight: '800' }]}>Mais Vendidos</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {plataforma === 'CASASBAHIA' && (() => {
-                        const palavrasStr = (m.palavras || '').toLowerCase();
-                        const temFrete = palavrasStr.includes('casasbahia_frete_gratis:true');
-                        const temParc = palavrasStr.includes('casasbahia_parcelamento:true');
-                        const temMaisVendidos = palavrasStr.includes('casasbahia_mais_vendidos:true');
-
-                        return (
-                          <>
-                            {temFrete && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(16, 185, 129, 0.35)', backgroundColor: 'rgba(16, 185, 129, 0.08)' }]}>
-                                <Ionicons name="car-outline" size={10} color="#10B981" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#10B981', fontWeight: '700' }]}>Frete Grátis</Text>
-                              </View>
-                            )}
-                            {temParc && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(59, 130, 246, 0.35)', backgroundColor: 'rgba(59, 130, 246, 0.08)' }]}>
-                                <Ionicons name="card-outline" size={10} color="#3B82F6" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#60A5FA', fontWeight: '700' }]}>Sem Juros</Text>
-                              </View>
-                            )}
-                            {temMaisVendidos && (
-                              <View style={[styles.locationChip, { borderColor: 'rgba(245, 158, 11, 0.45)', backgroundColor: 'rgba(245, 158, 11, 0.12)' }]}>
-                                <Ionicons name="flame" size={10} color="#F59E0B" style={{ marginRight: 2 }} />
-                                <Text style={[styles.locationChipText, { color: '#F59E0B', fontWeight: '800' }]}>Mais Vendidos</Text>
-                              </View>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </View>
-                  </View>
-                  <Switch 
-                    value={m.ativo}
-                    onValueChange={() => alternarStatus(m.id, m.ativo)}
-                    trackColor={{ false: '#1E2333', true: THEME.primary }}
-                    thumbColor="#FFF"
-                  />
-                </View>
-
-                {/* TERMO DE BUSCA EM DESTAQUE */}
-                <View style={styles.radarSearchTermBox}>
-                  <Ionicons name="search" size={13} color={THEME.primary} style={{ marginRight: 6 }} />
-                  <Text style={styles.radarSearchTermText} numberOfLines={1}>
-                    {m.produto || m.palavras || 'Termo não especificado'}
+          return (
+            <View 
+              key={monitor.id}
+              style={styles.radarCard}
+            >
+              {Boolean(monitor.ativo) && <View style={styles.radarCardActiveIndicator} />}
+              {/* Cabeçalho do Card */}
+              <View style={styles.radarCardHeader}>
+                <View style={{ flex: 1, marginRight: 10 }}>
+                  <Text style={styles.radarCardTitle} numberOfLines={1}>
+                    {monitor.nome || monitor.produto || monitor.palavras || 'Radar Sem Nome'}
                   </Text>
-                </View>
+                  
+                  <View style={[styles.row, { marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 5, marginRight: 8 }}>
+                      {(platNome || '').split(',').map(p => p.trim()).filter(Boolean).map((pKey, pIdx) => (
+                        <View key={pIdx} style={styles.radarPlatMiniLogoBox}>
+                          <StoreLogoBadge storeKey={pKey} size={15} />
+                        </View>
+                      ))}
+                    </View>
 
-                {/* RODAPÉ DO RADAR */}
-                <View style={styles.radarCardFooter}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.radarFrequencyLabel}>
-                      Varredura a cada {m.intervalo_valor} min
-                    </Text>
-                    <View style={styles.radarCountdownRow}>
-                      <Ionicons name="time-outline" size={12} color={m.ativo ? THEME.primary : THEME.textSubtle} style={{ marginRight: 4 }} />
-                      <Text style={[styles.radarCountdownText, !m.ativo && { color: THEME.textSubtle }]}>
-                        {!m.ativo ? 'Pausado' : formatarTempoRegressivo(m.proxima_execucao, now)}
+                    <View style={styles.miniIntervalBadge}>
+                      <Ionicons name="time-outline" size={12} color="#64748B" style={{ marginRight: 4 }} />
+                      <Text style={styles.miniIntervalBadgeText}>
+                        {intervaloMinutos} min
                       </Text>
                     </View>
                   </View>
+                </View>
 
-                  <View style={styles.radarActionsGroup}>
-                    {(() => {
-                      const estaVarrendo = testandoId === m.id || varrendoMonitorId === m.id;
-                      const antiSpamRestante = (tier !== TIERS.ADMIN && antiSpamCooldowns && antiSpamCooldowns[m.id]) 
-                        ? Math.max(0, Math.ceil((antiSpamCooldowns[m.id] - now) / 1000)) 
-                        : 0;
-                      const emCooldownAntiSpam = tier !== TIERS.ADMIN && antiSpamRestante > 0;
-                      const emCooldownFree = tier === TIERS.FREE && sweepCooldownSeconds > 0;
+                <Switch
+                  value={monitor.ativo}
+                  onValueChange={(val) => handleToggleAtivo(monitor, val)}
+                  trackColor={{ false: '#CBD5E1', true: THEME.primary }}
+                  thumbColor="#FFFFFF"
+                />
+              </View>
+
+              {/* Status e Próxima Verificação */}
+              <View style={styles.radarCardStatusRow}>
+                <View style={styles.row}>
+                  <View style={[styles.statusDot, { backgroundColor: monitor.ativo ? '#10B981' : '#94A3B8' }]} />
+                  <Text style={styles.statusLabelText}>
+                    {monitor.ativo ? 'Monitorando ativamente' : 'Varredura pausada'}
+                  </Text>
+                </View>
+
+                {monitor.ativo && (
+                  <Text style={styles.countdownText}>
+                    Próxima em: <Text style={{ fontWeight: '700', color: THEME.primary }}>{regr}</Text>
+                  </Text>
+                )}
+              </View>
+
+              {/* Botão Acordeão de Ofertas Encontradas */}
+              <TouchableOpacity
+                style={styles.accordionToggleBtn}
+                onPress={() => toggleExpand(monitor.id)}
+                activeOpacity={0.8}
+              >
+                <View style={styles.row}>
+                  <Ionicons name="pricetags-outline" size={16} color={THEME.primary} style={{ marginRight: 6 }} />
+                  <Text style={styles.accordionToggleText}>
+                    Ofertas Encontradas ({itensEncontrados.length})
+                  </Text>
+                </View>
+                <Ionicons 
+                  name={isExpanded ? "chevron-up" : "chevron-down"} 
+                  size={18} 
+                  color="#64748B" 
+                />
+              </TouchableOpacity>
+
+              {/* Corpo Expandido com Ofertas */}
+              {isExpanded && (
+                <View style={styles.accordionBody}>
+                  {itensEncontrados.length === 0 ? (
+                    <View style={styles.accordionEmpty}>
+                      <Text style={styles.accordionEmptyText}>
+                        Nenhuma oferta detectada ainda. O AchôAI notificará você assim que encontrar oportunidades para este radar.
+                      </Text>
+                    </View>
+                  ) : (
+                    itensEncontrados.map((item, idx) => {
+                      let itemLoja = item.loja || item.plataforma;
+                      if (!itemLoja || itemLoja === 'OUTROS' || itemLoja === 'Loja Parceira') {
+                        const detectada = identificarPlataforma(item.url);
+                        if (detectada && detectada !== 'OUTROS') {
+                          itemLoja = detectada;
+                        }
+                      }
+                      itemLoja = itemLoja || 'OUTROS';
+
+                      const lojaFormatada = (itemLoja === 'MERCADO_LIVRE' ? 'Mercado Livre' :
+                        itemLoja === 'CASASBAHIA' ? 'Casas Bahia' :
+                        itemLoja === 'FASTSHOP' ? 'Fast Shop' :
+                        itemLoja === 'FACEBOOK' ? 'Facebook' :
+                        itemLoja);
 
                       return (
-                        <TouchableOpacity 
-                          style={[
-                            styles.btnScanNow, 
-                            (!m.ativo || estaVarrendo) && { opacity: 0.7 },
-                            (emCooldownAntiSpam || emCooldownFree) && { 
-                              backgroundColor: 'rgba(255, 255, 255, 0.08)', 
-                              borderWidth: 1, 
-                              borderColor: 'rgba(255, 255, 255, 0.12)' 
-                            }
-                          ]}
+                        <TouchableOpacity
+                          key={item.id || idx}
+                          style={styles.radarResultItem}
                           onPress={() => {
-                            if (tier !== TIERS.ADMIN && emCooldownAntiSpam) {
-                              showAlert({
-                                title: "Proteção Anti-Spam",
-                                message: `Aguarde mais ${antiSpamRestante}s para varrer este mesmo radar novamente e evitar sobrecarga do servidor.`,
-                                type: "warning",
-                                icon: "time-outline"
-                              });
-                              return;
-                            }
-                            handleDispararVarrer(m.id);
+                            if (item.url) Linking.openURL(item.url);
                           }}
-                          disabled={!m.ativo || estaVarrendo || (tier !== TIERS.ADMIN && (emCooldownAntiSpam || emCooldownFree))}
                           activeOpacity={0.8}
                         >
-                          {estaVarrendo ? (
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                              <ActivityIndicator size="small" color="#08090D" style={{ marginRight: 5 }} />
-                              <Text style={styles.btnScanNowText}>Varrendo...</Text>
-                            </View>
-                          ) : emCooldownAntiSpam ? (
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                              <Ionicons name="time-outline" size={12} color={THEME.textMuted} style={{ marginRight: 4 }} />
-                              <Text style={[styles.btnScanNowText, { color: THEME.textMuted, fontSize: 11 }]}>
-                                {antiSpamRestante}s
-                              </Text>
-                            </View>
-                          ) : emCooldownFree ? (
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                              <Ionicons name="lock-closed" size={11} color={THEME.warning} style={{ marginRight: 4 }} />
-                              <Text style={[styles.btnScanNowText, { color: THEME.warning, fontSize: 11 }]}>
-                                {formatarCooldown(sweepCooldownSeconds)}
-                              </Text>
-                            </View>
+                          {item.imagem_url ? (
+                            <Image source={{ uri: item.imagem_url }} style={styles.radarResultThumb} />
                           ) : (
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                              <Ionicons name="radio-outline" size={13} color="#08090D" style={{ marginRight: 4 }} />
-                              <Text style={styles.btnScanNowText}>Varrer</Text>
+                            <View style={styles.radarResultThumbFallback}>
+                              <Ionicons name="image-outline" size={16} color="#94A3B8" />
                             </View>
                           )}
+                          <View style={{ flex: 1, marginLeft: 10 }}>
+                            <Text style={styles.radarResultTitle} numberOfLines={2}>
+                              {item.title || item.titulo || 'Produto Encontrado'}
+                            </Text>
+
+                            {/* Procedência da Loja & Tag de Desconto */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4, flexWrap: 'wrap', gap: 6 }}>
+                              <View style={styles.radarResultStoreBadge}>
+                                <StoreLogoBadge storeKey={itemLoja} size={13} style={{ marginRight: 4 }} />
+                                <Text style={styles.radarResultStoreName} numberOfLines={1}>
+                                  {lojaFormatada}
+                                </Text>
+                              </View>
+                              {Boolean(item.desconto_pct && item.desconto_pct > 0) && (
+                                <View style={styles.radarResultDiscountTag}>
+                                  <Text style={styles.radarResultDiscountText}>-{item.desconto_pct}%</Text>
+                                </View>
+                              )}
+                            </View>
+
+                            <Text style={styles.radarResultPrice}>
+                              {item.price || item.preco ? `R$ ${Number(item.price || item.preco).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : 'Ver na loja'}
+                            </Text>
+                          </View>
+                          <Ionicons name="open-outline" size={16} color={THEME.primary} />
                         </TouchableOpacity>
                       );
-                    })()}
-
-                    <IconButton 
-                      icon="create-outline" 
-                      onPress={() => navigation.navigate('Criar', { monitor: m })} 
-                      size={34}
-                      iconSize={15}
-                      style={{ marginLeft: 6 }}
-                    />
-                    <IconButton 
-                      icon="trash-outline" 
-                      onPress={() => removerRadar(m.id, m.nome)} 
-                      color={THEME.danger}
-                      size={34}
-                      iconSize={15}
-                      style={{ marginLeft: 6 }}
-                    />
-                  </View>
+                    })
+                  )}
                 </View>
-              </Surface>
-            );
-          })
-        )}
-        <View style={{ height: 90 }} />
+              )}
+
+              {/* Ações do Card */}
+              <View style={styles.radarCardFooter}>
+                {isAdmin && (
+                  <TouchableOpacity 
+                    style={[styles.radarActionBtn, { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' }]}
+                    onPress={() => handleTestarRadar(monitor)}
+                    disabled={testingRadarId === monitor.id}
+                  >
+                    {testingRadarId === monitor.id ? (
+                      <ActivityIndicator size="small" color="#2563EB" style={{ marginRight: 4 }} />
+                    ) : (
+                      <Ionicons name="flash-outline" size={15} color="#2563EB" style={{ marginRight: 4 }} />
+                    )}
+                    <Text style={[styles.radarActionBtnText, { color: '#2563EB', fontWeight: '700' }]}>
+                      {testingRadarId === monitor.id ? 'Testando...' : 'Testar'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                <TouchableOpacity 
+                  style={styles.radarActionBtn}
+                  onPress={() => navigation.navigate('Criar', { monitor })}
+                >
+                  <Ionicons name="create-outline" size={15} color="#334155" style={{ marginRight: 4 }} />
+                  <Text style={styles.radarActionBtnText}>Editar</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity 
+                  style={styles.radarActionBtn}
+                  onPress={() => handleDeleteRadar(monitor)}
+                >
+                  <Ionicons name="trash-outline" size={15} color="#EF4444" style={{ marginRight: 4 }} />
+                  <Text style={[styles.radarActionBtnText, { color: '#EF4444' }]}>Excluir</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          );
+        })}
       </ScrollView>
 
-      {/* BOTÃO FLUTUANTE ADICIONAR */}
-      <TouchableOpacity 
-        style={styles.fabGlow}
-        onPress={handleCriarRadarPress}
+      {/* Floating Action Button (+) */}
+      <TouchableOpacity
+        style={styles.fabBtn}
+        onPress={() => navigation.navigate('Criar')}
         activeOpacity={0.85}
       >
-        <Ionicons name="add" size={28} color="#08090D" />
+        <Ionicons name="add" size={28} color="#FFFFFF" />
       </TouchableOpacity>
     </View>
   );
 }
 
+// =====================================================================
+// ABA 3: CUPONS (INSPIRAÇÃO PECHINCHOU SCREENSHOT 2)
+// =====================================================================
+function CouponsScreen() {
+  const { showAlert } = useContext(RadarContext);
+  const [lojaFiltro, setLojaFiltro] = useState('TODOS');
+  const [cupomCopiadoId, setCupomCopiadoId] = useState(null);
+  const [buscaCupom, setBuscaCupom] = useState('');
 
-// --- TELA 3: ALERTAS / OPORTUNIDADES CAPTURADAS ---
-function AlertsScreen({ navigation }) {
-  const { 
-    resultados, loading, refreshing, onRefresh, fetchData,
-    tier, handleOpenAd, openUpgradeModal, showAlert 
-  } = useContext(RadarContext);
-  const [filtroPlataforma, setFiltroPlataforma] = useState('TODAS');
-  const [buscaTexto, setBuscaTexto] = useState('');
-
-  useEffect(() => {
-    const unsub = navigation.addListener('focus', () => { fetchData(null, true); });
-    return unsub;
-  }, [navigation, fetchData]);
-
-  const resultadosFiltrados = useMemo(() => {
-    return resultados.filter(res => {
-      const plat = identificarPlataforma(res.url);
-      if (filtroPlataforma !== 'TODAS' && plat !== filtroPlataforma) return false;
-      if (buscaTexto.trim()) {
-        const query = buscaTexto.toLowerCase();
-        const matchTitle = (res.title || '').toLowerCase().includes(query);
-        const matchPrice = String(res.price || '').includes(query);
-        if (!matchTitle && !matchPrice) return false;
-      }
-      return true;
+  const cuponsFiltrados = useMemo(() => {
+    return CUPONS_DATABASE.filter(c => {
+      const matchLoja = lojaFiltro === 'TODOS' || c.loja.toLowerCase().includes(lojaFiltro.toLowerCase());
+      const matchBusca = !buscaCupom.trim() || 
+        c.loja.toLowerCase().includes(buscaCupom.toLowerCase()) || 
+        c.cupom.toLowerCase().includes(buscaCupom.toLowerCase()) ||
+        c.descricao.toLowerCase().includes(buscaCupom.toLowerCase());
+      return matchLoja && matchBusca;
     });
-  }, [resultados, filtroPlataforma, buscaTexto]);
+  }, [lojaFiltro, buscaCupom]);
+
+  const handleCopiar = async (item) => {
+    try {
+      try { Vibration.vibrate(50); } catch(e) {}
+      await Clipboard.setStringAsync(item.cupom);
+      setCupomCopiadoId(item.id);
+      setTimeout(() => setCupomCopiadoId(null), 3000);
+      showAlert({
+        title: "Cupom Copiado!",
+        message: `O código "${item.cupom}" foi copiado para sua área de transferência. Cole no carrinho da ${item.loja} para garantir seu desconto!`,
+        type: "success",
+        icon: "checkmark-circle"
+      });
+    } catch(e) {
+      showAlert({ title: "Erro", message: "Não foi possível copiar o código.", type: "error" });
+    }
+  };
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
-      {/* TOP HEADER */}
-      <View style={styles.screenHeader}>
-        <View>
-          <View style={styles.row}>
-            <Text style={styles.screenHeaderTitle}>Oportunidades</Text>
-            {tier === TIERS.FREE && (
-              <View style={{ marginLeft: 8 }}>
-                <LockBadge text="PROTEGIDO" onPress={openUpgradeModal} />
-              </View>
-            )}
-          </View>
-          <Text style={styles.screenHeaderSub}>
-            {resultados.length} anúncios e ofertas detectados
-          </Text>
+      {/* Header Estilo Pechinchou Screenshot 2 */}
+      <View style={styles.pechCuponsHeader}>
+        <View style={styles.row}>
+          <Ionicons name="ticket" size={18} color="#EF4444" style={{ marginRight: 6 }} />
+          <Text style={styles.pechCuponsPreTitle}>Cupons AchôAI</Text>
         </View>
-      </View>
+        <Text style={styles.pechCuponsMainTitle}>
+          Cupons das <Text style={{ color: '#EF4444' }}>Melhores Lojas</Text>
+        </Text>
+        <Text style={styles.pechCuponsSub}>Encontre o cupom das melhores lojas do Brasil!</Text>
 
-      {/* BARRA DE PESQUISA */}
-      <View style={styles.searchBarContainer}>
-        <View style={styles.searchInputWrap}>
-          <Ionicons name="search-outline" size={16} color={THEME.textSubtle} style={{ marginRight: 8 }} />
-          <TextInput 
-            style={styles.searchInput}
-            placeholder="Pesquisar por produto ou valor..."
-            placeholderTextColor={THEME.textSubtle}
-            value={buscaTexto}
-            onChangeText={setBuscaTexto}
+        {/* Input de Busca de Lojas */}
+        <View style={styles.pechCuponsSearchBox}>
+          <TextInput
+            style={styles.pechCuponsSearchInput}
+            placeholder="Busque por lojas..."
+            placeholderTextColor="#94A3B8"
+            value={buscaCupom}
+            onChangeText={setBuscaCupom}
           />
-          {buscaTexto.length > 0 && (
-            <TouchableOpacity onPress={() => setBuscaTexto('')}>
-              <Ionicons name="close-circle" size={16} color={THEME.textSubtle} />
-            </TouchableOpacity>
-          )}
+          <Ionicons name="search" size={20} color="#EF4444" />
         </View>
       </View>
 
-      {/* CHIPS DE FILTRO POR PLATAFORMA */}
-      <View style={styles.filterChipRow}>
-        {['TODAS', 'OLX', 'FACEBOOK', 'MERCADO_LIVRE', 'SHOPEE', 'AMAZON', 'MAGALU', 'KABUM', 'AMERICANAS', 'SHEIN', 'FASTSHOP', 'CARREFOUR', 'CASASBAHIA', 'ZOOM', 'OUTROS'].map(k => {
-          const isSelected = filtroPlataforma === k;
-          const label = k === 'TODAS' ? 'Todas' : k === 'OUTROS' ? 'Web' : k === 'FACEBOOK' ? 'Facebook' : k === 'MERCADO_LIVRE' ? 'Mercado Livre' : k === 'SHOPEE' ? 'Shopee' : k === 'AMAZON' ? 'Amazon' : k === 'MAGALU' ? 'Magalu' : k === 'KABUM' ? 'KaBuM!' : k === 'AMERICANAS' ? 'Americanas' : k === 'SHEIN' ? 'SHEIN' : k === 'FASTSHOP' ? 'Fast Shop' : k === 'CARREFOUR' ? 'Carrefour' : k === 'CASASBAHIA' ? 'Casas Bahia' : k === 'ZOOM' ? 'Zoom' : 'OLX';
-          return (
-            <TouchableOpacity 
-              key={k}
-              style={[styles.filterChip, isSelected && styles.filterChipActive]}
-              onPress={() => setFiltroPlataforma(k)}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.filterChipText, isSelected && styles.filterChipTextActive]}>
-                {label}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-
-      {/* ÁREA DE LISTAGEM COM OVERLAY FROSTED GLASS PARA USUÁRIOS FREE */}
-      <View style={{ flex: 1, position: 'relative' }}>
-        <ScrollView 
-          contentContainerStyle={[styles.scrollArea, { paddingBottom: 90 }]}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.primary} />}
-          showsVerticalScrollIndicator={false}
-          scrollEnabled={tier !== TIERS.FREE}
-        >
-          <View style={styles.alertsTargetContainer}>
-            {loading && resultados.length === 0 ? (
-              <ActivityIndicator size="large" color={THEME.primary} style={{ marginTop: 50 }} />
-            ) : resultadosFiltrados.length === 0 ? (
-              <View style={styles.emptyFullState}>
-                <View style={styles.emptyIconPulseCircle}>
-                  <Ionicons name="notifications-off-outline" size={38} color={THEME.textSubtle} />
-                </View>
-                <Text style={styles.emptyStateTitle}>
-                  {buscaTexto.length > 0 ? 'Nenhum resultado encontrado' : 'Nenhuma oportunidade no momento'}
-                </Text>
-                <Text style={styles.emptyStateSub}>
-                  {buscaTexto.length > 0 
-                    ? 'Tente ajustar os termos de pesquisa ou remover os filtros de plataforma.' 
-                    : 'Quando o robô detectar um anúncio dentro das suas configurações, ele aparecerá aqui imediatamente.'}
-                </Text>
-              </View>
-            ) : (
-              resultadosFiltrados.map(res => {
-                const plat = identificarPlataforma(res.url);
-                const shopeeInfo = plat === 'SHOPEE' 
-                  ? parseShopeeInfo(res.title, res.url) 
-                  : { cleanTitle: res.title, origem: null, desconto: null, score: null, vendidos: null };
-                const mlInfo = plat === 'MERCADO_LIVRE'
-                  ? parseMLInfo(res.title, res.url)
-                  : null;
-                const amzInfo = plat === 'AMAZON'
-                  ? parseAmazonInfo(res.title, res.url)
-                  : null;
-                const magaluInfo = plat === 'MAGALU'
-                  ? parseMagaluInfo(res.title, res.url)
-                  : null;
-                const kabumInfo = plat === 'KABUM'
-                  ? parseKabumInfo(res.title, res.url)
-                  : null;
-                const ameInfo = plat === 'AMERICANAS'
-                  ? parseAmericanasInfo(res.title, res.url)
-                  : null;
-                const sheinInfo = plat === 'SHEIN'
-                  ? parseSheinInfo(res.title, res.url)
-                  : null;
-                const fastshopInfo = plat === 'FASTSHOP'
-                  ? parseFastShopInfo(res.title, res.url)
-                  : null;
-                const carrefourInfo = plat === 'CARREFOUR'
-                  ? parseCarrefourInfo(res.title, res.url)
-                  : null;
-                const casasbahiaInfo = plat === 'CASASBAHIA'
-                  ? parseCasasBahiaInfo(res.title, res.url)
-                  : null;
-                const displayTitle = plat === 'SHOPEE' 
-                  ? shopeeInfo.cleanTitle 
-                  : plat === 'MERCADO_LIVRE' && mlInfo 
-                  ? mlInfo.cleanTitle 
-                  : plat === 'AMAZON' && amzInfo
-                  ? amzInfo.cleanTitle
-                  : plat === 'MAGALU' && magaluInfo
-                  ? magaluInfo.cleanTitle
-                  : plat === 'KABUM' && kabumInfo
-                  ? kabumInfo.cleanTitle
-                  : plat === 'AMERICANAS' && ameInfo
-                  ? ameInfo.cleanTitle
-                  : plat === 'SHEIN' && sheinInfo
-                  ? sheinInfo.cleanTitle
-                  : plat === 'FASTSHOP' && fastshopInfo
-                  ? fastshopInfo.cleanTitle
-                  : plat === 'CARREFOUR' && carrefourInfo
-                  ? carrefourInfo.cleanTitle
-                  : plat === 'CASASBAHIA' && casasbahiaInfo
-                  ? casasbahiaInfo.cleanTitle
-                  : res.title;
-
-                return (
-                  <Surface key={res.id} style={styles.alertCardFull} elevated>
-                    <View style={styles.alertHeaderRow}>
-                      <View style={styles.alertHeaderTagsWrap}>
-                        <PlatformBadge platformKey={plat} />
-                        {plat === 'SHOPEE' && shopeeInfo.origem && (
-                          <ShopeeOriginBadge origem={shopeeInfo.origem} />
-                        )}
-                        {plat === 'SHOPEE' && shopeeInfo.desconto && (
-                          <ShopeeDiscountBadge discount={shopeeInfo.desconto} />
-                        )}
-                        {plat === 'SHOPEE' && (shopeeInfo.score || shopeeInfo.vendidos) && (
-                          <ShopeeRatingBadge score={shopeeInfo.score} vendidos={shopeeInfo.vendidos} />
-                        )}
-                        {plat === 'MERCADO_LIVRE' && mlInfo && mlInfo.isFull && (
-                          <MLFullBadge />
-                        )}
-                        {plat === 'MERCADO_LIVRE' && mlInfo && mlInfo.isFreteGratis && (
-                          <MLFreeShippingBadge />
-                        )}
-                        {plat === 'MERCADO_LIVRE' && mlInfo && mlInfo.desconto && (
-                          <MLDiscountBadge discount={mlInfo.desconto} />
-                        )}
-                        {plat === 'AMAZON' && amzInfo && amzInfo.origem && (
-                          <ShopeeOriginBadge origem={amzInfo.origem} />
-                        )}
-                        {plat === 'AMAZON' && amzInfo && amzInfo.isPrime && (
-                          <AmazonPrimeBadge />
-                        )}
-                        {plat === 'AMAZON' && amzInfo && amzInfo.isFreteGratis && !amzInfo.isPrime && (
-                          <AmazonFreeShippingBadge />
-                        )}
-                        {plat === 'AMAZON' && amzInfo && amzInfo.desconto && (
-                          <AmazonDiscountBadge discount={amzInfo.desconto} />
-                        )}
-                        {plat === 'AMAZON' && amzInfo && amzInfo.score && (
-                          <ShopeeRatingBadge score={amzInfo.score} />
-                        )}
-                        {plat === 'MAGALU' && magaluInfo && magaluInfo.origem && (
-                          <ShopeeOriginBadge origem={magaluInfo.origem} />
-                        )}
-                        {plat === 'MAGALU' && magaluInfo && magaluInfo.isFull && (
-                          <MagaluFullBadge />
-                        )}
-                        {plat === 'MAGALU' && magaluInfo && magaluInfo.isFreteGratis && (
-                          <MagaluFreeShippingBadge />
-                        )}
-                        {plat === 'MAGALU' && magaluInfo && magaluInfo.desconto && (
-                          <MagaluDiscountBadge discount={magaluInfo.desconto} />
-                        )}
-                        {plat === 'MAGALU' && magaluInfo && magaluInfo.score && (
-                          <ShopeeRatingBadge score={magaluInfo.score} />
-                        )}
-                        {plat === 'KABUM' && kabumInfo && kabumInfo.isFreteGratis && (
-                          <KabumFreeShippingBadge />
-                        )}
-                        {plat === 'KABUM' && kabumInfo && kabumInfo.desconto && (
-                          <KabumDiscountBadge discount={kabumInfo.desconto} />
-                        )}
-                        {plat === 'KABUM' && kabumInfo && kabumInfo.score && (
-                          <ShopeeRatingBadge score={kabumInfo.score} />
-                        )}
-                        {plat === 'AMERICANAS' && ameInfo && ameInfo.isEntregaRapida && (
-                          <AmericanasFastDeliveryBadge />
-                        )}
-                        {plat === 'AMERICANAS' && ameInfo && ameInfo.isFreteGratis && (
-                          <AmericanasFreeShippingBadge />
-                        )}
-                        {plat === 'AMERICANAS' && ameInfo && ameInfo.desconto && (
-                          <AmericanasDiscountBadge discount={ameInfo.desconto} />
-                        )}
-                        {plat === 'AMERICANAS' && ameInfo && ameInfo.score && (
-                          <ShopeeRatingBadge score={ameInfo.score} />
-                        )}
-                        {plat === 'SHEIN' && sheinInfo && sheinInfo.origem && (
-                          <ShopeeOriginBadge origem={sheinInfo.origem} />
-                        )}
-                        {plat === 'SHEIN' && sheinInfo && sheinInfo.isMaisVendidos && (
-                          <SheinBestSellerBadge />
-                        )}
-                        {plat === 'SHEIN' && sheinInfo && sheinInfo.desconto && (
-                          <SheinDiscountBadge discount={sheinInfo.desconto} />
-                        )}
-                        {plat === 'SHEIN' && sheinInfo && sheinInfo.score && (
-                          <ShopeeRatingBadge score={sheinInfo.score} />
-                        )}
-                        {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.desconto && (
-                          <FastShopDiscountBadge discount={fastshopInfo.desconto} />
-                        )}
-                        {plat === 'FASTSHOP' && fastshopInfo && fastshopInfo.score && (
-                          <ShopeeRatingBadge score={fastshopInfo.score} />
-                        )}
-                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isFreteGratis && (
-                          <CarrefourFreeShippingBadge />
-                        )}
-                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.parcelamento && (
-                          <CarrefourInstallmentBadge parcelamento={carrefourInfo.parcelamento} />
-                        )}
-                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.isMaisVendidos && (
-                          <CarrefourBestSellerBadge />
-                        )}
-                        {plat === 'CARREFOUR' && carrefourInfo && carrefourInfo.desconto && (
-                          <CarrefourDiscountBadge discount={carrefourInfo.desconto} />
-                        )}
-                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isFreteGratis && (
-                          <CasasBahiaFreeShippingBadge />
-                        )}
-                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.parcelamento && (
-                          <CasasBahiaInstallmentBadge parcelamento={casasbahiaInfo.parcelamento} />
-                        )}
-                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.isMaisVendidos && (
-                          <CasasBahiaBestSellerBadge />
-                        )}
-                        {plat === 'CASASBAHIA' && casasbahiaInfo && casasbahiaInfo.desconto && (
-                          <CasasBahiaDiscountBadge discount={casasbahiaInfo.desconto} />
-                        )}
-                        <View style={styles.robotTag}>
-                          <Ionicons name="checkmark-circle" size={13} color={THEME.success} style={{ marginRight: 4 }} />
-                          <Text style={styles.robotTagText}>Capturado pelo Robô</Text>
-                        </View>
-                      </View>
-                      <Text style={[styles.alertTime, tier === TIERS.FREE && styles.blurredTime]}>
-                        {new Date(res.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-                      </Text>
-                    </View>
-
-                    <Text 
-                      style={[styles.alertTitleFull, tier === TIERS.FREE && styles.blurredTextTitle]}
-                      numberOfLines={2}
-                    >
-                      {displayTitle}
-                    </Text>
-
-                    <View style={styles.alertPriceRow}>
-                      <View>
-                        <Text style={styles.alertPriceLabel}>VALOR CAPTURADO</Text>
-                        {res.price !== null && Number(res.price) > 0 ? (
-                          <Text style={[styles.alertPriceValue, tier === TIERS.FREE && styles.blurredPrice]}>
-                            R$ {Number(res.price).toFixed(2)}
-                          </Text>
-                        ) : (
-                          <Text style={[styles.priceConsult, tier === TIERS.FREE && styles.blurredPrice]}>Sob Consulta</Text>
-                        )}
-                      </View>
-                      
-                      <TouchableOpacity 
-                        style={[styles.btnAlertAction, tier === TIERS.FREE && styles.btnAlertActionLocked]}
-                        onPress={() => {
-                          if (tier === TIERS.FREE) {
-                            openUpgradeModal();
-                          } else {
-                            if (res.url) {
-                              Linking.openURL(formatarUrlAfiliado(res.url)).catch(() => showAlert({
-                                title: "Erro",
-                                message: "Não foi possível abrir o link da oferta.",
-                                type: "error"
-                              }));
-                            }
-                          }
-                        }}
-                        activeOpacity={0.8}
-                      >
-                        <Text style={[styles.btnAlertActionText, tier === TIERS.FREE && styles.btnAlertActionLockedText]}>
-                          {tier === TIERS.FREE ? 'Exclusivo Premium' : 'Acessar Oferta'}
-                        </Text>
-                        <Ionicons 
-                          name={tier === TIERS.FREE ? "lock-closed" : "open-outline"} 
-                          size={13} 
-                          color={tier === TIERS.FREE ? THEME.textMuted : "#08090D"} 
-                          style={{ marginLeft: 5 }} 
-                        />
-                      </TouchableOpacity>
-                    </View>
-                  </Surface>
-                );
-              })
-            )}
-          </View>
-          <View style={{ height: 80 }} />
-        </ScrollView>
-
-        {/* OVERLAY DESFOCADO COM FROSTED GLASS E CADEADO CENTRAL SE FOR FREE */}
-        {tier === TIERS.FREE && (
-          <FrostedOverlay style={[StyleSheet.absoluteFill, styles.alertsFrostedOverlay]}>
-            <View style={styles.alertsLockCard}>
-              <View style={styles.alertsLockIconCircle}>
-                <Ionicons name="lock-closed" size={30} color="#FFF" />
-              </View>
-              <Text style={styles.alertsLockTitle}>Feed de Ofertas Protegido</Text>
-              <Text style={styles.alertsLockSub}>
-                O robô capturou <Text style={{ color: THEME.primary, fontWeight: '800' }}>{resultados.length} oportunidades</Text> para você!
-                {'\n\n'}
-                Para visualizar todas as ofertas sem desfoque e clicar para ser redirecionado diretamente à página de compra, ative o AchôAI Premium.
-              </Text>
-
-              <TouchableOpacity 
-                style={styles.btnAlertsUnlock}
-                onPress={openUpgradeModal}
-                activeOpacity={0.85}
+      {/* Grade de Lojas (2 Colunas - Inspiração Pechinchou Screenshot 2) */}
+      {!buscaCupom && lojaFiltro === 'TODOS' && (
+        <View style={{ height: 110, paddingHorizontal: 16, marginBottom: 8 }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
+            {LOJAS_FILTRO.filter(l => l !== 'TODOS').map(l => (
+              <TouchableOpacity
+                key={l}
+                style={styles.pechStoreCardMini}
+                onPress={() => setLojaFiltro(l)}
               >
-                <Ionicons name="diamond" size={16} color="#08090D" style={{ marginRight: 8 }} />
-                <Text style={styles.btnAlertsUnlockText}>Desbloquear Todas as Ofertas</Text>
+                <StoreLogoBadge storeKey={l} size={36} />
+                <Text style={styles.pechStoreCardMiniName} numberOfLines={1}>{l}</Text>
+                <Text style={styles.pechStoreCardMiniCount}>Cupons ativos</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Lista de Cupons */}
+      <ScrollView contentContainerStyle={styles.cuponsScrollContent} showsVerticalScrollIndicator={false}>
+        {cuponsFiltrados.map((c) => {
+          const isCopiado = cupomCopiadoId === c.id;
+          return (
+            <View key={c.id} style={styles.couponCard}>
+              <View style={styles.couponCardHeader}>
+                <View style={styles.row}>
+                  <StoreLogoBadge storeKey={c.loja} size={22} style={{ marginRight: 6 }} />
+                  <Text style={styles.couponStorePillText}>{c.loja}</Text>
+                </View>
+                <View style={styles.couponDiscountBadge}>
+                  <Text style={styles.couponDiscountBadgeText}>{c.desconto}</Text>
+                </View>
+              </View>
+
+              <Text style={styles.couponDescText}>{c.descricao}</Text>
+              <Text style={styles.couponRulesText}>• {c.regras}</Text>
+
+              {/* Caixa de Código de Cupom */}
+              <View style={styles.couponCodeBox}>
+                <View style={styles.couponCodeTextWrap}>
+                  <Text style={styles.couponCodeText}>{c.cupom}</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.couponCopyBtn, isCopiado && styles.couponCopyBtnDone]}
+                  onPress={() => handleCopiar(c)}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons 
+                    name={isCopiado ? "checkmark-outline" : "copy-outline"} 
+                    size={16} 
+                    color="#FFFFFF" 
+                    style={{ marginRight: 4 }} 
+                  />
+                  <Text style={styles.couponCopyBtnText}>
+                    {isCopiado ? 'COPIADO!' : 'COPIAR'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity
+                style={styles.couponStoreLinkBtn}
+                onPress={() => Linking.openURL(c.url)}
+              >
+                <Text style={styles.couponStoreLinkText}>Ir para {c.loja}</Text>
+                <Ionicons name="arrow-forward" size={14} color={THEME.primary} style={{ marginLeft: 4 }} />
               </TouchableOpacity>
             </View>
-          </FrostedOverlay>
-        )}
-      </View>
+          );
+        })}
+      </ScrollView>
     </View>
   );
 }
 
-
-// --- TELA 4: MODAL DE CRIAÇÃO / EDIÇÃO DE RADAR ---
-function CreateMonitorScreen({ navigation, route }) {
+// =====================================================================
+// ABA 4: PESQUISA INTELIGENTE & COMPARADOR MULTI-LOJAS
+// =====================================================================
+function SearchScreen() {
   const { 
-    currentOwnerId, pushToken, setPushToken, deviceId, user, fetchData, 
-    notificacoesAtivas, alternarNotificacoes,
-    tier, openUpgradeModal, monitores, showAlert 
+    resultados, handleOpenAd, user, currentOwnerId, 
+    openNotif, openSettings, unreadNotifCount, userProfile, 
+    openAuthModal, showAlert 
   } = useContext(RadarContext);
-  const editando = route?.params?.monitor;
 
-  const platInicial = editando ? identificarPlataforma(editando.urls) : 'OLX';
-  const [plataforma, setPlataforma] = useState(platInicial);
+  // Etapas: 'busca' | 'varrendo' (animação 10s) | 'resultados'
+  const [etapaBusca, setEtapaBusca] = useState('busca');
+  const [termo, setTermo] = useState('');
+  const [filtroChip, setFiltroChip] = useState('MAIOR_DESCONTO');
+  const [resultadosInteligentes, setResultadosInteligentes] = useState([]);
 
-  const infoOlx = editando && platInicial === 'OLX' ? extrairInfoOlx(editando.urls) : { uf: 'BR', regiaoSlug: '' };
-  const [estadoUf, setEstadoUf] = useState(infoOlx.uf);
-  const [regiaoSlug, setRegiaoSlug] = useState(infoOlx.regiaoSlug);
+  // Toggle OLX e Facebook Marketplace
+  const [incluirSeminovos, setIncluirSeminovos] = useState(false);
+  
+  // Localização OLX
+  const [olxUf, setOlxUf] = useState('BR');
+  const [olxRegiao, setOlxRegiao] = useState('');
+  const [modalOlxUfVisible, setModalOlxUfVisible] = useState(false);
+  const [modalOlxRegiaoVisible, setModalOlxRegiaoVisible] = useState(false);
 
-  // Carrega última localização de estado e região salva em cache para novos radares
-  useEffect(() => {
-    if (!editando) {
-      AsyncStorage.getItem('@achoai_last_olx_location').then(cached => {
-        if (cached) {
-          try {
-            const parsed = JSON.parse(cached);
-            if (parsed && parsed.uf && OLX_ESTADOS[parsed.uf]) {
-              setEstadoUf(parsed.uf);
-              setRegiaoSlug(parsed.regiaoSlug || '');
-            }
-          } catch (e) {}
-        }
-      });
+  // Localização Facebook Marketplace
+  const [fbUf, setFbUf] = useState('BR');
+  const [fbCidade, setFbCidade] = useState('brasil');
+  const [modalFbUfVisible, setModalFbUfVisible] = useState(false);
+  const [modalFbCidadeVisible, setModalFbCidadeVisible] = useState(false);
+
+  // Itens formatados para os modais de seleção
+  const itensOlxEstados = useMemo(() => {
+    return LISTA_ESTADOS.map(e => ({ id: e.uf, uf: e.uf, nome: e.nome }));
+  }, []);
+
+  const itensOlxRegioes = useMemo(() => {
+    const estado = OLX_ESTADOS[olxUf];
+    return (estado?.regioes || []).map(r => ({ id: r.slug, nome: r.nome, slug: r.slug }));
+  }, [olxUf]);
+
+  const itensFbEstados = useMemo(() => {
+    return LISTA_ESTADOS_FACEBOOK.map(e => ({ id: e.uf, uf: e.uf, nome: e.nome }));
+  }, []);
+
+  const itensFbCidades = useMemo(() => {
+    const estado = FACEBOOK_ESTADOS_CIDADES[fbUf];
+    return (estado?.cidades || []).map(c => ({ id: c.slug, nome: c.nome, slug: c.slug }));
+  }, [fbUf]);
+
+  // Estados da Animação de Varredura Multi-Lojas (10 segundos)
+  const [faseIndex, setFaseIndex] = useState(0);
+  const progressoAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const ringScale = useRef(new Animated.Value(1)).current;
+  const ringOpacity = useRef(new Animated.Value(0.7)).current;
+  const varreduraTimerRef = useRef(null);
+
+  // 10 Categorias Oficiais com consultas representativas para clique direto (termos limpos e assertivos)
+  const CATEGORIAS_PESQUISA = [
+    { key: 'eletroportateis', label: 'Eletroportáteis', icon: 'cafe', bg: '#DCFCE7', query: 'Air Fryer' },
+    { key: 'ar_ventilacao', label: 'Ar e Ventilação', icon: 'snow', bg: '#FCE7F3', query: 'Ventilador' },
+    { key: 'telefonia', label: 'Telefonia', icon: 'phone-portrait', bg: '#FEF9C3', query: 'Smartphone' },
+    { key: 'moda_beleza', label: 'Moda e Beleza', icon: 'color-palette', bg: '#E0F2FE', query: 'Perfume' },
+    { key: 'games', label: 'Games & Consoles', icon: 'game-controller', bg: '#F3E8FF', query: 'PlayStation 5' },
+    { key: 'informatica', label: 'Informática', icon: 'laptop', bg: '#EDE9FE', query: 'Notebook' },
+    { key: 'eletrodomesticos', label: 'Eletrodomésticos', icon: 'cube', bg: '#FCE7F3', query: 'Geladeira' },
+    { key: 'televisao', label: 'Televisão & Áudio', icon: 'tv', bg: '#EDE9FE', query: 'Smart TV' },
+    { key: 'cama_mesa_banho', label: 'Cama, Mesa e Banho', icon: 'bed', bg: '#FFF7ED', query: 'Jogo de Cama' },
+    { key: 'esporte_lazer', label: 'Esporte & Lazer', icon: 'fitness', bg: '#FEF3C7', query: 'Bicicleta' }
+  ];
+
+  const FASES_VARREDURA = [
+    {
+      titulo: "Conectando aos servidores de alta velocidade...",
+      sub: "Inicializando conexão segura e preparando varredura simultânea",
+      icon: "cloud-upload-outline",
+      progresso: 25
+    },
+    {
+      titulo: "Varrendo ofertas em lojas oficiais de varejo...",
+      sub: "Consultando Shopee, Mercado Livre, Amazon, Magalu, Casas Bahia, KaBuM! e SHEIN",
+      icon: "storefront-outline",
+      progresso: 55
+    },
+    {
+      titulo: incluirSeminovos ? "Buscando oportunidades na OLX e Facebook Marketplace..." : "Calibrando menores preços e estoque em tempo real...",
+      sub: incluirSeminovos ? "Rastreando classificados e seminovos na sua região" : "Filtrando as melhores condições e aplicando cupons",
+      icon: "pricetag-outline",
+      progresso: 80
+    },
+    {
+      titulo: "Organizando e comparando menores preços...",
+      sub: "Eliminando fraudes e ordenando os melhores negócios encontrados",
+      icon: "checkmark-done-circle-outline",
+      progresso: 100
     }
-  }, [editando]);
+  ];
 
-  const [cidadeFacebook, setCidadeFacebook] = useState(
-    editando && platInicial === 'FACEBOOK' ? extrairCidadeFacebook(editando.urls) : 'fortaleza'
-  );
-  const [modalEstadoVisivel, setModalEstadoVisivel] = useState(false);
-  const [modalRegiaoVisivel, setModalRegiaoVisivel] = useState(false);
-  const [modalAvisoNotifVisivel, setModalAvisoNotifVisivel] = useState(false);
-  const [ativandoNotif, setAtivandoNotif] = useState(false);
-
-  const [modo, setModo] = useState(editando?.modo === 'noticia' ? 'noticia' : 'produto');
-  const estratInicial = editando 
-    ? ((platInicial === 'MERCADO_LIVRE' || platInicial === 'SHOPEE' || platInicial === 'AMAZON' || platInicial === 'MAGALU' || platInicial === 'KABUM' || platInicial === 'AMERICANAS' || platInicial === 'SHEIN' || platInicial === 'FASTSHOP' || platInicial === 'CARREFOUR' || platInicial === 'CASASBAHIA') && identificarEstrategia(editando) === 'mais_recentes' 
-        ? 'maior_desconto' 
-        : identificarEstrategia(editando)) 
-    : 'menor_preco';
-  const [estrategia, setEstrategia] = useState(estratInicial);
-  const [ordenarMenorPreco, setOrdenarMenorPreco] = useState(
-    editando?.palavras ? editando.palavras.includes('ordenar_menor_preco') : false
-  );
-
-  // Procedência e filtros de produtos na Shopee
-  const isShopeeEdit = editando && platInicial === 'SHOPEE';
-  const palavrasEdit = (editando?.palavras || '').toLowerCase();
-  const urlsEdit = (editando?.urls || '').toLowerCase();
-
-  const initNacional = isShopeeEdit
-    ? (palavrasEdit.includes('shopee_origem:internacional') ? false : true)
-    : true;
-  const initInternacional = isShopeeEdit
-    ? (palavrasEdit.includes('shopee_origem:nacional') || urlsEdit.includes('locations=-1') ? false : true)
-    : true;
-
-  const [shopeeNacional, setShopeeNacional] = useState(initNacional);
-  const [shopeeInternacional, setShopeeInternacional] = useState(initInternacional);
-  const [shopeeMelhorAvaliacao, setShopeeMelhorAvaliacao] = useState(
-    isShopeeEdit ? (palavrasEdit.includes('shopee_melhor_avaliacao:true') || urlsEdit.includes('sortby=sales')) : false
-  );
-
-  // Filtros personalizáveis do Mercado Livre (todos desmarcados por padrão)
-  const isMLEdit = editando && platInicial === 'MERCADO_LIVRE';
-  const [mlFreteGratis, setMlFreteGratis] = useState(
-    isMLEdit ? (palavrasEdit.includes('ml_frete_gratis:true') || urlsEdit.includes('_custofrete_gratis')) : false
-  );
-  const [mlFull, setMlFull] = useState(
-    isMLEdit ? (palavrasEdit.includes('ml_full:true') || urlsEdit.includes('_frete_full')) : false
-  );
-  const [mlNacional, setMlNacional] = useState(
-    isMLEdit ? (palavrasEdit.includes('ml_nacional:true') || urlsEdit.includes('shipping*origin_10215068')) : false
-  );
-  const [mlInternacional, setMlInternacional] = useState(
-    isMLEdit ? (palavrasEdit.includes('ml_internacional:true') || urlsEdit.includes('shipping*origin_10215069')) : false
-  );
-  const [mlNovo, setMlNovo] = useState(
-    isMLEdit ? (palavrasEdit.includes('ml_novo:true') || urlsEdit.includes('/novo/')) : false
-  );
-  const [mlUsado, setMlUsado] = useState(
-    isMLEdit ? (palavrasEdit.includes('ml_usado:true') || urlsEdit.includes('/usado/')) : false
-  );
-
-  // Filtros personalizáveis da Amazon (todos desmarcados por padrão)
-  const isAmzEdit = editando && platInicial === 'AMAZON';
-  const [amzFreteGratis, setAmzFreteGratis] = useState(
-    isAmzEdit ? (palavrasEdit.includes('amz_frete_gratis:true') || urlsEdit.includes('p_n_free_shipping_eligible')) : false
-  );
-  const [amzMelhorAvaliacao, setAmzMelhorAvaliacao] = useState(
-    isAmzEdit ? (palavrasEdit.includes('amz_melhor_avaliacao:true') || urlsEdit.includes('s=review-rank')) : false
-  );
-  const [amzNacional, setAmzNacional] = useState(
-    isAmzEdit ? palavrasEdit.includes('amz_nacional:true') : false
-  );
-  const [amzInternacional, setAmzInternacional] = useState(
-    isAmzEdit ? palavrasEdit.includes('amz_internacional:true') : false
-  );
-  const [amzNovo, setAmzNovo] = useState(
-    isAmzEdit ? palavrasEdit.includes('amz_novo:true') : false
-  );
-  const [amzUsado, setAmzUsado] = useState(
-    isAmzEdit ? palavrasEdit.includes('amz_usado:true') : false
-  );
-
-  // Filtros personalizáveis da Magalu (todos desmarcados por padrão)
-  const isMagaluEdit = editando && platInicial === 'MAGALU';
-  const [magaluFreteGratis, setMagaluFreteGratis] = useState(
-    isMagaluEdit ? palavrasEdit.includes('magalu_frete_gratis:true') : false
-  );
-  const [magaluEntregaRapida, setMagaluEntregaRapida] = useState(
-    isMagaluEdit ? (palavrasEdit.includes('magalu_entrega_rapida:true') || palavrasEdit.includes('magalu_full:true')) : false
-  );
-  const [magaluMelhorAvaliacao, setMagaluMelhorAvaliacao] = useState(
-    isMagaluEdit ? palavrasEdit.includes('magalu_melhor_avaliacao:true') : false
-  );
-  const [magaluNacional, setMagaluNacional] = useState(
-    isMagaluEdit ? palavrasEdit.includes('magalu_nacional:true') : false
-  );
-  const [magaluInternacional, setMagaluInternacional] = useState(
-    isMagaluEdit ? palavrasEdit.includes('magalu_internacional:true') : false
-  );
-
-  // Filtros personalizáveis da KaBuM! (todos desmarcados por padrão)
-  const isKabumEdit = editando && platInicial === 'KABUM';
-  const [kabumFreteGratis, setKabumFreteGratis] = useState(
-    isKabumEdit ? palavrasEdit.includes('kabum_frete_gratis:true') : false
-  );
-  const [kabumMelhorAvaliacao, setKabumMelhorAvaliacao] = useState(
-    isKabumEdit ? palavrasEdit.includes('kabum_melhor_avaliacao:true') : false
-  );
-
-  // Filtros personalizáveis da Americanas (todos desmarcados por padrão)
-  const isAmeEdit = editando && platInicial === 'AMERICANAS';
-  const [ameEntregaRapida, setAmeEntregaRapida] = useState(
-    isAmeEdit ? (palavrasEdit.includes('ame_entrega_rapida:true') || palavrasEdit.includes('americanas_entrega_rapida:true') || palavrasEdit.includes('ame_full:true')) : false
-  );
-  const [ameFreteGratis, setAmeFreteGratis] = useState(
-    isAmeEdit ? (palavrasEdit.includes('ame_frete_gratis:true') || palavrasEdit.includes('americanas_frete_gratis:true')) : false
-  );
-  const [ameMelhorAvaliacao, setAmeMelhorAvaliacao] = useState(
-    isAmeEdit ? (palavrasEdit.includes('ame_melhor_avaliacao:true') || palavrasEdit.includes('americanas_melhor_avaliacao:true')) : false
-  );
-
-  // Filtros personalizáveis da SHEIN
-  const isSheinEdit = editando && platInicial === 'SHEIN';
-  const initSheinNacional = isSheinEdit
-    ? (palavrasEdit.includes('shein_nacional:true') || (!palavrasEdit.includes('shein_internacional:true')))
-    : true;
-  const initSheinInternacional = isSheinEdit
-    ? (palavrasEdit.includes('shein_internacional:true') || (!palavrasEdit.includes('shein_nacional:true')))
-    : true;
-
-  const [sheinNacional, setSheinNacional] = useState(initSheinNacional);
-  const [sheinInternacional, setSheinInternacional] = useState(initSheinInternacional);
-  const [sheinMaisVendidos, setSheinMaisVendidos] = useState(
-    isSheinEdit ? palavrasEdit.includes('shein_mais_vendidos:true') : false
-  );
-  const [sheinMelhorAvaliacao, setSheinMelhorAvaliacao] = useState(
-    isSheinEdit ? palavrasEdit.includes('shein_melhor_avaliacao:true') : false
-  );
-
-  // Filtros personalizáveis da Fast Shop (desmarcado por padrão)
-  const isFastShopEdit = editando && platInicial === 'FASTSHOP';
-  const [fastshopMelhorAvaliacao, setFastshopMelhorAvaliacao] = useState(
-    isFastShopEdit ? palavrasEdit.includes('fastshop_melhor_avaliacao:true') : false
-  );
-
-  // Filtros personalizáveis do Carrefour (desmarcados por padrão)
-  const isCarrefourEdit = editando && platInicial === 'CARREFOUR';
-  const [carrefourFreteGratis, setCarrefourFreteGratis] = useState(
-    isCarrefourEdit ? palavrasEdit.includes('carrefour_frete_gratis:true') : false
-  );
-  const [carrefourParcelamento, setCarrefourParcelamento] = useState(
-    isCarrefourEdit ? palavrasEdit.includes('carrefour_parcelamento:true') : false
-  );
-  const [carrefourMaisVendidos, setCarrefourMaisVendidos] = useState(
-    isCarrefourEdit ? palavrasEdit.includes('carrefour_mais_vendidos:true') : false
-  );
-
-  // Filtros personalizáveis da Casas Bahia (desmarcados por padrão)
-  const isCasasBahiaEdit = editando && platInicial === 'CASASBAHIA';
-  const [casasbahiaFreteGratis, setCasasBahiaFreteGratis] = useState(
-    isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_frete_gratis:true') : false
-  );
-  const [casasbahiaParcelamento, setCasasBahiaParcelamento] = useState(
-    isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_parcelamento:true') : false
-  );
-  const [casasbahiaMaisVendidos, setCasasBahiaMaisVendidos] = useState(
-    isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_mais_vendidos:true') : false
-  );
-
-  const [apenasMaiorDesconto, setApenasMaiorDesconto] = useState(
-    isMLEdit ? palavrasEdit.includes('ml_apenas_maior_desconto:true') : (isShopeeEdit ? (palavrasEdit.includes('shopee_apenas_maior_desconto:true') || palavrasEdit.includes('ml_apenas_maior_desconto:true')) : (isAmzEdit ? palavrasEdit.includes('amz_apenas_maior_desconto:true') : (isMagaluEdit ? palavrasEdit.includes('magalu_apenas_maior_desconto:true') : (isKabumEdit ? palavrasEdit.includes('kabum_apenas_maior_desconto:true') : (isAmeEdit ? (palavrasEdit.includes('ame_apenas_maior_desconto:true') || palavrasEdit.includes('americanas_apenas_maior_desconto:true')) : (isSheinEdit ? palavrasEdit.includes('shein_apenas_maior_desconto:true') : (isFastShopEdit ? palavrasEdit.includes('fastshop_apenas_maior_desconto:true') : (isCarrefourEdit ? palavrasEdit.includes('carrefour_apenas_maior_desconto:true') : (isCasasBahiaEdit ? palavrasEdit.includes('casasbahia_apenas_maior_desconto:true') : false)))))))))
-  );
-
-  const [nome, setNome] = useState(editando?.nome || '');
-  const [produto, setProduto] = useState(editando?.produto || '');
-  const [urls, setUrls] = useState(editando?.urls || '');
-  const [precoAlvo, setPrecoAlvo] = useState(editando?.preco_alvo ? String(editando.preco_alvo) : '');
-  const [margem, setMargem] = useState(String(editando?.margem || '15'));
-  const [palavras, setPalavras] = useState(editando?.modo === 'noticia' ? (editando?.palavras || '') : '');
-  const [intervalo, setIntervalo] = useState(
-    tier === TIERS.FREE ? '180' : String(editando?.intervalo_valor || '30')
-  );
-  const [salvando, setSalvando] = useState(false);
-
-  useEffect(() => {
-    navigation.setOptions({
-      title: editando ? 'Editar Radar de Varredura' : 'Novo Radar de Varredura'
-    });
-  }, [navigation, editando]);
-
-  const regioesDoEstado = (OLX_ESTADOS[estadoUf]?.regioes) || [{ nome: 'Todo o Estado', slug: '' }];
-  const regiaoAtual = regioesDoEstado.find(r => r.slug === regiaoSlug) || regioesDoEstado[0];
-
-  const alvoNum = Number(precoAlvo) || 0;
-  const margemNum = Number(margem) || 0;
-  const minEstimado = alvoNum - (alvoNum * (margemNum / 100));
-  const maxEstimado = alvoNum + (alvoNum * (margemNum / 100));
-
-  const executarSalvamento = async () => {
-    let urlFinal = '';
-    if (plataforma === 'OLX') {
-      urlFinal = gerarUrlOlx(estadoUf, regiaoSlug, produto);
-      AsyncStorage.setItem('@achoai_last_olx_location', JSON.stringify({ uf: estadoUf, regiaoSlug })).catch(() => {});
-    } else if (plataforma === 'FACEBOOK') {
-      const slugCidade = normalizarSlugCidade(cidadeFacebook) || 'fortaleza';
-      urlFinal = `https://www.facebook.com/marketplace/${slugCidade}/search/?query=${encodeURIComponent(produto.trim())}`;
-    } else if (plataforma === 'ZOOM') {
-      urlFinal = `https://www.zoom.com.br/search?q=${encodeURIComponent(produto.trim())}`;
-    } else if (plataforma === 'SHOPEE') {
-      let sortParam = (shopeeMelhorAvaliacao || estrategia === 'maior_desconto') ? 'sales' : (estrategia === 'menor_preco' ? 'price_asc' : 'ctime');
-      let shopeeQuery = `keyword=${encodeURIComponent(produto.trim())}&noCorrection=true&page=0&sortBy=${sortParam}`;
-      if (shopeeNacional && !shopeeInternacional) {
-        shopeeQuery += '&locations=-1';
-      }
-      urlFinal = `https://shopee.com.br/search?${shopeeQuery}`;
-    } else if (plataforma === 'MERCADO_LIVRE') {
-      let termoSlug = produto.trim()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-      if (!termoSlug) termoSlug = 'produtos';
-
-      let pathPrefix = '';
-      if (mlNovo && !mlUsado) {
-        pathPrefix = '/novo';
-      } else if (!mlNovo && mlUsado) {
-        pathPrefix = '/usado';
-      }
-
-      let suffixes = '';
-      if (mlFreteGratis) suffixes += '_CustoFrete_Gratis';
-      if (mlFull) suffixes += '_Frete_Full';
-      if (mlNacional && !mlInternacional) suffixes += '_SHIPPING*ORIGIN_10215068';
-      else if (!mlNacional && mlInternacional) suffixes += '_SHIPPING*ORIGIN_10215069';
-
-      if (estrategia === 'maior_desconto') {
-        suffixes += '_Discount_5-100';
-      } else if (estrategia === 'menor_preco') {
-        suffixes += '_OrderId_PRICE_ASC';
-      }
-
-      urlFinal = `https://lista.mercadolivre.com.br${pathPrefix}/${termoSlug}${suffixes}`;
-    } else if (plataforma === 'AMAZON') {
-      urlFinal = `https://www.amazon.com.br/s?k=${encodeURIComponent(produto.trim())}`;
-    } else if (plataforma === 'MAGALU') {
-      let termoMagalu = produto.trim().replace(/\s+/g, '+');
-      urlFinal = `https://www.magazineluiza.com.br/busca/${encodeURIComponent(termoMagalu)}/`;
-      if (estrategia === 'menor_preco') {
-        urlFinal += '?sortType=price&sortOrientation=asc';
-      }
-    } else if (plataforma === 'KABUM') {
-      let termoKabum = produto.trim().replace(/\s+/g, '-').toLowerCase();
-      urlFinal = `https://www.kabum.com.br/busca/${encodeURIComponent(termoKabum)}`;
-      if (estrategia === 'menor_preco') {
-        urlFinal += '?sort=price';
-      }
-    } else if (plataforma === 'AMERICANAS') {
-      let termoAme = produto.trim();
-      let orderParam = (estrategia === 'menor_preco') ? 'OrderByPriceASC' : (ameMelhorAvaliacao ? 'OrderByReviewRateDESC' : 'OrderByTopSaleDESC');
-      urlFinal = `https://www.americanas.com.br/api/catalog_system/pub/products/search?ft=${encodeURIComponent(termoAme)}&O=${orderParam}&_from=0&_to=49`;
-    } else if (plataforma === 'SHEIN') {
-      let termoShein = produto.trim().replace(/\s+/g, '-');
-      urlFinal = `https://br.shein.com/pdsearch/${encodeURIComponent(termoShein)}/`;
-    } else if (plataforma === 'FASTSHOP') {
-      let termoFs = produto.trim();
-      urlFinal = `https://site.fastshop.com.br/s?q=${encodeURIComponent(termoFs)}&fuzzy=0&operator=and&facets=fuzzy%2Coperator&page=0`;
-    } else if (plataforma === 'CARREFOUR') {
-      let termoCrf = produto.trim();
-      urlFinal = `https://www.carrefour.com.br/busca/${encodeURIComponent(termoCrf)}`;
-    } else if (plataforma === 'CASASBAHIA') {
-      let termoCb = produto.trim();
-      let slugCb = termoCb.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-      urlFinal = `https://www.casasbahia.com.br/${encodeURIComponent(slugCb)}/b`;
-    } else {
-      urlFinal = urls.trim();
-    }
-
-    let modoFinal = 'mais_recentes';
-    let tagsArray = [];
-
-    if (modo === 'noticia') {
-      modoFinal = 'noticia';
-      tagsArray.push(palavras.trim());
-    } else {
-      modoFinal = estrategia;
-      if (estrategia === 'mais_recentes' && ordenarMenorPreco) {
-        tagsArray.push('ordenar_menor_preco:true');
-      }
-      if (plataforma === 'SHOPEE') {
-        if (shopeeNacional && !shopeeInternacional) {
-          tagsArray.push('shopee_origem:nacional');
-        } else if (!shopeeNacional && shopeeInternacional) {
-          tagsArray.push('shopee_origem:internacional');
-        } else {
-          tagsArray.push('shopee_origem:todas');
-        }
-        if (shopeeMelhorAvaliacao) {
-          tagsArray.push('shopee_melhor_avaliacao:true');
-        }
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('shopee_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'MERCADO_LIVRE') {
-        if (mlFreteGratis) tagsArray.push('ml_frete_gratis:true');
-        if (mlFull) tagsArray.push('ml_full:true');
-        if (mlNacional) tagsArray.push('ml_nacional:true');
-        if (mlInternacional) tagsArray.push('ml_internacional:true');
-        if (mlNovo) tagsArray.push('ml_novo:true');
-        if (mlUsado) tagsArray.push('ml_usado:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('ml_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'AMAZON') {
-        if (amzFreteGratis) tagsArray.push('amz_frete_gratis:true');
-        if (amzMelhorAvaliacao) tagsArray.push('amz_melhor_avaliacao:true');
-        if (amzNacional) tagsArray.push('amz_nacional:true');
-        if (amzInternacional) tagsArray.push('amz_internacional:true');
-        if (amzNovo) tagsArray.push('amz_novo:true');
-        if (amzUsado) tagsArray.push('amz_usado:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('amz_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'MAGALU') {
-        if (magaluFreteGratis) tagsArray.push('magalu_frete_gratis:true');
-        if (magaluEntregaRapida) tagsArray.push('magalu_entrega_rapida:true');
-        if (magaluMelhorAvaliacao) tagsArray.push('magalu_melhor_avaliacao:true');
-        if (magaluNacional) tagsArray.push('magalu_nacional:true');
-        if (magaluInternacional) tagsArray.push('magalu_internacional:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('magalu_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'KABUM') {
-        if (kabumFreteGratis) tagsArray.push('kabum_frete_gratis:true');
-        if (kabumMelhorAvaliacao) tagsArray.push('kabum_melhor_avaliacao:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('kabum_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'AMERICANAS') {
-        if (ameEntregaRapida) tagsArray.push('ame_entrega_rapida:true');
-        if (ameFreteGratis) tagsArray.push('ame_frete_gratis:true');
-        if (ameMelhorAvaliacao) tagsArray.push('ame_melhor_avaliacao:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('ame_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'SHEIN') {
-        if (sheinNacional && !sheinInternacional) {
-          tagsArray.push('shein_nacional:true');
-        } else if (!sheinNacional && sheinInternacional) {
-          tagsArray.push('shein_internacional:true');
-        }
-        if (sheinMaisVendidos) tagsArray.push('shein_mais_vendidos:true');
-        if (sheinMelhorAvaliacao) tagsArray.push('shein_melhor_avaliacao:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('shein_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'FASTSHOP') {
-        if (fastshopMelhorAvaliacao) tagsArray.push('fastshop_melhor_avaliacao:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('fastshop_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'CARREFOUR') {
-        if (carrefourFreteGratis) tagsArray.push('carrefour_frete_gratis:true');
-        if (carrefourParcelamento) tagsArray.push('carrefour_parcelamento:true');
-        if (carrefourMaisVendidos) tagsArray.push('carrefour_mais_vendidos:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('carrefour_apenas_maior_desconto:true');
-        }
-      }
-      if (plataforma === 'CASASBAHIA') {
-        if (casasbahiaFreteGratis) tagsArray.push('casasbahia_frete_gratis:true');
-        if (casasbahiaParcelamento) tagsArray.push('casasbahia_parcelamento:true');
-        if (casasbahiaMaisVendidos) tagsArray.push('casasbahia_mais_vendidos:true');
-        if (estrategia === 'maior_desconto' && apenasMaiorDesconto) {
-          tagsArray.push('casasbahia_apenas_maior_desconto:true');
-        }
-      }
-    }
-    const palavrasFinal = tagsArray.filter(Boolean).join(',');
-
-    const intervaloFinal = tier === TIERS.FREE ? 180 : Math.max(15, Number(intervalo) || 30);
-
-    const payload = {
-      usuario_id: currentOwnerId,
-      nome: nome.trim(),
-      urls: urlFinal,
-      modo: modoFinal,
-      produto: produto.trim(),
-      preco_alvo: (estrategia === 'por_preco' && alvoNum > 0) ? alvoNum : null,
-      margem: margemNum,
-      palavras: palavrasFinal,
-      intervalo_valor: intervaloFinal,
-      intervalo_unidade: 'minutos',
-      ativo: true,
-      forcar_teste: false
-    };
-
-    try {
-      setSalvando(true);
-      if (editando) {
-        await RadarAPI.updateMonitor(editando.id, payload);
-        fetchData(null, true);
-        showAlert({
-          title: "Radar Atualizado!",
-          message: `As configurações de "${nome.trim()}" foram atualizadas e o robô já está operando com as novas regras!`,
-          type: "radar_saved",
-          icon: "thumbs-up",
-          confirmText: "Ver Meus Radares",
-          onConfirm: () => navigation.goBack()
-        });
-      } else {
-        await RadarAPI.createMonitor(payload);
-        fetchData(null, true);
-        showAlert({
-          title: "Radar em Operação!",
-          message: `O monitor "${nome.trim()}" foi salvo com sucesso! O robô de busca já iniciou o monitoramento conforme o intervalo programado.`,
-          type: "radar_saved",
-          icon: "thumbs-up",
-          confirmText: "Ver Meus Radares",
-          onConfirm: () => navigation.goBack()
-        });
-      }
-    } catch (e) {
+  // Inicia o processo de pesquisa inteligente com tempo estendido e polling em tempo real
+  const handleIniciarPesquisaInteligente = async (termoInput) => {
+    const termoFinal = (termoInput || termo || '').trim();
+    if (!termoFinal) {
       showAlert({
-        title: "Erro ao Salvar",
-        message: "Falha de conexão com o Supabase ao salvar radar.",
-        type: "error"
-      });
-    } finally {
-      setSalvando(false);
-    }
-  };
-
-  const tentarAtivarNotificacoes = async () => {
-    try {
-      setAtivandoNotif(true);
-      await alternarNotificacoes(true);
-      const token = await registerPushToken(deviceId, user?.id);
-      if (token && String(token).startsWith('ExponentPushToken')) {
-        setPushToken(token);
-        setModalAvisoNotifVisivel(false);
-        showAlert({
-          title: "Notificações Ativadas!",
-          message: "Seu aparelho agora receberá alertas instantâneos de novas oportunidades.",
-          type: "success",
-          icon: "notifications-outline"
-        });
-        await executarSalvamento();
-      } else {
-        showAlert({
-          title: "Permissão Necessária",
-          message: "Não será possível receber as notificações dos alertas. Habilite as notificações nas configurações do seu celular.",
-          type: "confirm_warning",
-          icon: "notifications-off-outline",
-          confirmText: "Salvar sem Notificações",
-          cancelText: "Cancelar",
-          showCancel: true,
-          onConfirm: () => {
-            setModalAvisoNotifVisivel(false);
-            executarSalvamento();
-          }
-        });
-      }
-    } catch (e) {
-      showAlert({
-        title: "Aviso",
-        message: "Falha ao registrar notificações no aparelho.",
-        type: "warning"
-      });
-    } finally {
-      setAtivandoNotif(false);
-    }
-  };
-
-  const salvar = async () => {
-    if (!nome.trim() || !intervalo.trim()) {
-      showAlert({
-        title: "Campos Obrigatórios",
-        message: "Informe ao menos o Nome do Radar e a Frequência.",
+        title: "Atenção",
+        message: "Digite o que você deseja procurar ou selecione um segmento.",
         type: "warning",
         icon: "alert-circle"
       });
       return;
     }
 
-    const intervaloNum = Number(intervalo);
-    if (tier !== TIERS.FREE && (isNaN(intervaloNum) || intervaloNum < 15)) {
-      showAlert({
-        title: "Frequência Mínima de 15 min",
-        message: "O tempo mínimo permitido entre varreduras é de 15 minutos para evitar sobrecarga no servidor.",
-        type: "warning",
-        icon: "time-outline"
-      });
-      return;
+    setTermo(termoFinal);
+    RecommendationEngine.registrarPesquisaOuRadar(termoFinal, currentOwnerId);
+
+    // Monta lista de URLs oficiais das 10 maiores varejistas e classificados
+    const termoEnc = encodeURIComponent(termoFinal);
+    const termoSlug = termoFinal.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const listaUrls = [
+      `https://lista.mercadolivre.com.br/${termoEnc}`,
+      `https://shopee.com.br/search?keyword=${termoEnc}`,
+      `https://www.amazon.com.br/s?k=${termoEnc}`,
+      `https://www.magazineluiza.com.br/busca/${termoEnc}/`,
+      `https://www.casasbahia.com.br/${termoSlug}/b`,
+      `https://www.kabum.com.br/busca/${termoEnc}`,
+      `https://br.shein.com/pdsearch/${termoEnc}`,
+      `https://www.carrefour.com.br/busca/${termoEnc}`,
+      `https://site.fastshop.com.br/s?q=${termoEnc}`,
+      `https://www.americanas.com.br/busca/${termoEnc}`
+    ];
+
+    if (incluirSeminovos) {
+      const olxUrl = gerarUrlOlx(olxUf, olxRegiao, termoFinal);
+      const fbUrl = gerarUrlFacebook(fbCidade, termoFinal);
+      if (olxUrl) listaUrls.push(olxUrl);
+      if (fbUrl) listaUrls.push(fbUrl);
     }
 
-    // Validação de limite no Plano Free
-    if (!editando && tier === TIERS.FREE && (monitores || []).length >= 1) {
-      showAlert({
-        title: "Limite do Plano Free",
-        message: "Usuários do plano Free só podem criar 1 radar por vez. Desbloqueie até 5 radares simultâneos e varreduras de 15 minutos assinando o AchôAI Premium!",
-        type: "warning",
-        icon: "lock-closed",
-        confirmText: "Ver Planos",
-        cancelText: "Entendi",
-        showCancel: true,
-        onConfirm: openUpgradeModal
-      });
-      return;
-    }
+    // Transiciona para a animação de varredura
+    setEtapaBusca('varrendo');
+    setFaseIndex(0);
+    progressoAnim.setValue(0);
 
-    if (plataforma === 'OUTROS') {
-      if (tier === TIERS.FREE) {
-        showAlert({
-          title: "Recurso Premium",
-          message: "A plataforma Outros Sites é exclusiva para assinantes Premium.",
-          type: "warning",
-          icon: "lock-closed",
-          confirmText: "Ver Planos",
-          cancelText: "Voltar",
-          showCancel: true,
-          onConfirm: openUpgradeModal
-        });
-        return;
-      }
-      if (!urls.trim()) {
-        showAlert({
-          title: "Campos Obrigatórios",
-          message: "Informe a URL da página para monitorar.",
-          type: "warning",
-          icon: "alert-circle"
-        });
-        return;
-      }
-      if (modo === 'noticia' && !palavras.trim()) {
-        showAlert({
-          title: "Campos Obrigatórios",
-          message: "Informe ao menos uma palavra-chave.",
-          type: "warning",
-          icon: "alert-circle"
-        });
-        return;
-      }
-      if (modo === 'produto' && !produto.trim()) {
-        showAlert({
-          title: "Campos Obrigatórios",
-          message: "Informe o termo do anúncio pesquisado.",
-          type: "warning",
-          icon: "alert-circle"
-        });
-        return;
-      }
-    } else {
-      if (!produto.trim()) {
-        showAlert({
-          title: "Campos Obrigatórios",
-          message: "Informe o termo do anúncio (ex: iPhone 15, Notebook Dell, Cadeira Gamer).",
-          type: "warning",
-          icon: "alert-circle"
-        });
-        return;
-      }
-    }
+    // Animação contínua do radar
+    Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(ringScale, {
+            toValue: 2.2,
+            duration: 1800,
+            easing: Easing.out(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(ringOpacity, {
+            toValue: 0,
+            duration: 1800,
+            useNativeDriver: true,
+          }),
+          Animated.sequence([
+            Animated.timing(pulseAnim, { toValue: 1.15, duration: 900, useNativeDriver: true }),
+            Animated.timing(pulseAnim, { toValue: 1, duration: 900, useNativeDriver: true }),
+          ]),
+        ]),
+        Animated.parallel([
+          Animated.timing(ringScale, { toValue: 1, duration: 0, useNativeDriver: true }),
+          Animated.timing(ringOpacity, { toValue: 0.7, duration: 0, useNativeDriver: true }),
+        ])
+      ])
+    ).start();
 
-    if (estrategia === 'por_preco' && modo !== 'noticia') {
-      if (tier === TIERS.FREE) {
-        showAlert({
-          title: "Recurso Premium",
-          message: "A estratégia Por Preço Alvo é exclusiva para assinantes Premium.",
-          type: "warning",
-          icon: "lock-closed",
-          confirmText: "Ver Planos",
-          cancelText: "Voltar",
-          showCancel: true,
-          onConfirm: openUpgradeModal
-        });
-        return;
-      }
-      if (!precoAlvo.trim() || alvoNum <= 0) {
-        showAlert({
-          title: "Preço Alvo Obrigatório",
-          message: "Na estratégia 'Rastrear pelo Preço', digite o valor alvo desejado (em R$).",
-          type: "warning",
-          icon: "pricetag-outline"
-        });
-        return;
-      }
-    }
+    // Barra de progresso para 25 segundos
+    Animated.timing(progressoAnim, {
+      toValue: 100,
+      duration: 25000,
+      easing: Easing.linear,
+      useNativeDriver: false,
+    }).start();
 
-    const temPushToken = Boolean(pushToken && String(pushToken).startsWith('ExponentPushToken'));
-    const notificacoesProntas = Boolean(notificacoesAtivas && temPushToken);
-    if (!notificacoesProntas && !editando) {
-      setModalAvisoNotifVisivel(true);
-      return;
-    }
+    // Fases da varredura sincronizadas
+    const t1 = setTimeout(() => setFaseIndex(1), 3000);
+    const t2 = setTimeout(() => setFaseIndex(2), 9000);
+    const t3 = setTimeout(() => setFaseIndex(3), 16000);
 
-    await executarSalvamento();
+    const owner = currentOwnerId || 'anonimo';
+    let activePesquisaId = null;
+
+    // 1. Limpeza em cascata preventiva de buscas anteriores deste usuário (SEM TOCAR EM MONITORES)
+    try {
+      await Promise.allSettled([
+        supabase.from('pesquisas').delete().eq('usuario_id', owner),
+        supabase.from('pesquisa_resultados').delete().eq('usuario_id', owner),
+        supabase.from('resultados').delete().eq('usuario_id', owner).eq('destaque_label', 'pesquisa_inteligente'),
+        supabase.from('usuario_interesses').delete().eq('usuario_id', owner).in('origem', ['pesquisa_pendente', 'pesquisa_processando', 'pesquisa_concluida'])
+      ]);
+    } catch (e_clean) {}
+
+    // 2. Registra solicitação no motor de busca dedicado
+    try {
+      const { data: pesqData } = await supabase.from('pesquisas').insert({
+        usuario_id: owner,
+        termo: termoFinal,
+        incluir_seminovos: Boolean(incluirSeminovos),
+        status: 'pendente'
+      }).select().maybeSingle();
+      if (pesqData?.id) {
+        activePesquisaId = pesqData.id;
+      }
+    } catch (e_p) {}
+
+    try {
+      await supabase.from('usuario_interesses').upsert({
+        usuario_id: owner,
+        termo: termoFinal,
+        peso: incluirSeminovos ? 1 : 0,
+        origem: 'pesquisa_pendente',
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'usuario_id, termo' });
+    } catch (e_fila) {}
+
+    let buscaFinalizada = false;
+
+    const finalizarBuscaComResultados = async () => {
+      if (buscaFinalizada) return;
+      buscaFinalizada = true;
+      clearInterval(pollInterval);
+      if (varreduraTimerRef.current) clearTimeout(varreduraTimerRef.current);
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+
+      let itensColetados = [];
+
+      // 1. Busca da tabela dedicada pesquisa_resultados ordenada por maior desconto
+      try {
+        let q = supabase.from('pesquisa_resultados').select('*');
+        if (activePesquisaId) {
+          q = q.eq('pesquisa_id', activePesquisaId);
+        } else {
+          q = q.eq('usuario_id', owner);
+        }
+        const { data: resDedicados } = await q
+          .order('desconto_pct', { ascending: false })
+          .order('price', { ascending: true })
+          .limit(250);
+        if (resDedicados && resDedicados.length > 0) {
+          itensColetados = resDedicados.map(r => ({
+            id: r.id,
+            titulo: r.title,
+            preco: r.price ? parseFloat(r.price) : null,
+            preco_original: r.preco_original ? parseFloat(r.preco_original) : (r.price ? Math.round(parseFloat(r.price) * 1.22) : null),
+            imagem_url: r.imagem_url,
+            url: r.url,
+            loja: r.loja || RecommendationEngine.identificarLojaPorUrl(r.url),
+            desconto_pct: r.desconto_pct || (r.preco_original && r.price ? Math.round(((r.preco_original - r.price) / r.preco_original) * 100) : 18),
+            destaque_label: r.destaque_label || 'Oferta Verificada',
+            is_seminovo: Boolean(r.is_seminovo || r.loja === 'OLX' || r.loja === 'Facebook Marketplace' || (r.url && (r.url.includes('olx.com') || r.url.includes('facebook.com')))),
+            frete_gratis: Boolean(r.frete_gratis !== false)
+          }));
+        }
+      } catch (e_ded) {}
+
+      // 2. Se não encontrou na tabela dedicada, busca de resultados com destaque_label='pesquisa_inteligente'
+      if (itensColetados.length === 0) {
+        try {
+          const { data: resDb } = await supabase
+            .from('resultados')
+            .select('*')
+            .eq('usuario_id', owner)
+            .eq('destaque_label', 'pesquisa_inteligente')
+            .order('price', { ascending: true })
+            .limit(100);
+
+          if (resDb && resDb.length > 0) {
+            itensColetados = resDb.map(r => ({
+              id: r.id,
+              titulo: r.title,
+              preco: r.price ? parseFloat(r.price) : null,
+              preco_original: r.preco_original ? parseFloat(r.preco_original) : (r.price ? Math.round(parseFloat(r.price) * 1.22) : null),
+              imagem_url: r.imagem_url,
+              url: r.url,
+              loja: r.loja || RecommendationEngine.identificarLojaPorUrl(r.url),
+              desconto_pct: r.desconto_pct || 18,
+              destaque_label: r.destaque_label || 'Oferta Verificada',
+              is_seminovo: Boolean(r.loja === 'OLX' || r.loja === 'Facebook Marketplace' || (r.url && (r.url.includes('olx.com') || r.url.includes('facebook.com')))),
+              frete_gratis: true
+            }));
+          }
+        } catch (e_res) {}
+      }
+
+      // IMPORTANTE: NÃO realizar busca com match fraco/solto em 'resultados' de outras pesquisas/monitores
+      // para evitar retornar produtos irrelevantes (ex: TV quando o usuário pesquisou Cama).
+
+      setResultadosInteligentes(itensColetados);
+      setEtapaBusca('resultados');
+    };
+
+    // Polling a cada 1.5s: finaliza assim que o motor concluir a pesquisa multiloja
+    const pollInterval = setInterval(async () => {
+      if (buscaFinalizada) return;
+      try {
+        if (activePesquisaId) {
+          const { data: pRow } = await supabase
+            .from('pesquisas')
+            .select('status, total_encontrados')
+            .eq('id', activePesquisaId)
+            .maybeSingle();
+
+          if (pRow && pRow.status === 'concluido') {
+            finalizarBuscaComResultados();
+            return;
+          }
+        }
+      } catch (e_poll) {}
+    }, 1500);
+
+    // Timeout de segurança de 32s para concluir com os melhores dados coletados
+    varreduraTimerRef.current = setTimeout(() => {
+      finalizarBuscaComResultados();
+    }, 32000);
   };
+
+  useEffect(() => {
+    return () => {
+      if (varreduraTimerRef.current) clearTimeout(varreduraTimerRef.current);
+      const owner = currentOwnerId || 'anonimo';
+      try {
+        supabase.from('pesquisas').delete().eq('usuario_id', owner).then();
+        supabase.from('pesquisa_resultados').delete().eq('usuario_id', owner).then();
+        supabase.from('resultados').delete().eq('usuario_id', owner).eq('destaque_label', 'pesquisa_inteligente').then();
+        supabase.from('usuario_interesses').delete().eq('usuario_id', owner).in('origem', ['pesquisa_pendente', 'pesquisa_processando', 'pesquisa_concluida']).then();
+      } catch (e) {}
+    };
+  }, [currentOwnerId]);
+
+  const handleResultClick = (item) => {
+    RecommendationEngine.registrarClique(item.titulo || item.title, currentOwnerId, item.loja);
+    if (handleOpenAd) {
+      handleOpenAd(item);
+    } else if (item.url) {
+      Linking.openURL(item.url);
+    }
+  };
+
+  const handleReiniciarPesquisa = async () => {
+    const owner = currentOwnerId || 'anonimo';
+    try {
+      supabase.from('pesquisas').delete().eq('usuario_id', owner).then();
+      supabase.from('pesquisa_resultados').delete().eq('usuario_id', owner).then();
+      supabase.from('resultados').delete().eq('usuario_id', owner).eq('destaque_label', 'pesquisa_inteligente').then();
+      supabase.from('usuario_interesses').delete().eq('usuario_id', owner).in('origem', ['pesquisa_pendente', 'pesquisa_processando', 'pesquisa_concluida']).then();
+    } catch (e) {}
+    setEtapaBusca('busca');
+    setTermo('');
+    setFiltroChip('MAIOR_DESCONTO');
+    setResultadosInteligentes([]);
+  };
+
+  // Filtragem dos Resultados da Pesquisa Multi-Lojas
+  const resultadosFiltrados = useMemo(() => {
+    let lista = [...resultadosInteligentes];
+
+    if (filtroChip === 'MENOR_PRECO') {
+      lista.sort((a, b) => (parseFloat(a.preco) || 0) - (parseFloat(b.preco) || 0));
+    } else if (filtroChip === 'MAIOR_DESCONTO' || filtroChip === 'TODOS') {
+      lista.sort((a, b) => (parseInt(b.desconto_pct) || 0) - (parseInt(a.desconto_pct) || 0) || (parseFloat(a.preco) || 0) - (parseFloat(b.preco) || 0));
+    } else if (filtroChip === 'SEMINOVOS') {
+      lista = lista.filter(item => Boolean(item.is_seminovo) || item.loja === 'OLX' || item.loja === 'Facebook Marketplace');
+      lista.sort((a, b) => (parseInt(b.desconto_pct) || 0) - (parseInt(a.desconto_pct) || 0) || (parseFloat(a.preco) || 0) - (parseFloat(b.preco) || 0));
+    } else if (filtroChip === 'LOJAS_OFICIAIS') {
+      lista = lista.filter(item => !item.is_seminovo && item.loja !== 'OLX' && item.loja !== 'Facebook Marketplace');
+      lista.sort((a, b) => (parseInt(b.desconto_pct) || 0) - (parseInt(a.desconto_pct) || 0) || (parseFloat(a.preco) || 0) - (parseFloat(b.preco) || 0));
+    } else if (filtroChip === 'FRETE_GRATIS') {
+      lista = lista.filter(item => Boolean(item.frete_gratis));
+      lista.sort((a, b) => (parseInt(b.desconto_pct) || 0) - (parseInt(a.desconto_pct) || 0) || (parseFloat(a.preco) || 0) - (parseFloat(b.preco) || 0));
+    }
+
+    return lista;
+  }, [resultadosInteligentes, filtroChip]);
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
-      <ScrollView contentContainerStyle={styles.scrollArea} showsVerticalScrollIndicator={false}>
-        
-        {editando ? (
-          <View style={styles.editNoticeBanner}>
-            <Ionicons name="create" size={15} color={THEME.primary} style={{ marginRight: 8 }} />
-            <Text style={styles.editNoticeText}>Editando parâmetros do radar existente</Text>
-          </View>
-        ) : tier === TIERS.FREE && (monitores || []).length >= 1 ? (
-          <View style={[styles.editNoticeBanner, { borderColor: THEME.warning, backgroundColor: THEME.warningBg }]}>
-            <Ionicons name="lock-closed" size={15} color={THEME.warning} style={{ marginRight: 8 }} />
-            <Text style={[styles.editNoticeText, { color: THEME.text }]}>
-              Você já possui 1 radar ativo (limite do Plano Free). Salvar este radar requer o AchôAI Premium.
-            </Text>
-          </View>
-        ) : null}
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
-        {/* 1. SELEÇÃO DA PLATAFORMA */}
-        <Text style={styles.formSectionTitle}>1. ONDE O ROBÔ DEVE BUSCAR</Text>
-        <View style={styles.platformGrid}>
-          {[
-            { key: 'OLX', nome: 'OLX', icon: 'cart-outline', color: '#A855F7', locked: false },
-            { key: 'MERCADO_LIVRE', nome: 'Mercado Livre', icon: 'cube-outline', color: '#FFE600', locked: false },
-            { key: 'SHOPEE', nome: 'Shopee', icon: 'bag-handle-outline', color: '#EE4D2D', locked: false },
-            { key: 'AMAZON', nome: 'Amazon', icon: 'cart-outline', color: '#FF9900', locked: false },
-            { key: 'MAGALU', nome: 'Magalu', icon: 'bag-handle-outline', color: '#0086FF', locked: false },
-            { key: 'KABUM', nome: 'KaBuM!', icon: 'hardware-chip-outline', color: '#FF6500', locked: false },
-            { key: 'AMERICANAS', nome: 'Americanas', icon: 'storefront-outline', color: '#E60014', locked: false },
-            { key: 'SHEIN', nome: 'SHEIN', icon: 'shirt-outline', color: '#FFFFFF', locked: false },
-            { key: 'FASTSHOP', nome: 'Fast Shop', icon: 'flash-outline', color: '#E30613', locked: false },
-            { key: 'CARREFOUR', nome: 'Carrefour', icon: 'cart-outline', color: '#004F9F', locked: false },
-            { key: 'CASASBAHIA', nome: 'Casas Bahia', icon: 'home-outline', color: '#002B7F', locked: false },
-            { key: 'FACEBOOK', nome: 'Facebook Marketplace', icon: 'logo-facebook', color: '#1877F2', locked: false },
-            { key: 'ZOOM', nome: 'Zoom', icon: 'search-outline', color: '#F59E0B', locked: false },
-            { key: 'OUTROS', nome: 'Outros Sites', icon: 'globe-outline', color: '#06B6D4', locked: tier === TIERS.FREE }
-          ].map(p => {
-            const isActive = plataforma === p.key;
-            return (
-              <TouchableOpacity 
-                key={p.key}
-                style={[styles.platformCardBtn, isActive && styles.platformCardBtnActive]}
-                onPress={() => {
-                  if (p.locked) {
-                    showAlert({
-                      title: "Recurso Premium",
-                      message: "Monitorar páginas da internet e portais de notícias externos é exclusivo do AchôAI Premium.",
-                      type: "warning",
-                      icon: "lock-closed",
-                      confirmText: "Ver Planos",
-                      cancelText: "Entendi",
-                      showCancel: true,
-                      onConfirm: openUpgradeModal
-                    });
-                    return;
-                  }
-                  setPlataforma(p.key);
-                  if (p.key === 'ZOOM') {
-                    if (estrategia === 'mais_recentes') setEstrategia('menor_preco');
-                  }
-                  if (p.key === 'MERCADO_LIVRE' || p.key === 'SHOPEE' || p.key === 'AMAZON' || p.key === 'MAGALU' || p.key === 'KABUM' || p.key === 'AMERICANAS' || p.key === 'SHEIN' || p.key === 'FASTSHOP' || p.key === 'CARREFOUR' || p.key === 'CASASBAHIA') {
-                    if (estrategia === 'mais_recentes') setEstrategia('maior_desconto');
-                  }
-                  if (p.key !== 'OUTROS') setModo('produto');
-                }}
-                activeOpacity={0.7}
-              >
-                {p.locked && (
-                  <View style={{ position: 'absolute', top: 6, right: 6 }}>
-                    <Ionicons name="lock-closed" size={12} color={THEME.warning} />
-                  </View>
-                )}
-                <View style={[styles.platformIconCircle, { backgroundColor: isActive ? THEME.primaryGlow : 'rgba(255,255,255,0.05)' }]}>
-                  <Ionicons name={p.icon} size={18} color={isActive ? THEME.primary : p.color} />
-                </View>
-                <Text style={[styles.platformCardBtnText, isActive && styles.platformCardBtnTextActive]}>
-                  {p.nome}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+      {/* Header Padronizado com Saudação, Sino e Engrenagem */}
+      <AppTopHeader 
+        user={user} 
+        userProfile={userProfile}
+        onPressProfile={() => user ? openSettings() : openAuthModal()}
+        onOpenNotif={openNotif} 
+        onOpenSettings={openSettings} 
+        unreadCount={unreadNotifCount} 
+      />
 
-        {plataforma === 'MERCADO_LIVRE' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(255, 230, 0, 0.35)', backgroundColor: 'rgba(255, 230, 0, 0.08)' }]}>
-            <Ionicons name="cube-outline" size={16} color="#FFE600" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              O Mercado Livre monitora produtos com suporte a frete grátis, entrega FULL, filtros de procedência e captura dos maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'SHOPEE' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(238, 77, 45, 0.35)', backgroundColor: 'rgba(238, 77, 45, 0.08)' }]}>
-            <Ionicons name="bag-handle-outline" size={16} color="#EE4D2D" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              A Shopee monitora ofertas com entrega nacional ou internacional, maiores descontos (% OFF) e filtro inteligente de melhor avaliação positiva com score e volume de vendas.
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'AMAZON' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(255, 153, 0, 0.35)', backgroundColor: 'rgba(255, 153, 0, 0.08)' }]}>
-            <Ionicons name="cart-outline" size={16} color="#FF9900" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              A Amazon monitora produtos com suporte a frete grátis e Prime, filtro de melhores avaliações com score de satisfação e captura dos maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'MAGALU' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(0, 134, 255, 0.35)', backgroundColor: 'rgba(0, 134, 255, 0.08)' }]}>
-            <Ionicons name="bag-handle-outline" size={16} color="#0086FF" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              O Magazine Luiza (Magalu) monitora ofertas com entrega rápida Full, frete grátis, melhores avaliações dos clientes e captura dos maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'KABUM' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(255, 101, 0, 0.35)', backgroundColor: 'rgba(255, 101, 0, 0.08)' }]}>
-            <Ionicons name="hardware-chip-outline" size={16} color="#FF6500" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              O KaBuM! é especializado em tecnologia, hardware, computadores e celulares (apenas produtos novos e nacionais), com suporte a frete grátis, melhores avaliações dos clientes e maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'AMERICANAS' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(230, 0, 20, 0.35)', backgroundColor: 'rgba(230, 0, 20, 0.08)' }]}>
-            <Ionicons name="storefront-outline" size={16} color="#E60014" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              A Americanas monitora produtos com suporte a entrega rápida Full, frete grátis, melhores avaliações dos clientes e captura dos maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'SHEIN' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(255, 255, 255, 0.35)', backgroundColor: 'rgba(255, 255, 255, 0.08)' }]}>
-            <Ionicons name="shirt-outline" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              A SHEIN monitora moda e vestuário com opções de procedência nacional ou internacional, produtos Mais Vendidos na Shein, melhores avaliações dos clientes e maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'FASTSHOP' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(227, 6, 19, 0.35)', backgroundColor: 'rgba(227, 6, 19, 0.08)' }]}>
-            <Ionicons name="flash-outline" size={16} color="#E30613" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              A Fast Shop monitora eletrônicos e eletrodomésticos com suporte a filtro de melhores avaliações dos clientes e captura dos maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'CARREFOUR' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(0, 79, 159, 0.35)', backgroundColor: 'rgba(0, 79, 159, 0.08)' }]}>
-            <Ionicons name="cart-outline" size={16} color="#004F9F" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              O Carrefour monitora produtos com suporte a frete grátis, parcelamento sem juros, itens mais vendidos da loja e captura dos maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'CASASBAHIA' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(0, 43, 127, 0.35)', backgroundColor: 'rgba(0, 43, 127, 0.08)' }]}>
-            <Ionicons name="home-outline" size={16} color="#002B7F" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              A Casas Bahia monitora eletrodomésticos, móveis e tecnologia com suporte a frete grátis, parcelamento sem juros, itens mais vendidos da loja e maiores descontos promocionais (% OFF).
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'FACEBOOK' && (
-          <View style={[styles.comparatorBanner, { borderColor: 'rgba(24, 119, 242, 0.35)', backgroundColor: 'rgba(24, 119, 242, 0.08)' }]}>
-            <Ionicons name="logo-facebook" size={16} color="#1877F2" style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              O Facebook Marketplace rastreia ofertas de vendedores e lojas na cidade selecionada com link direto para o anúncio.
-            </Text>
-          </View>
-        )}
-
-        {plataforma === 'ZOOM' && (
-          <View style={styles.comparatorBanner}>
-            <Ionicons name="information-circle-outline" size={16} color={THEME.primary} style={{ marginRight: 8 }} />
-            <Text style={styles.comparatorBannerText}>
-              O Zoom compara preços em lojas como Amazon, Magazine Luiza e Mercado Livre em todo o Brasil.
-            </Text>
-          </View>
-        )}
-
-        {/* SE FOR FACEBOOK MARKETPLACE: CIDADE */}
-        {plataforma === 'FACEBOOK' && (
-          <>
-            <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>LOCALIZAÇÃO (FACEBOOK MARKETPLACE)</Text>
-            <Surface style={styles.formSurface}>
-              <Text style={styles.inputTitle}>CIDADE DA BUSCA</Text>
-              <TextInput 
-                style={styles.inputField} 
-                placeholder="Ex: fortaleza, saopaulo, riodejaneiro..." 
-                placeholderTextColor={THEME.textSubtle} 
-                value={cidadeFacebook} 
-                onChangeText={setCidadeFacebook} 
-                autoCapitalize="none"
-              />
-              
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }}>
-                {[
-                  { label: 'Fortaleza', slug: 'fortaleza' },
-                  { label: 'São Paulo', slug: 'saopaulo' },
-                  { label: 'Rio de Janeiro', slug: 'riodejaneiro' },
-                  { label: 'Belo Horizonte', slug: 'belohorizonte' },
-                  { label: 'Curitiba', slug: 'curitiba' },
-                  { label: 'Brasília', slug: 'brasilia' },
-                  { label: 'Recife', slug: 'recife' },
-                  { label: 'Salvador', slug: 'salvador' },
-                  { label: 'Goiânia', slug: 'goiania' },
-                  { label: 'Porto Alegre', slug: 'portoalegre' },
-                ].map(c => {
-                  const isSelected = normalizarSlugCidade(cidadeFacebook) === c.slug;
-                  return (
-                    <TouchableOpacity 
-                      key={c.slug}
-                      style={[
-                        styles.filterChip, 
-                        { marginRight: 8, paddingHorizontal: 12, paddingVertical: 6 }, 
-                        isSelected && styles.filterChipActive
-                      ]}
-                      onPress={() => setCidadeFacebook(c.slug)}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={[styles.filterChipText, isSelected && styles.filterChipTextActive]}>
-                        {c.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-
-              <View style={[styles.urlPreviewBox, { marginTop: 12 }]}>
-                <Ionicons name="link-outline" size={13} color={THEME.success} style={{ marginRight: 6 }} />
-                <Text style={styles.urlPreviewText} numberOfLines={1}>
-                  {`https://www.facebook.com/marketplace/${normalizarSlugCidade(cidadeFacebook)}/search/?query=${encodeURIComponent(produto || '...')}`}
-                </Text>
-              </View>
-            </Surface>
-          </>
-        )}
-
-        {/* SE FOR OLX: ESTADO E REGIÃO */}
-        {plataforma === 'OLX' && (
-          <>
-            <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>LOCALIZAÇÃO GEOGRÁFICA (OLX)</Text>
-            <Surface style={styles.formSurface}>
-              <View style={styles.row}>
-                <TouchableOpacity 
-                  style={[styles.selectBtn, { marginRight: 8 }]} 
-                  onPress={() => setModalEstadoVisivel(true)}
-                  activeOpacity={0.7}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.selectBtnLabel}>ESTADO (UF)</Text>
-                    <Text style={styles.selectBtnValue} numberOfLines={1}>
-                      {estadoUf === 'BR' ? 'Brasil Inteiro' : `${OLX_ESTADOS[estadoUf]?.nome} (${estadoUf})`}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-down" size={15} color={THEME.primary} />
-                </TouchableOpacity>
-
-                <TouchableOpacity 
-                  style={[styles.selectBtn, estadoUf === 'BR' && { opacity: 0.85 }]} 
-                  onPress={() => {
-                    if (estadoUf === 'BR') {
-                      showAlert({
-                        title: "Brasil Inteiro",
-                        message: "A opção Brasil abrange automaticamente todas as regiões do país.",
-                        type: "info",
-                        icon: "globe-outline"
-                      });
-                    } else {
-                      setModalRegiaoVisivel(true);
-                    }
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.selectBtnLabel}>REGIÃO</Text>
-                    <Text style={styles.selectBtnValue} numberOfLines={1}>
-                      {estadoUf === 'BR' ? 'Todas as Regiões' : regiaoAtual.nome}
-                    </Text>
-                  </View>
-                  <Ionicons name={estadoUf === 'BR' ? "checkmark-circle" : "chevron-down"} size={15} color={THEME.primary} />
-                </TouchableOpacity>
-              </View>
-
-              <View style={styles.urlPreviewBox}>
-                <Ionicons name="link-outline" size={13} color={THEME.success} style={{ marginRight: 6 }} />
-                <Text style={styles.urlPreviewText} numberOfLines={1}>
-                  {gerarUrlOlx(estadoUf, regiaoSlug, produto)}
-                </Text>
-              </View>
-            </Surface>
-          </>
-        )}
-
-        {/* SE FOR OUTROS SITES */}
-        {plataforma === 'OUTROS' && (
-          <>
-            <View style={[styles.segmentWrap, { marginTop: 14 }]}>
-              <TouchableOpacity 
-                style={[styles.segmentOption, modo === 'produto' && styles.segmentOptionActive]}
-                onPress={() => setModo('produto')}
-              >
-                <Ionicons name="cart" size={16} color={modo === 'produto' ? '#08090D' : THEME.textMuted} style={{ marginRight: 6 }} />
-                <Text style={[styles.segmentLabel, modo === 'produto' && styles.segmentLabelActive]}>Página de Anúncio</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={[styles.segmentOption, modo === 'noticia' && styles.segmentOptionActive]}
-                onPress={() => setModo('noticia')}
-              >
-                <Ionicons name="newspaper" size={16} color={modo === 'noticia' ? '#08090D' : THEME.textMuted} style={{ marginRight: 6 }} />
-                <Text style={[styles.segmentLabel, modo === 'noticia' && styles.segmentLabelActive]}>Portal de Notícias</Text>
-              </TouchableOpacity>
-            </View>
-
-            <Text style={[styles.formSectionTitle, { marginTop: 14 }]}>URL DA PÁGINA</Text>
-            <Surface style={styles.formSurface}>
-              <Text style={styles.inputTitle}>ENDEREÇO COMPLETO (HTTPS://...)</Text>
-              <TextInput 
-                style={styles.inputField} 
-                placeholder="Ex: https://g1.globo.com/ ou URL do anúncio" 
-                placeholderTextColor={THEME.textSubtle} 
-                value={urls} 
-                onChangeText={setUrls} 
-                autoCapitalize="none"
-              />
-            </Surface>
-          </>
-        )}
-
-        {/* 2. IDENTIFICAÇÃO DO RADAR */}
-        <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>2. O QUE VOCÊ PROCURA</Text>
-        <Surface style={styles.formSurface}>
-          <Text style={styles.inputTitle}>NOME DO RADAR</Text>
-          <TextInput 
-            style={styles.inputField} 
-            placeholder="Ex: iPhone 15 Pro Max 256GB" 
-            placeholderTextColor={THEME.textSubtle} 
-            value={nome} 
-            onChangeText={setNome} 
-          />
-
-          {modo !== 'noticia' ? (
-            <>
-              <Text style={[styles.inputTitle, { marginTop: 14 }]}>TERMO DE PESQUISA</Text>
-              <TextInput 
-                style={styles.inputField} 
-                placeholder="Ex: iphone 15 256gb" 
-                placeholderTextColor={THEME.textSubtle} 
-                value={produto} 
-                onChangeText={setProduto} 
-              />
-              <Text style={styles.helperText}>
-                {plataforma === 'OLX'
-                  ? "O robô buscará exatamente este termo nos anúncios da região definida."
-                  : plataforma === 'FACEBOOK'
-                  ? "O robô buscará anúncios no Facebook Marketplace da cidade selecionada."
-                  : plataforma === 'SHOPEE'
-                  ? "O robô buscará anúncios na Shopee com entrega nacional e filtros automáticos."
-                  : plataforma === 'MERCADO_LIVRE'
-                  ? "O robô buscará este produto no Mercado Livre aplicando os filtros configurados."
-                  : plataforma === 'AMAZON'
-                  ? "O robô buscará este produto na Amazon aplicando os filtros configurados."
-                  : plataforma === 'MAGALU'
-                  ? "O robô buscará este produto no Magazine Luiza aplicando os filtros configurados."
-                  : plataforma === 'KABUM'
-                  ? "O robô buscará este produto no KaBuM! aplicando os filtros configurados."
-                  : plataforma === 'AMERICANAS'
-                  ? "O robô buscará este produto na Americanas aplicando os filtros configurados."
-                  : plataforma === 'SHEIN'
-                  ? "O robô buscará este produto na SHEIN aplicando os filtros configurados."
-                  : plataforma === 'FASTSHOP'
-                  ? "O robô buscará este produto na Fast Shop aplicando os filtros configurados."
-                  : plataforma === 'CARREFOUR'
-                  ? "O robô buscará este produto no Carrefour aplicando os filtros configurados."
-                  : plataforma === 'CASASBAHIA'
-                  ? "O robô buscará este produto na Casas Bahia aplicando os filtros configurados."
-                  : plataforma === 'ZOOM'
-                  ? "O comparador filtrará os preços de lojas confiáveis com este termo."
-                  : "O robô buscará este produto na página cadastrada."}
+      {/* ================================================================= */}
+      {/* TELA DE BUSCA: CARD FIXO NO TOPO + 10 SEGMENTOS ABAIXO            */}
+      {/* ================================================================= */}
+      {etapaBusca === 'busca' && (
+        <ScrollView 
+          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 90 }} 
+          showsVerticalScrollIndicator={false}
+        >
+          {/* CARD DE BUSCA FIXO NO TOPO */}
+          <View style={styles.smartSearchPromptBox}>
+            <View style={styles.smartSearchPromptHeader}>
+              <Ionicons name="search" size={20} color="#FF5722" style={{ marginRight: 8 }} />
+              <Text style={styles.smartSearchPromptTitle}>
+                O que você deseja procurar?
               </Text>
-            </>
-          ) : (
-            <>
-              <Text style={[styles.inputTitle, { marginTop: 14 }]}>PALAVRAS-CHAVE DA MATÉRIA</Text>
-              <TextInput 
-                style={styles.inputField} 
-                placeholder="concurso, edital, vaga (separadas por vírgula)" 
-                placeholderTextColor={THEME.textSubtle} 
-                value={palavras} 
-                onChangeText={setPalavras} 
-              />
-              <Text style={styles.helperText}>Dispara alerta sempre que todas as palavras forem localizadas juntas.</Text>
-            </>
-          )}
-        </Surface>
-
-        {/* 3. ESTRATÉGIA DE CAPTURA */}
-        {modo !== 'noticia' && (
-          <>
-            <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>3. ESTRATÉGIA INTELIGENTE DE CAPTURA</Text>
-
-            {/* OPÇÕES E FILTROS DO MERCADO LIVRE */}
-            {plataforma === 'MERCADO_LIVRE' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(255, 230, 0, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="options-outline" size={15} color="#FFE600" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#FFE600' }]}>FILTROS DO MERCADO LIVRE</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca selecionando os filtros desejados (desmarcados por padrão):
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* 1. Frete Grátis */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, mlFreteGratis && styles.checkboxRowItemActive]}
-                    onPress={() => setMlFreteGratis(!mlFreteGratis)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={mlFreteGratis ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={mlFreteGratis ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, mlFreteGratis && styles.checkboxItemTitleActive]}>
-                          Frete Grátis
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios com frete grátis</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 2. Entrega FULL */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, mlFull && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMlFull(!mlFull)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={mlFull ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={mlFull ? "#00A650" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, mlFull && styles.checkboxItemTitleActive]}>
-                          Entrega FULL
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(0, 166, 80, 0.15)', borderColor: 'rgba(0, 166, 80, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#00A650' }}>⚡ FULL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos com envio rápido do galpão Mercado Livre</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 3. Nacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, mlNacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMlNacional(!mlNacional)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={mlNacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={mlNacional ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, mlNacional && styles.checkboxItemTitleActive]}>
-                          Nacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>BRASIL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos enviados de dentro do Brasil</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 4. Internacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, mlInternacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMlInternacional(!mlInternacional)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={mlInternacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={mlInternacional ? "#3B82F6" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, mlInternacional && styles.checkboxItemTitleActive]}>
-                          Internacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#3B82F6' }}>EXTERIOR</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos de compra internacional</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 5. Novo */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, mlNovo && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMlNovo(!mlNovo)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={mlNovo ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={mlNovo ? "#FFE600" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, mlNovo && styles.checkboxItemTitleActive]}>
-                          Novo
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 230, 0, 0.15)', borderColor: 'rgba(255, 230, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFE600' }}>NOVO</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas produtos novos e lacrados</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 6. Usado */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, mlUsado && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMlUsado(!mlUsado)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={mlUsado ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={mlUsado ? "#94A3B8" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, mlUsado && styles.checkboxItemTitleActive]}>
-                          Usado
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(148, 163, 184, 0.15)', borderColor: 'rgba(148, 163, 184, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#94A3B8' }}>USADO</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas produtos seminovos e usados</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES DE PROCEDÊNCIA (SHOPEE: NACIONAL / INTERNACIONAL) */}
-            {plataforma === 'SHOPEE' && (
-              <Surface style={styles.shopeeOptionsCard}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="location-outline" size={15} color="#EE4D2D" style={{ marginRight: 6 }} />
-                  <Text style={styles.shopeeOptionsTitle}>PROCEDÊNCIA DOS PRODUTOS</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Selecione os locais de envio para a varredura (ao menos um deve estar ativo):
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* Opção Nacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, shopeeNacional && styles.checkboxRowItemActive]}
-                    onPress={() => {
-                      if (shopeeNacional && !shopeeInternacional) {
-                        showAlert({
-                          title: "Seleção Obrigatória",
-                          message: "Ao menos uma opção de procedência (Nacional ou Internacional) deve permanecer ativa.",
-                          type: "warning",
-                          icon: "alert-circle"
-                        });
-                        return;
-                      }
-                      setShopeeNacional(!shopeeNacional);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={shopeeNacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={shopeeNacional ? "#EE4D2D" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, shopeeNacional && styles.checkboxItemTitleActive]}>
-                          Nacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>BRASIL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Anúncios enviados de dentro do Brasil</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* Opção Internacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, shopeeInternacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => {
-                      if (!shopeeNacional && shopeeInternacional) {
-                        showAlert({
-                          title: "Seleção Obrigatória",
-                          message: "Ao menos uma opção de procedência (Nacional ou Internacional) deve permanecer ativa.",
-                          type: "warning",
-                          icon: "alert-circle"
-                        });
-                        return;
-                      }
-                      setShopeeInternacional(!shopeeInternacional);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={shopeeInternacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={shopeeInternacional ? "#EE4D2D" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, shopeeInternacional && styles.checkboxItemTitleActive]}>
-                          Internacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#3B82F6' }}>EXTERIOR</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos importados enviados de fora do país</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* Opção Por Melhor Avaliação Positiva */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, shopeeMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setShopeeMelhorAvaliacao(!shopeeMelhorAvaliacao)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={shopeeMelhorAvaliacao ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={shopeeMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, shopeeMelhorAvaliacao && styles.checkboxItemTitleActive]}>
-                          Por Melhor Avaliação Positiva
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra por maior volume de vendas e nota máxima (4.0 a 5.0 estrelas)</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DA AMAZON */}
-            {plataforma === 'AMAZON' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(255, 153, 0, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="options-outline" size={15} color="#FF9900" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#FF9900' }]}>FILTROS DA AMAZON</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca selecionando os filtros desejados (desmarcados por padrão):
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* 1. Frete Grátis */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, amzFreteGratis && styles.checkboxRowItemActive]}
-                    onPress={() => setAmzFreteGratis(!amzFreteGratis)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={amzFreteGratis ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={amzFreteGratis ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, amzFreteGratis && styles.checkboxItemTitleActive]}>
-                          Frete Grátis
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios com frete grátis ou Prime elegível</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 2. Melhor Avaliação Positiva (Substitui Entrega FULL) */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, amzMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setAmzMelhorAvaliacao(!amzMelhorAvaliacao)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={amzMelhorAvaliacao ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={amzMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, amzMelhorAvaliacao && styles.checkboxItemTitleActive]}>
-                          Melhor Avaliação Positiva
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas (4.0 a 5.0 estrelas) e satisfação de clientes</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 3. Nacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, amzNacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setAmzNacional(!amzNacional)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={amzNacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={amzNacional ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, amzNacional && styles.checkboxItemTitleActive]}>
-                          Nacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>BRASIL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos enviados de estoques no Brasil</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 4. Internacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, amzInternacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setAmzInternacional(!amzInternacional)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={amzInternacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={amzInternacional ? "#3B82F6" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, amzInternacional && styles.checkboxItemTitleActive]}>
-                          Internacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#3B82F6' }}>EXTERIOR</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos de compras e importação internacional</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 5. Novo */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, amzNovo && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setAmzNovo(!amzNovo)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={amzNovo ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={amzNovo ? "#FFE600" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, amzNovo && styles.checkboxItemTitleActive]}>
-                          Novo
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 230, 0, 0.15)', borderColor: 'rgba(255, 230, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFE600' }}>NOVO</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas produtos novos e lacrados</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 6. Usado */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, amzUsado && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setAmzUsado(!amzUsado)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={amzUsado ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={amzUsado ? "#94A3B8" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, amzUsado && styles.checkboxItemTitleActive]}>
-                          Usado
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(148, 163, 184, 0.15)', borderColor: 'rgba(148, 163, 184, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#94A3B8' }}>USADO</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas produtos seminovos e recondicionados</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DA MAGALU */}
-            {plataforma === 'MAGALU' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(0, 134, 255, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="options-outline" size={15} color="#0086FF" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#0086FF' }]}>FILTROS DA MAGALU</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca selecionando os filtros desejados (desmarcados por padrão):
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* 1. Entrega Mais Rápida (Full) */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, magaluEntregaRapida && styles.checkboxRowItemActive]}
-                    onPress={() => setMagaluEntregaRapida(!magaluEntregaRapida)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={magaluEntregaRapida ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={magaluEntregaRapida ? "#0086FF" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, magaluEntregaRapida && styles.checkboxItemTitleActive]}>
-                          Entrega Mais Rápida
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(0, 134, 255, 0.15)', borderColor: 'rgba(0, 134, 255, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#0086FF' }}>⚡ FULL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios com envio e entrega rápida Full Magalu</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 2. Frete Grátis */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, magaluFreteGratis && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMagaluFreteGratis(!magaluFreteGratis)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={magaluFreteGratis ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={magaluFreteGratis ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, magaluFreteGratis && styles.checkboxItemTitleActive]}>
-                          Frete Grátis
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios elegíveis para frete grátis</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 3. Melhor Avaliação Positiva */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, magaluMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMagaluMelhorAvaliacao(!magaluMelhorAvaliacao)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={magaluMelhorAvaliacao ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={magaluMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, magaluMelhorAvaliacao && styles.checkboxItemTitleActive]}>
-                          Melhor Avaliação Positiva
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas (4.0 a 5.0 estrelas) e aprovação de clientes</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 4. Nacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, magaluNacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMagaluNacional(!magaluNacional)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={magaluNacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={magaluNacional ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, magaluNacional && styles.checkboxItemTitleActive]}>
-                          Nacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>BRASIL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos enviados de estoques no Brasil</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 5. Internacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, magaluInternacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setMagaluInternacional(!magaluInternacional)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={magaluInternacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={magaluInternacional ? "#3B82F6" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, magaluInternacional && styles.checkboxItemTitleActive]}>
-                          Internacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#3B82F6' }}>EXTERIOR</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Produtos de compras e importação internacional</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DO KABUM */}
-            {plataforma === 'KABUM' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(255, 101, 0, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="hardware-chip-outline" size={15} color="#FF6500" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#FF6500' }]}>FILTROS DO KABUM!</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca selecionando os filtros desejados (desmarcados por padrão):
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* 1. Frete Grátis */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, kabumFreteGratis && styles.checkboxRowItemActive]}
-                    onPress={() => setKabumFreteGratis(!kabumFreteGratis)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={kabumFreteGratis ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={kabumFreteGratis ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, kabumFreteGratis && styles.checkboxItemTitleActive]}>
-                          Frete Grátis
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios com frete grátis</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 2. Melhor Avaliação Positiva */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, kabumMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setKabumMelhorAvaliacao(!kabumMelhorAvaliacao)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={kabumMelhorAvaliacao ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={kabumMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, kabumMelhorAvaliacao && styles.checkboxItemTitleActive]}>
-                          Melhor Avaliação Positiva
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas (4.0 a 5.0 estrelas) e aprovação de clientes</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DA AMERICANAS */}
-            {plataforma === 'AMERICANAS' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(230, 0, 20, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="storefront-outline" size={15} color="#E60014" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#E60014' }]}>FILTROS DA AMERICANAS</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca selecionando os filtros desejados (desmarcados por padrão):
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* 1. Entrega Mais Rápida */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, ameEntregaRapida && styles.checkboxRowItemActive]}
-                    onPress={() => setAmeEntregaRapida(!ameEntregaRapida)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={ameEntregaRapida ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={ameEntregaRapida ? "#E60014" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, ameEntregaRapida && styles.checkboxItemTitleActive]}>
-                          Entrega Mais Rápida
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(230, 0, 20, 0.15)', borderColor: 'rgba(230, 0, 20, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#E60014' }}>⚡ FULL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios vendidos e entregues pela Americanas</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 2. Frete Grátis */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, ameFreteGratis && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setAmeFreteGratis(!ameFreteGratis)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={ameFreteGratis ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={ameFreteGratis ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, ameFreteGratis && styles.checkboxItemTitleActive]}>
-                          Frete Grátis
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios elegíveis para frete grátis</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 3. Melhor Avaliação Positiva */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, ameMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setAmeMelhorAvaliacao(!ameMelhorAvaliacao)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={ameMelhorAvaliacao ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={ameMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, ameMelhorAvaliacao && styles.checkboxItemTitleActive]}>
-                          Melhor Avaliação Positiva
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas (4.0 a 5.0 estrelas) e satisfação de clientes</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DA SHEIN */}
-            {plataforma === 'SHEIN' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(255, 255, 255, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="shirt-outline" size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#FFFFFF' }]}>FILTROS DA SHEIN</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca selecionando procedência e filtros da SHEIN:
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* Opção Nacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, sheinNacional && styles.checkboxRowItemActive]}
-                    onPress={() => {
-                      if (sheinNacional && !sheinInternacional) {
-                        showAlert({
-                          title: "Seleção Obrigatória",
-                          message: "Ao menos uma opção de procedência (Nacional ou Internacional) deve permanecer ativa.",
-                          type: "warning",
-                          icon: "alert-circle"
-                        });
-                        return;
-                      }
-                      setSheinNacional(!sheinNacional);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={sheinNacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={sheinNacional ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, sheinNacional && styles.checkboxItemTitleActive]}>
-                          Nacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>BRASIL</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Anúncios com envio rápido de estoques nacionais</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* Opção Internacional */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, sheinInternacional && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => {
-                      if (!sheinNacional && sheinInternacional) {
-                        showAlert({
-                          title: "Seleção Obrigatória",
-                          message: "Ao menos uma opção de procedência (Nacional ou Internacional) deve permanecer ativa.",
-                          type: "warning",
-                          icon: "alert-circle"
-                        });
-                        return;
-                      }
-                      setSheinInternacional(!sheinInternacional);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={sheinInternacional ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={sheinInternacional ? "#3B82F6" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, sheinInternacional && styles.checkboxItemTitleActive]}>
-                          Internacional
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#3B82F6' }}>EXTERIOR</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Peças importadas do catálogo global da SHEIN</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* Opção Mais Vendidos na Shein */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, sheinMaisVendidos && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setSheinMaisVendidos(!sheinMaisVendidos)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={sheinMaisVendidos ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={sheinMaisVendidos ? "#F59E0B" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, sheinMaisVendidos && styles.checkboxItemTitleActive]}>
-                          Mais Vendidos Na Shein
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: 'rgba(245, 158, 11, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#F59E0B' }}>🔥 HOT</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra exclusivamente as peças e roupas mais populares e compradas</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* Opção Melhor Avaliação Positiva */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, sheinMelhorAvaliacao && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setSheinMelhorAvaliacao(!sheinMelhorAvaliacao)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={sheinMelhorAvaliacao ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={sheinMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, sheinMelhorAvaliacao && styles.checkboxItemTitleActive]}>
-                          Por Melhor Avaliação Positiva
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra por notas máximas e avaliações positivas de usuárias</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DA FAST SHOP */}
-            {plataforma === 'FASTSHOP' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(227, 6, 19, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="flash-outline" size={15} color="#E30613" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#E30613' }]}>FILTROS DA FAST SHOP</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca na Fast Shop selecionando os filtros desejados:
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* Melhor Avaliação Positiva */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, fastshopMelhorAvaliacao && styles.checkboxRowItemActive]}
-                    onPress={() => setFastshopMelhorAvaliacao(!fastshopMelhorAvaliacao)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={fastshopMelhorAvaliacao ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={fastshopMelhorAvaliacao ? "#FFBB00" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, fastshopMelhorAvaliacao && styles.checkboxItemTitleActive]}>
-                          Por Melhor Avaliação Positiva
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(255, 187, 0, 0.15)', borderColor: 'rgba(255, 187, 0, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#FFBB00' }}>⭐ TOP SCORE</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra exclusivamente ofertas com alta pontuação de avaliação dos clientes</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DO CARREFOUR */}
-            {plataforma === 'CARREFOUR' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(0, 79, 159, 0.3)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="cart-outline" size={15} color="#004F9F" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#004F9F' }]}>FILTROS DO CARREFOUR</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca no Carrefour selecionando os filtros desejados:
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* 1. Frete Grátis */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, carrefourFreteGratis && styles.checkboxRowItemActive]}
-                    onPress={() => setCarrefourFreteGratis(!carrefourFreteGratis)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={carrefourFreteGratis ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={carrefourFreteGratis ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, carrefourFreteGratis && styles.checkboxItemTitleActive]}>
-                          Apenas com Frete Grátis
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios elegíveis para frete grátis</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 2. Parcelamento Sem Juros */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, carrefourParcelamento && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setCarrefourParcelamento(!carrefourParcelamento)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={carrefourParcelamento ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={carrefourParcelamento ? "#3B82F6" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, carrefourParcelamento && styles.checkboxItemTitleActive]}>
-                          Parcelamento Sem Juros
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#60A5FA' }}>💳 SEM JUROS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra apenas ofertas com opção de parcelamento sem juros</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 3. Mais Vendidos da Loja */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, carrefourMaisVendidos && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setCarrefourMaisVendidos(!carrefourMaisVendidos)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={carrefourMaisVendidos ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={carrefourMaisVendidos ? "#F59E0B" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, carrefourMaisVendidos && styles.checkboxItemTitleActive]}>
-                          Mais Vendidos da Loja
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: 'rgba(245, 158, 11, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#F59E0B' }}>🔥 HOT</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra os produtos mais populares e comprados no Carrefour</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* OPÇÕES E FILTROS DAS CASAS BAHIA */}
-            {plataforma === 'CASASBAHIA' && (
-              <Surface style={[styles.shopeeOptionsCard, { borderColor: 'rgba(0, 43, 127, 0.35)' }]}>
-                <View style={styles.shopeeOptionsHeader}>
-                  <Ionicons name="home-outline" size={15} color="#002B7F" style={{ marginRight: 6 }} />
-                  <Text style={[styles.shopeeOptionsTitle, { color: '#60A5FA' }]}>FILTROS DAS CASAS BAHIA</Text>
-                </View>
-                <Text style={styles.shopeeOptionsDesc}>
-                  Personalize sua busca na Casas Bahia selecionando os filtros desejados:
-                </Text>
-
-                <View style={styles.checkboxContainer}>
-                  {/* 1. Frete Grátis */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, casasbahiaFreteGratis && styles.checkboxRowItemActive]}
-                    onPress={() => setCasasBahiaFreteGratis(!casasbahiaFreteGratis)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={casasbahiaFreteGratis ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={casasbahiaFreteGratis ? "#10B981" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, casasbahiaFreteGratis && styles.checkboxItemTitleActive]}>
-                          Apenas com Frete Grátis
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#10B981' }}>GRÁTIS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Apenas anúncios elegíveis para frete grátis</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 2. Parcelamento Sem Juros */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, casasbahiaParcelamento && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setCasasBahiaParcelamento(!casasbahiaParcelamento)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={casasbahiaParcelamento ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={casasbahiaParcelamento ? "#3B82F6" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, casasbahiaParcelamento && styles.checkboxItemTitleActive]}>
-                          Parcelamento Sem Juros
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderColor: 'rgba(59, 130, 246, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#60A5FA' }}>💳 SEM JUROS</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra apenas ofertas com opção de parcelamento sem juros</Text>
-                    </View>
-                  </TouchableOpacity>
-
-                  {/* 3. Mais Vendidos da Loja */}
-                  <TouchableOpacity 
-                    style={[styles.checkboxRowItem, casasbahiaMaisVendidos && styles.checkboxRowItemActive, { marginTop: 8 }]}
-                    onPress={() => setCasasBahiaMaisVendidos(!casasbahiaMaisVendidos)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons 
-                      name={casasbahiaMaisVendidos ? "checkbox" : "square-outline"} 
-                      size={20} 
-                      color={casasbahiaMaisVendidos ? "#F59E0B" : THEME.textSubtle} 
-                      style={{ marginRight: 10 }} 
-                    />
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.row}>
-                        <Text style={[styles.checkboxItemTitle, casasbahiaMaisVendidos && styles.checkboxItemTitleActive]}>
-                          Mais Vendidos da Loja
-                        </Text>
-                        <View style={[styles.miniOriginBadge, { backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: 'rgba(245, 158, 11, 0.35)' }]}>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: '#F59E0B' }}>🔥 HOT</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.checkboxItemSub}>Filtra os produtos mais populares e comprados na Casas Bahia</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              </Surface>
-            )}
-
-            {/* ESTRATÉGIA: MAIOR DESCONTO (MERCADO LIVRE, SHOPEE, AMAZON, MAGALU, KABUM, AMERICANAS, SHEIN, FAST SHOP, CARREFOUR E CASAS BAHIA) */}
-            {(plataforma === 'MERCADO_LIVRE' || plataforma === 'SHOPEE' || plataforma === 'AMAZON' || plataforma === 'MAGALU' || plataforma === 'KABUM' || plataforma === 'AMERICANAS' || plataforma === 'SHEIN' || plataforma === 'FASTSHOP' || plataforma === 'CARREFOUR' || plataforma === 'CASASBAHIA') && (
-              <TouchableOpacity 
-                style={[styles.strategyCard, estrategia === 'maior_desconto' && styles.strategyCardActive]}
-                onPress={() => setEstrategia('maior_desconto')}
-                activeOpacity={0.8}
-              >
-                <View style={styles.strategyHeader}>
-                  <View style={[styles.strategyIconCircle, estrategia === 'maior_desconto' && styles.strategyIconCircleActive]}>
-                    <Ionicons name="flame" size={17} color={estrategia === 'maior_desconto' ? THEME.primary : THEME.textMuted} />
-                  </View>
-                  <View style={{ flex: 1, marginHorizontal: 10 }}>
-                    <Text style={[styles.strategyTitle, estrategia === 'maior_desconto' && styles.strategyTitleActive]}>
-                      Rastrear Anúncios com Maior Desconto
-                    </Text>
-                    <Text style={styles.strategyDesc}>
-                      {apenasMaiorDesconto
-                        ? "Captura exclusivamente o único anúncio com o maior desconto promocional (% OFF) da pesquisa."
-                        : "Captura até 15 anúncios com os maiores descontos promocionais (% OFF), notificando do menor para o maior para a melhor oferta ficar no topo."}
-                    </Text>
-                  </View>
-                  <Ionicons 
-                    name={estrategia === 'maior_desconto' ? "radio-button-on" : "radio-button-off"} 
-                    size={19} 
-                    color={estrategia === 'maior_desconto' ? THEME.primary : THEME.textSubtle} 
-                  />
-                </View>
-
-                {estrategia === 'maior_desconto' && (
-                  <View style={styles.strategyExtraBox}>
-                    <View style={styles.rowBetween}>
-                      <View style={{ flex: 1, paddingRight: 10 }}>
-                        <Text style={styles.sortToggleTitle}>Apenas Único Maior Desconto</Text>
-                        <Text style={styles.sortToggleDesc}>
-                          {apenasMaiorDesconto 
-                            ? "Ativado: rastreia e apresenta apenas 1 anúncio (o de maior % OFF)" 
-                            : "Desativado: rastreia até 15 anúncios com os maiores descontos"}
-                        </Text>
-                      </View>
-                      <Switch 
-                        value={apenasMaiorDesconto}
-                        onValueChange={setApenasMaiorDesconto}
-                        trackColor={{ false: '#1E2333', true: THEME.primary }}
-                        thumbColor="#FFF"
-                      />
-                    </View>
-                  </View>
-                )}
-              </TouchableOpacity>
-            )}
-            
-            {/* ESTRATÉGIA: MENOR PREÇO */}
-            <TouchableOpacity 
-              style={[styles.strategyCard, estrategia === 'menor_preco' && styles.strategyCardActive]}
-              onPress={() => setEstrategia('menor_preco')}
-              activeOpacity={0.8}
-            >
-              <View style={styles.strategyHeader}>
-                <View style={[styles.strategyIconCircle, estrategia === 'menor_preco' && styles.strategyIconCircleActive]}>
-                  <Ionicons name="trending-down" size={17} color={estrategia === 'menor_preco' ? THEME.primary : THEME.textMuted} />
-                </View>
-                <View style={{ flex: 1, marginHorizontal: 10 }}>
-                  <Text style={[styles.strategyTitle, estrategia === 'menor_preco' && styles.strategyTitleActive]}>
-                    Rastrear Menor Preço Disponível
-                  </Text>
-                  <Text style={styles.strategyDesc}>
-                    Captura exclusivamente a melhor oferta de menor preço dentre os resultados encontrados.
-                  </Text>
-                </View>
-                <Ionicons 
-                  name={estrategia === 'menor_preco' ? "radio-button-on" : "radio-button-off"} 
-                  size={19} 
-                  color={estrategia === 'menor_preco' ? THEME.primary : THEME.textSubtle} 
-                />
-              </View>
-            </TouchableOpacity>
-
-            {/* ESTRATÉGIA: MAIS RECENTES */}
-            {plataforma !== 'ZOOM' && plataforma !== 'MERCADO_LIVRE' && plataforma !== 'SHOPEE' && plataforma !== 'AMAZON' && plataforma !== 'MAGALU' && plataforma !== 'KABUM' && plataforma !== 'AMERICANAS' && plataforma !== 'SHEIN' && plataforma !== 'FASTSHOP' && plataforma !== 'CARREFOUR' && plataforma !== 'CASASBAHIA' && (
-              <TouchableOpacity 
-                style={[styles.strategyCard, estrategia === 'mais_recentes' && styles.strategyCardActive]}
-                onPress={() => setEstrategia('mais_recentes')}
-                activeOpacity={0.8}
-              >
-                <View style={styles.strategyHeader}>
-                  <View style={[styles.strategyIconCircle, estrategia === 'mais_recentes' && styles.strategyIconCircleActive]}>
-                    <Ionicons name="time-outline" size={17} color={estrategia === 'mais_recentes' ? THEME.primary : THEME.textMuted} />
-                  </View>
-                  <View style={{ flex: 1, marginHorizontal: 10 }}>
-                    <Text style={[styles.strategyTitle, estrategia === 'mais_recentes' && styles.strategyTitleActive]}>
-                      Rastrear Todos os Anúncios Mais Recentes
-                    </Text>
-                    <Text style={styles.strategyDesc}>
-                      Notifica todos os novos anúncios recém-publicados na plataforma.
-                    </Text>
-                  </View>
-                  <Ionicons 
-                    name={estrategia === 'mais_recentes' ? "radio-button-on" : "radio-button-off"} 
-                    size={19} 
-                    color={estrategia === 'mais_recentes' ? THEME.primary : THEME.textSubtle} 
-                  />
-                </View>
-
-                {estrategia === 'mais_recentes' && (
-                  <View style={styles.strategyExtraBox}>
-                    <View style={styles.rowBetween}>
-                      <View style={{ flex: 1, paddingRight: 10 }}>
-                        <Text style={styles.sortToggleTitle}>Priorizar Menor Preço</Text>
-                        <Text style={styles.sortToggleDesc}>Ordena a captura do menor para o maior valor</Text>
-                      </View>
-                      <Switch 
-                        value={ordenarMenorPreco}
-                        onValueChange={setOrdenarMenorPreco}
-                        trackColor={{ false: '#1E2333', true: THEME.primary }}
-                        thumbColor="#FFF"
-                      />
-                    </View>
-                  </View>
-                )}
-              </TouchableOpacity>
-            )}
-
-            {/* ESTRATÉGIA: POR PREÇO ALVO (COM CADEADO NO FREE) */}
-            <TouchableOpacity 
-              style={[
-                styles.strategyCard, 
-                estrategia === 'por_preco' && styles.strategyCardActive,
-                tier === TIERS.FREE && { borderColor: 'rgba(255, 122, 0, 0.3)' }
-              ]}
-              onPress={() => {
-                if (tier === TIERS.FREE) {
-                  showAlert({
-                    title: "Recurso Exclusivo Premium",
-                    message: "O rastreamento de anúncios por Preço Alvo com faixa de tolerância é exclusivo para assinantes AchôAI Premium.",
-                    type: "warning",
-                    icon: "lock-closed",
-                    confirmText: "Ver Planos",
-                    cancelText: "Entendi",
-                    showCancel: true,
-                    onConfirm: openUpgradeModal
-                  });
-                  return;
-                }
-                setEstrategia('por_preco');
-              }}
-              activeOpacity={0.8}
-            >
-              <View style={styles.strategyHeader}>
-                <View style={[styles.strategyIconCircle, estrategia === 'por_preco' && styles.strategyIconCircleActive]}>
-                  <Ionicons name="pricetag-outline" size={17} color={estrategia === 'por_preco' ? THEME.primary : THEME.textMuted} />
-                </View>
-                <View style={{ flex: 1, marginHorizontal: 10 }}>
-                  <View style={styles.row}>
-                    <Text style={[styles.strategyTitle, estrategia === 'por_preco' && styles.strategyTitleActive]}>
-                      Rastrear por Preço Alvo (Orçamento)
-                    </Text>
-                    {tier === TIERS.FREE && (
-                      <View style={{ marginLeft: 6 }}>
-                        <LockBadge text="PREMIUM" />
-                      </View>
-                    )}
-                  </View>
-                  <Text style={styles.strategyDesc}>
-                    Filtra ofertas com margem de tolerância em torno do seu valor desejado.
-                  </Text>
-                </View>
-                <Ionicons 
-                  name={tier === TIERS.FREE ? "lock-closed" : (estrategia === 'por_preco' ? "radio-button-on" : "radio-button-off")} 
-                  size={19} 
-                  color={tier === TIERS.FREE ? THEME.warning : (estrategia === 'por_preco' ? THEME.primary : THEME.textSubtle)} 
-                />
-              </View>
-
-              {estrategia === 'por_preco' && tier !== TIERS.FREE && (
-                <View style={styles.strategyExtraBox}>
-                  <View style={styles.row}>
-                    <View style={{ flex: 1, marginRight: 8 }}>
-                      <Text style={styles.inputTitle}>VALOR ALVO (R$) *</Text>
-                      <TextInput 
-                        style={styles.inputField} 
-                        placeholder="Ex: 1500" 
-                        placeholderTextColor={THEME.textSubtle} 
-                        keyboardType="numeric" 
-                        value={precoAlvo} 
-                        onChangeText={setPrecoAlvo} 
-                      />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.inputTitle}>TOLERÂNCIA (%)</Text>
-                      <TextInput 
-                        style={styles.inputField} 
-                        placeholder="15" 
-                        placeholderTextColor={THEME.textSubtle} 
-                        keyboardType="numeric" 
-                        value={margem} 
-                        onChangeText={setMargem} 
-                      />
-                    </View>
-                  </View>
-
-                  {alvoNum > 0 ? (
-                    <View style={styles.targetPreviewCard}>
-                      <Ionicons name="filter" size={14} color={THEME.primary} style={{ marginRight: 6 }} />
-                      <Text style={styles.targetPreviewText}>
-                        Faixa aceita: <Text style={{ color: THEME.success, fontWeight: 'bold' }}>R$ {minEstimado.toFixed(2)}</Text> até <Text style={{ color: THEME.success, fontWeight: 'bold' }}>R$ {maxEstimado.toFixed(2)}</Text>
-                      </Text>
-                    </View>
-                  ) : (
-                    <Text style={[styles.helperText, { color: THEME.warning, marginTop: 8 }]}>
-                      ⚠️ Digite o valor alvo desejado para calcular a faixa orçamentária.
-                    </Text>
-                  )}
-                </View>
-              )}
-            </TouchableOpacity>
-          </>
-        )}
-
-        {/* 4. FREQUÊNCIA DE VARREDURA */}
-        <Text style={[styles.formSectionTitle, { marginTop: 18 }]}>4. FREQUÊNCIA DE VARREDURA</Text>
-        {tier === TIERS.FREE ? (
-          <Surface style={styles.formSurface}>
-            <View style={styles.rowBetween}>
-              <View style={{ flex: 1, paddingRight: 10 }}>
-                <Text style={styles.inputTitle}>INTERVALO FREE</Text>
-                <Text style={{ fontSize: 16, fontWeight: 'bold', color: THEME.text, marginTop: 4 }}>
-                  3 horas (180 minutos)
-                </Text>
-                <Text style={[styles.helperText, { marginTop: 6 }]}>
-                  🔒 Frequência padrão do Plano Free. Varreduras ultra rápidas a cada 15 minutos estão disponíveis no AchôAI Premium.
-                </Text>
-              </View>
-              <TouchableOpacity onPress={openUpgradeModal}>
-                <LockBadge text="LIBERAR 15M" />
-              </TouchableOpacity>
             </View>
-          </Surface>
-        ) : (
-          <Surface style={styles.formSurface}>
-            <Text style={styles.inputTitle}>PRESETS RÁPIDOS</Text>
-            <View style={styles.presetsRow}>
-              {['15', '30', '60', '120'].map(p => {
-                const isSelected = String(intervalo) === p;
-                const label = p === '60' ? '1 hora' : p === '120' ? '2 horas' : `${p} min`;
-                return (
-                  <TouchableOpacity 
-                    key={p}
-                    style={[styles.presetPill, isSelected && styles.presetPillActive]}
-                    onPress={() => setIntervalo(p)}
+
+            {/* Texto Criativo de Instrução */}
+            <Text style={styles.smartSearchInstructionText}>
+              Digite abaixo o produto desejado ou escolha um dos segmentos abaixo para comparar preços em tempo real:
+            </Text>
+
+            {/* Campo de Entrada de Texto */}
+            <View style={styles.smartSearchInputWrap}>
+              <TextInput
+                style={styles.smartSearchInput}
+                placeholder="Ex: iPhone 15, PS5, Geladeira Frost Free..."
+                placeholderTextColor="#94A3B8"
+                value={termo}
+                onChangeText={setTermo}
+                returnKeyType="search"
+                onSubmitEditing={() => handleIniciarPesquisaInteligente(termo)}
+              />
+              {termo.length > 0 && (
+                <TouchableOpacity onPress={() => setTermo('')} style={{ padding: 6 }}>
+                  <Ionicons name="close-circle" size={18} color="#94A3B8" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Toggle para OLX e Facebook Marketplace */}
+            <View style={styles.smartToggleRow}>
+              <View style={styles.smartToggleLabelWrap}>
+                <Ionicons name="pricetags-outline" size={18} color="#6366F1" style={{ marginRight: 8 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.smartToggleTitle}>Incluir OLX e Facebook Marketplace?</Text>
+                  <Text style={styles.smartToggleSubtitle}>Busca classificados e seminovos na sua região</Text>
+                </View>
+              </View>
+              <Switch
+                value={incluirSeminovos}
+                onValueChange={setIncluirSeminovos}
+                trackColor={{ false: '#CBD5E1', true: '#6366F1' }}
+                thumbColor="#FFFFFF"
+              />
+            </View>
+
+            {/* Seletores de Localização (Quando o Toggle Está Ativo) */}
+            {incluirSeminovos && (
+              <View style={styles.smartLocationContainer}>
+                {/* Seletor OLX */}
+                <View style={styles.smartLocationSection}>
+                  <View style={[styles.row, { marginBottom: 6 }]}>
+                    <StoreLogoBadge storeKey="OLX" size={18} style={{ marginRight: 6 }} />
+                    <Text style={styles.smartLocationPlatformTitle}>Localização OLX:</Text>
+                  </View>
+                  <View style={styles.smartLocationSelectorsRow}>
+                    {/* Botão Estado OLX */}
+                    <TouchableOpacity
+                      style={styles.smartLocationBtn}
+                      activeOpacity={0.7}
+                      onPress={() => setModalOlxUfVisible(true)}
+                    >
+                      <View style={{ flex: 1, marginRight: 4 }}>
+                        <Text style={styles.smartLocationBtnLabel}>Estado</Text>
+                        <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                          {olxUf === 'BR' ? 'Brasil Inteiro' : (OLX_ESTADOS[olxUf]?.nome || olxUf)}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-down" size={14} color="#64748B" />
+                    </TouchableOpacity>
+
+                    {/* Botão Região OLX */}
+                    <TouchableOpacity
+                      style={[styles.smartLocationBtn, olxUf === 'BR' && styles.smartLocationBtnDisabled]}
+                      activeOpacity={olxUf === 'BR' ? 1 : 0.7}
+                      onPress={() => {
+                        if (olxUf !== 'BR') setModalOlxRegiaoVisible(true);
+                      }}
+                    >
+                      <View style={{ flex: 1, marginRight: 4 }}>
+                        <Text style={styles.smartLocationBtnLabel}>Região</Text>
+                        <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                          {olxUf === 'BR' 
+                            ? 'Todas as Regiões' 
+                            : (olxRegiao 
+                              ? (OLX_ESTADOS[olxUf]?.regioes.find(r => r.slug === olxRegiao)?.nome || olxRegiao) 
+                              : 'Todo o Estado')}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-down" size={14} color={olxUf === 'BR' ? '#CBD5E1' : '#64748B'} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Seletor Facebook Marketplace */}
+                <View style={[styles.smartLocationSection, { marginTop: 10 }]}>
+                  <View style={[styles.row, { marginBottom: 6 }]}>
+                    <StoreLogoBadge storeKey="Facebook" size={18} style={{ marginRight: 6 }} />
+                    <Text style={styles.smartLocationPlatformTitle}>Localização Facebook Marketplace:</Text>
+                  </View>
+                  <View style={styles.smartLocationSelectorsRow}>
+                    {/* Botão Estado FB */}
+                    <TouchableOpacity
+                      style={styles.smartLocationBtn}
+                      activeOpacity={0.7}
+                      onPress={() => setModalFbUfVisible(true)}
+                    >
+                      <View style={{ flex: 1, marginRight: 4 }}>
+                        <Text style={styles.smartLocationBtnLabel}>Estado</Text>
+                        <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                          {fbUf === 'BR' ? 'Brasil Inteiro' : (FACEBOOK_ESTADOS_CIDADES[fbUf]?.nome || fbUf)}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-down" size={14} color="#64748B" />
+                    </TouchableOpacity>
+
+                    {/* Botão Cidade FB */}
+                    <TouchableOpacity
+                      style={[styles.smartLocationBtn, fbUf === 'BR' && styles.smartLocationBtnDisabled]}
+                      activeOpacity={fbUf === 'BR' ? 1 : 0.7}
+                      onPress={() => {
+                        if (fbUf !== 'BR') setModalFbCidadeVisible(true);
+                      }}
+                    >
+                      <View style={{ flex: 1, marginRight: 4 }}>
+                        <Text style={styles.smartLocationBtnLabel}>Cidade</Text>
+                        <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                          {fbUf === 'BR' 
+                            ? 'Todas as Cidades' 
+                            : (fbCidade && fbCidade !== 'brasil' 
+                              ? (FACEBOOK_ESTADOS_CIDADES[fbUf]?.cidades.find(c => c.slug === fbCidade)?.nome || fbCidade) 
+                              : 'Todo o Estado')}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-down" size={14} color={fbUf === 'BR' ? '#CBD5E1' : '#64748B'} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+
+            {/* Botão de Ação "Pesquisa Inteligente" */}
+            <TouchableOpacity
+              style={styles.smartSearchActionBtn}
+              onPress={() => handleIniciarPesquisaInteligente(termo)}
+              activeOpacity={0.88}
+            >
+              <Ionicons name="sparkles" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+              <Text style={styles.smartSearchActionBtnText}>Pesquisa Inteligente</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* TÍTULO DOS 10 SEGMENTOS LOGO ABAIXO DO CARD DE BUSCA */}
+          <View style={[styles.row, { marginTop: 22, marginBottom: 6 }]}>
+            <Ionicons name="grid-outline" size={16} color="#FF5722" style={{ marginRight: 6 }} />
+            <Text style={styles.smartSearchSectionTitle}>
+              Ou pesquise por segmento:
+            </Text>
+          </View>
+          <Text style={styles.smartSearchSectionSubtitle}>
+            Toque em um departamento para comparar os produtos mais populares em tempo real:
+          </Text>
+
+          {/* Grid dos 10 Segmentos Oficiais */}
+          <View style={styles.smartCategoriesGrid}>
+            {CATEGORIAS_PESQUISA.map(cat => {
+              return (
+                <TouchableOpacity
+                  key={cat.key}
+                  style={[
+                    styles.smartCategoryCard, 
+                    { backgroundColor: cat.bg }
+                  ]}
+                  onPress={() => {
+                    handleIniciarPesquisaInteligente(cat.query);
+                  }}
+                  activeOpacity={0.82}
+                >
+                  <View style={styles.smartCategoryIconBox}>
+                    <Ionicons 
+                      name={cat.icon} 
+                      size={22} 
+                      color="#0F172A" 
+                    />
+                  </View>
+                  <Text 
+                    style={styles.smartCategoryLabel} 
+                    numberOfLines={1}
                   >
-                    <Text style={[styles.presetPillText, isSelected && styles.presetPillTextActive]}>
-                      {label}
+                    {cat.label}
+                  </Text>
+                  <Text style={styles.smartCategoryActionHint}>
+                    Comparar ofertas
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </ScrollView>
+      )}
+
+      {/* ================================================================= */}
+      {/* ETAPA 2: TELA LIMPA BRANCA COM ANIMAÇÃO DE 10 SEGUNDOS            */}
+      {/* ================================================================= */}
+      {etapaBusca === 'varrendo' && (
+        <View style={styles.smartSweepCanvas}>
+          {/* Círculo do Radar com Pulsos Concorrentes */}
+          <View style={styles.smartRadarWrapper}>
+            <Animated.View 
+              style={[
+                styles.smartRadarPulseRing,
+                {
+                  transform: [{ scale: ringScale }],
+                  opacity: ringOpacity
+                }
+              ]} 
+            />
+            <Animated.View 
+              style={[
+                styles.smartRadarPulseCore,
+                { transform: [{ scale: pulseAnim }] }
+              ]}
+            >
+              <Ionicons name="search" size={36} color="#FFFFFF" />
+            </Animated.View>
+          </View>
+
+          {/* Badge de Plataformas Ativas */}
+          <View style={styles.smartSweepStoresRow}>
+            <StoreLogoBadge storeKey="Mercado Livre" size={24} style={{ marginHorizontal: 3 }} />
+            <StoreLogoBadge storeKey="Shopee" size={24} style={{ marginHorizontal: 3 }} />
+            <StoreLogoBadge storeKey="Amazon" size={24} style={{ marginHorizontal: 3 }} />
+            <StoreLogoBadge storeKey="Magalu" size={24} style={{ marginHorizontal: 3 }} />
+            <StoreLogoBadge storeKey="KaBuM!" size={24} style={{ marginHorizontal: 3 }} />
+            <StoreLogoBadge storeKey="Casas Bahia" size={24} style={{ marginHorizontal: 3 }} />
+            <StoreLogoBadge storeKey="SHEIN" size={24} style={{ marginHorizontal: 3 }} />
+            {incluirSeminovos && (
+              <>
+                <StoreLogoBadge storeKey="OLX" size={24} style={{ marginHorizontal: 3 }} />
+                <StoreLogoBadge storeKey="Facebook" size={24} style={{ marginHorizontal: 3 }} />
+              </>
+            )}
+          </View>
+
+          {/* Termo Buscado */}
+          <Text style={styles.smartSweepTermTitle}>
+            "{termo}"
+          </Text>
+
+          {/* Mensagem da Fase Atual */}
+          <View style={styles.smartSweepPhaseBox}>
+            <View style={styles.row}>
+              <Ionicons 
+                name={FASES_VARREDURA[faseIndex].icon} 
+                size={18} 
+                color="#FF5722" 
+                style={{ marginRight: 6 }} 
+              />
+              <Text style={styles.smartSweepPhaseTitle}>
+                {FASES_VARREDURA[faseIndex].titulo}
+              </Text>
+            </View>
+            <Text style={styles.smartSweepPhaseSubtitle}>
+              {FASES_VARREDURA[faseIndex].sub}
+            </Text>
+          </View>
+
+          {/* Barra de Progresso Suave dos 10s */}
+          <View style={styles.smartSweepProgressBarBg}>
+            <Animated.View 
+              style={[
+                styles.smartSweepProgressBarFill, 
+                { 
+                  width: progressoAnim.interpolate({
+                    inputRange: [0, 100],
+                    outputRange: ['0%', '100%']
+                  })
+                }
+              ]} 
+            />
+          </View>
+          <Text style={styles.smartSweepTimerText}>
+            Varredura inteligente em andamento (~20s)
+          </Text>
+        </View>
+      )}
+
+      {/* ================================================================= */}
+      {/* ETAPA 3: RESULTADOS MULTI-LOJAS COM FILTROS                       */}
+      {/* ================================================================= */}
+      {etapaBusca === 'resultados' && (
+        <View style={{ flex: 1 }}>
+          {/* Top Bar de Resultados: Contagem + Botão Nova Pesquisa */}
+          <View style={styles.smartResultsTopBar}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.smartResultsQueryTitle} numberOfLines={1}>
+                "{termo}"
+              </Text>
+              <Text style={styles.smartResultsCountSub}>
+                {resultadosFiltrados.length} ofertas encontradas
+              </Text>
+            </View>
+            <TouchableOpacity 
+              style={styles.smartNewSearchBtn}
+              onPress={handleReiniciarPesquisa}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="refresh-outline" size={14} color="#FF5722" style={{ marginRight: 4 }} />
+              <Text style={styles.smartNewSearchBtnText}>Nova Pesquisa</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Chips de Filtro e Ordenação com Container Protetor */}
+          <View style={styles.smartFilterChipsContainer}>
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.smartFilterChipsRow}
+            >
+              {[
+                { key: 'MAIOR_DESCONTO', label: '🔥 Maior Desconto' },
+                { key: 'MENOR_PRECO', label: 'Menor Preço' },
+              ].map(chip => {
+                const active = filtroChip === chip.key;
+                return (
+                  <TouchableOpacity
+                    key={chip.key}
+                    style={[styles.smartFilterChip, active && styles.smartFilterChipActive]}
+                    onPress={() => setFiltroChip(chip.key)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.smartFilterChipText, active && styles.smartFilterChipTextActive]}>
+                      {chip.label}
                     </Text>
                   </TouchableOpacity>
                 );
               })}
-            </View>
+            </ScrollView>
+          </View>
 
-            <Text style={[styles.inputTitle, { marginTop: 12 }]}>INTERVALO MANUAL (MINUTOS)</Text>
-            <TextInput 
-              style={styles.inputField} 
-              placeholder="15" 
-              placeholderTextColor={THEME.textSubtle} 
-              keyboardType="numeric" 
-              value={intervalo} 
-              onChangeText={setIntervalo} 
-            />
-            <Text style={[styles.helperText, { marginTop: 4 }]}>
-              Tempo mínimo: 15 minutos (para evitar sobrecarga no servidor).
-            </Text>
-          </Surface>
-        )}
-
-        {/* BOTÃO SALVAR */}
-        <View style={{ marginTop: 22 }}>
-          <PrimaryButton 
-            title={editando ? "Atualizar Radar" : "Salvar e Ativar Radar"} 
-            icon={editando ? "save-outline" : "rocket-outline"}
-            onPress={salvar}
-            loading={salvando}
-            size="lg"
+          {/* Lista de Resultados Virtualizada com FlatList (Desempenho Máximo e Zero Lag) */}
+          <FlatList 
+            data={resultadosFiltrados}
+            keyExtractor={(item, index) => item?.id ? String(item.id) : (item?.url ? String(item.url) : String(index))}
+            renderItem={({ item }) => (
+              <ProductDealCard
+                item={item}
+                onPress={() => handleResultClick(item)}
+                onToggleFavorite={(deal) => RecommendationEngine.registrarFavorito(deal?.titulo || deal?.title || item.titulo, currentOwnerId, deal?.loja || item.loja)}
+              />
+            )}
+            initialNumToRender={8}
+            maxToRenderPerBatch={8}
+            windowSize={5}
+            removeClippedSubviews={Platform.OS === 'android'}
+            contentContainerStyle={styles.feedScrollContent}
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={
+              <View style={styles.emptyFeedBox}>
+                <Ionicons name="search-outline" size={44} color="#94A3B8" />
+                <Text style={styles.emptyTitle}>Nenhuma oferta encontrada</Text>
+                <Text style={styles.emptyDesc}>
+                  Nenhum produto correspondente a "{termo}" foi encontrado no momento. Tente buscar por outros termos ou crie um Radar Inteligente.
+                </Text>
+                <TouchableOpacity 
+                  style={[styles.smartNewSearchBtn, { marginTop: 16 }]}
+                  onPress={handleReiniciarPesquisa}
+                >
+                  <Text style={styles.smartNewSearchBtnText}>Voltar à Pesquisa</Text>
+                </TouchableOpacity>
+              </View>
+            }
           />
         </View>
+      )}
 
-        <View style={{ height: 60 }} />
-      </ScrollView>
-
-
-      {/* MODAIS DE SUPORTE */}
-      <SelectionModal 
-        visible={modalEstadoVisivel}
-        title="Selecione o Estado (UF)"
-        items={LISTA_ESTADOS}
-        selectedId={estadoUf}
+      {/* Modal Seletor de UF da OLX */}
+      <SelectionModal
+        visible={modalOlxUfVisible}
+        title="Selecione o Estado (OLX)"
+        items={itensOlxEstados}
+        selectedId={olxUf}
         onSelect={(item) => {
-          setEstadoUf(item.uf);
-          let novaRegiao = '';
-          if (item.uf === 'BR') {
-            novaRegiao = '';
-          } else {
-            const regs = OLX_ESTADOS[item.uf]?.regioes || [];
-            novaRegiao = regs.length > 1 ? regs[1].slug : regs[0]?.slug || '';
-          }
-          setRegiaoSlug(novaRegiao);
-          AsyncStorage.setItem('@achoai_last_olx_location', JSON.stringify({ uf: item.uf, regiaoSlug: novaRegiao })).catch(() => {});
+          setOlxUf(item.id);
+          setOlxRegiao('');
+          setModalOlxUfVisible(false);
         }}
-        onClose={() => setModalEstadoVisivel(false)}
+        onClose={() => setModalOlxUfVisible(false)}
       />
 
-      <SelectionModal 
-        visible={modalRegiaoVisivel}
-        title={`Regiões de ${OLX_ESTADOS[estadoUf]?.nome}`}
-        items={regioesDoEstado}
-        selectedId={regiaoSlug}
+      {/* Modal Seletor de Região da OLX */}
+      <SelectionModal
+        visible={modalOlxRegiaoVisible}
+        title={`Região em ${OLX_ESTADOS[olxUf]?.nome || olxUf} (OLX)`}
+        items={itensOlxRegioes}
+        selectedId={olxRegiao}
         onSelect={(item) => {
-          setRegiaoSlug(item.slug);
-          AsyncStorage.setItem('@achoai_last_olx_location', JSON.stringify({ uf: estadoUf, regiaoSlug: item.slug })).catch(() => {});
+          setOlxRegiao(item.id);
+          setModalOlxRegiaoVisible(false);
         }}
-        onClose={() => setModalRegiaoVisivel(false)}
+        onClose={() => setModalOlxRegiaoVisible(false)}
       />
 
-      <Modal visible={modalAvisoNotifVisivel} animationType="fade" transparent={true} onRequestClose={() => setModalAvisoNotifVisivel(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={{ alignItems: 'center', marginVertical: 10 }}>
-              <View style={[styles.emptyIconPulseCircle, { marginBottom: 12 }]}>
-                <Ionicons name="notifications-off-outline" size={28} color={THEME.primary} />
-              </View>
-              <Text style={[styles.modalTitle, { textAlign: 'center' }]}>Notificações Desativadas</Text>
-              <Text style={styles.modalBodyText}>
-                Este aparelho ainda não possui as notificações ativadas para o AchôAI.
-              </Text>
-              <Text style={[styles.modalBodyText, { color: THEME.text, fontWeight: '500', marginTop: 8 }]}>
-                O robô fará as varreduras e salvará as oportunidades, mas você não receberá avisos sonoros na barra de status do celular.
-              </Text>
-            </View>
+      {/* Modal Seletor de UF do Facebook */}
+      <SelectionModal
+        visible={modalFbUfVisible}
+        title="Selecione o Estado (Facebook)"
+        items={itensFbEstados}
+        selectedId={fbUf}
+        onSelect={(item) => {
+          setFbUf(item.id);
+          setFbCidade('brasil');
+          setModalFbUfVisible(false);
+        }}
+        onClose={() => setModalFbUfVisible(false)}
+      />
 
-            <PrimaryButton 
-              title="Ativar Notificações no Aparelho"
-              icon="notifications"
-              onPress={tentarAtivarNotificacoes}
-              loading={ativandoNotif}
-              style={{ marginTop: 12 }}
-            />
+      {/* Modal Seletor de Cidade do Facebook */}
+      <SelectionModal
+        visible={modalFbCidadeVisible}
+        title={`Cidade em ${FACEBOOK_ESTADOS_CIDADES[fbUf]?.nome || fbUf} (Facebook)`}
+        items={itensFbCidades}
+        selectedId={fbCidade}
+        onSelect={(item) => {
+          setFbCidade(item.id);
+          setModalFbCidadeVisible(false);
+        }}
+        onClose={() => setModalFbCidadeVisible(false)}
+      />
 
-            <TouchableOpacity 
-              style={[styles.btnSecondaryTextOnly, { marginTop: 10 }]}
-              onPress={() => {
-                setModalAvisoNotifVisivel(false);
-                executarSalvamento();
-              }}
-            >
-              <Text style={styles.btnSecondaryTextOnlyLabel}>Salvar Mesmo Assim (Sem Avisos Push)</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity 
-              style={{ marginTop: 10, alignItems: 'center', paddingVertical: 6 }}
-              onPress={() => setModalAvisoNotifVisivel(false)}
-            >
-              <Text style={{ color: THEME.textSubtle, fontSize: 12 }}>Voltar ao Formulário</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
-
-// --- TELA 5: CONFIGURAÇÕES & IDENTIDADE ---
-function SettingsScreen() {
+// =====================================================================
+// MODAL: NOTIFICAÇÕES & HISTÓRICO DE ALERTAS COM ANIMAÇÃO PROFISSIONAL
+// =====================================================================
+function NotificationsModal({ visible, onClose, onClearAll }) {
   const { 
-    pushToken, user, fetchData, linkAccount, logoutUser,
-    notificacoesAtivas, alternarNotificacoes,
-    tier, tierState, trialEligibility, activatingTrial, subscribing,
-    openUpgradeModal, handleActivateTrial, handleSubscribePremium,
-    showAlert
+    resultados, notificacoesAtivas, alternarNotificacoes, 
+    handleOpenAd, testLocalNotification, showAlert 
+  } = useContext(RadarContext);
+
+  const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+  const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const [showModal, setShowModal] = useState(visible);
+  const isClosingRef = useRef(false);
+
+  useEffect(() => {
+    slideAnim.stopAnimation();
+    fadeAnim.stopAnimation();
+
+    if (visible) {
+      isClosingRef.current = false;
+      setShowModal(true);
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 260,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 280,
+          easing: Easing.bezier(0.16, 1, 0.3, 1),
+          useNativeDriver: true,
+        }),
+      ]).start();
+    } else {
+      isClosingRef.current = true;
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 0,
+          duration: 180,
+          easing: Easing.in(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: SCREEN_HEIGHT,
+          duration: 220,
+          easing: Easing.in(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start(({ finished }) => {
+        if (finished && isClosingRef.current) {
+          setShowModal(false);
+          isClosingRef.current = false;
+        }
+      });
+    }
+  }, [visible, SCREEN_HEIGHT]);
+
+  const handleClose = () => {
+    onClose();
+  };
+
+  if (!showModal) return null;
+
+  return (
+    <Modal visible={showModal} animationType="none" transparent onRequestClose={handleClose}>
+      <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+        {/* Backdrop estático escuro que esmaece suavemente (sem subir da tela!) */}
+        <Animated.View style={[styles.modalOverlayStaticBackdrop, { opacity: fadeAnim }]}>
+          <TouchableOpacity 
+            style={StyleSheet.absoluteFill} 
+            activeOpacity={1} 
+            onPress={handleClose} 
+          />
+        </Animated.View>
+
+        {/* Modal de notificações deslizando suavemente de baixo para cima */}
+        <Animated.View 
+          style={[
+            styles.notifDrawerContent, 
+            { transform: [{ translateY: slideAnim }] }
+          ]}
+        >
+          {/* Header */}
+          <View style={styles.notifDrawerHeader}>
+            <View style={styles.row}>
+              <Ionicons name="notifications" size={22} color={THEME.primary} style={{ marginRight: 8 }} />
+              <Text style={styles.notifDrawerTitle}>Notificações</Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              {resultados && resultados.length > 0 && (
+                <TouchableOpacity 
+                  onPress={onClearAll} 
+                  style={styles.notifClearAllBtn}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="trash-outline" size={14} color="#EF4444" style={{ marginRight: 4 }} />
+                  <Text style={styles.notifClearAllBtnText}>Limpar</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity onPress={handleClose} style={[styles.notifCloseBtn, { marginLeft: 8 }]}>
+                <Ionicons name="close" size={20} color="#0F172A" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Toggle de Notificações Push */}
+          <View style={styles.notifToggleRow}>
+            <View style={{ flex: 1, marginRight: 10 }}>
+              <Text style={styles.notifToggleTitle}>Alertas no Aparelho</Text>
+              <Text style={styles.notifToggleSub}>Receba avisos instantâneos de novos preços baixos</Text>
+            </View>
+            <Switch
+              value={Boolean(notificacoesAtivas)}
+              onValueChange={alternarNotificacoes}
+              trackColor={{ false: '#CBD5E1', true: THEME.primary }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
+
+          {/* Botão de Testar Notificação Push */}
+          <TouchableOpacity
+            style={styles.notifTestPushBtn}
+            activeOpacity={0.7}
+            onPress={async () => {
+              try {
+                await testLocalNotification();
+                showAlert({
+                  title: "Notificação Enviada!",
+                  message: "Verifique sua central de notificações do aparelho.",
+                  type: "success",
+                  icon: "notifications"
+                });
+              } catch (e) {
+                showAlert({
+                  title: "Aviso",
+                  message: "Não foi possível disparar a notificação local.",
+                  type: "warning"
+                });
+              }
+            }}
+          >
+            <Ionicons name="notifications-outline" size={15} color="#EA580C" style={{ marginRight: 6 }} />
+            <Text style={styles.notifTestPushBtnText}>Testar Envio de Notificação Push</Text>
+          </TouchableOpacity>
+
+          {/* Lista de Notificações Recebidas */}
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <Text style={styles.notifListHeaderTitle}>HISTÓRICO RECENTE</Text>
+            <Text style={styles.notifCountSub}>
+              {resultados ? `${resultados.length} alertas` : '0 alertas'}
+            </Text>
+          </View>
+
+          <ScrollView style={styles.notifScrollList} showsVerticalScrollIndicator={false}>
+            {(!resultados || resultados.length === 0) ? (
+              <View style={styles.notifEmptyState}>
+                <Ionicons name="notifications-off-outline" size={36} color="#94A3B8" />
+                <Text style={styles.notifEmptyStateTitle}>Nenhum alerta recente</Text>
+                <Text style={styles.notifEmptyStateSub}>
+                  Assim que encontrarmos produtos no preço que você monitora, eles aparecerão aqui.
+                </Text>
+              </View>
+            ) : (
+              resultados.slice(0, 30).map((r, idx) => (
+                <TouchableOpacity
+                  key={r.id || idx}
+                  style={styles.notifItemRow}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    handleClose();
+                    if (r.url) Linking.openURL(r.url);
+                  }}
+                >
+                  <View style={styles.notifItemIconBox}>
+                    <StoreLogoBadge storeKey={r.loja || RecommendationEngine.identificarLojaPorUrl(r.url)} size={24} />
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 10 }}>
+                    <Text style={styles.notifItemTitle} numberOfLines={2}>
+                      {r.title || 'Oferta imperdível encontrada'}
+                    </Text>
+                    <View style={styles.row}>
+                      <Text style={styles.notifItemPrice}>
+                        {r.price ? `R$ ${parseFloat(r.price).toFixed(2)}` : 'Ver oferta'}
+                      </Text>
+                      {r.loja && (
+                        <Text style={styles.notifItemStore}> • {r.loja}</Text>
+                      )}
+                    </View>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color="#94A3B8" />
+                </TouchableOpacity>
+              ))
+            )}
+          </ScrollView>
+        </Animated.View>
+      </View>
+    </Modal>
+  );
+}
+// =====================================================================
+// MODAL GAVETA LATERAL: CONFIGURAÇÕES & CONTA (FLUIDO 60FPS)
+// =====================================================================
+function SettingsDrawerModal({ visible, onClose }) {
+  const { 
+    user, deviceId, pushToken, tier, tierState, trialEligibility, 
+    activatingTrial, subscribing, handleActivateTrial, handleSubscribePremium, 
+    logoutUser, linkAccount, notificacoesAtivas, alternarNotificacoes, 
+    testLocalNotification, showAlert, onRefresh, openAuthModal 
   } = useContext(RadarContext);
 
   const [authLoading, setAuthLoading] = useState(false);
-  const [timeRemaining, setTimeRemaining] = useState(null);
+  const [cleaningCache, setCleaningCache] = useState(false);
+
+  const { width: SCREEN_WIDTH } = Dimensions.get('window');
+  const DRAWER_WIDTH = Math.round(Math.min(SCREEN_WIDTH * 0.82, 380));
+
+  const slideAnim = useRef(new Animated.Value(DRAWER_WIDTH)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const [showModal, setShowModal] = useState(visible);
+  const isClosingRef = useRef(false);
 
   useEffect(() => {
-    const updateTime = () => {
-      if (tierState?.expiresAt) {
-        setTimeRemaining(TierService.getRemainingTime(tierState.expiresAt));
-      } else {
-        setTimeRemaining(null);
-      }
+    slideAnim.stopAnimation();
+    fadeAnim.stopAnimation();
+
+    if (visible) {
+      isClosingRef.current = false;
+      setShowModal(true);
+      Animated.parallel([
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 280,
+          easing: Easing.bezier(0.16, 1, 0.3, 1),
+          useNativeDriver: true,
+        }),
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 260,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start();
+    } else {
+      isClosingRef.current = true;
+      Animated.parallel([
+        Animated.timing(slideAnim, {
+          toValue: DRAWER_WIDTH,
+          duration: 220,
+          easing: Easing.in(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(fadeAnim, {
+          toValue: 0,
+          duration: 200,
+          easing: Easing.in(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start(({ finished }) => {
+        if (finished && isClosingRef.current) {
+          setShowModal(false);
+          isClosingRef.current = false;
+        }
+      });
+    }
+  }, [visible, DRAWER_WIDTH]);
+
+  const handleClose = () => {
+    onClose();
+  };
+
+  const currentTier = tierState?.tier || tier || 'free';
+  const isTrialActive = currentTier === 'premium_lite';
+  const isPremium = currentTier === 'premium';
+  const isAdmin = currentTier === 'admin';
+  const isFree = currentTier === 'free';
+
+  const tierBadgeInfo = useMemo(() => {
+    if (isAdmin) {
+      return {
+        label: "Administrador Master",
+        icon: "shield-checkmark",
+        bg: "#FEF3C7",
+        border: "#FDE68A",
+        text: "#B45309",
+        desc: "Acesso total e irrestrito a todos os recursos, radares e diagnósticos do sistema."
+      };
+    }
+    if (isPremium) {
+      return {
+        label: "Assinante Premium",
+        icon: "star",
+        bg: "#F3E8FF",
+        border: "#E9D5FF",
+        text: "#7E22CE",
+        desc: tierState?.expiresAt ? `Assinatura ativa até ${new Date(tierState.expiresAt).toLocaleDateString('pt-BR')}` : "Assinatura Premium ativa."
+      };
+    }
+    if (isTrialActive) {
+      return {
+        label: "Premium Light (Teste 48h)",
+        icon: "sparkles",
+        bg: "#FFF7ED",
+        border: "#FFEDD5",
+        text: "#EA580C",
+        desc: tierState?.expiresAt ? `Período de teste ativo até ${new Date(tierState.expiresAt).toLocaleDateString('pt-BR')}` : "Período de teste de 2 dias ativo."
+      };
+    }
+    return {
+      label: "Plano Gratuito",
+      icon: "cube-outline",
+      bg: "#F1F5F9",
+      border: "#CBD5E1",
+      text: "#475569",
+      desc: "Modo gratuito padrão. Todas as lojas integradas e alertas no aparelho."
     };
-    updateTime();
-    const interval = setInterval(updateTime, 10000);
-    return () => clearInterval(interval);
-  }, [tierState?.expiresAt]);
+  }, [currentTier, isAdmin, isPremium, isTrialActive, tierState?.expiresAt]);
+
+  const handleCopyDeviceId = async () => {
+    if (!deviceId) return;
+    try {
+      await Clipboard.setStringAsync(deviceId);
+      try { Vibration.vibrate(20); } catch(e) {}
+      showAlert({ title: "Copiado!", message: "ID do aparelho copiado para a área de transferência.", type: "success" });
+    } catch (e) {
+      showAlert({ title: "ID do Aparelho", message: deviceId, type: "info" });
+    }
+  };
+
+  const handleLimparCache = async () => {
+    try {
+      setCleaningCache(true);
+      await AsyncStorage.multiRemove([
+        '@achoai_cached_recommendations_v9',
+        '@achoai_home_promotions_v9',
+        '@achoai_last_rec_update_timestamp_v9',
+        '@achoai_home_promotions_timestamp_v9',
+        '@achoai_user_profile_cache',
+        '@radar_renewal_modal_shown_session'
+      ]);
+      // Conforme arquitetura de privacidade: limpa e desloga automaticamente
+      if (user) {
+        await logoutUser();
+      }
+      if (onRefresh) onRefresh();
+      showAlert({ 
+        title: "Cache Limpo!", 
+        message: "Dados locais, imagens e sessão foram limpos. Faça login novamente para reconectar.", 
+        type: "success" 
+      });
+    } catch (e) {
+      showAlert({ title: "Aviso", message: "Não foi possível limpar o cache local.", type: "warning" });
+    } finally {
+      setCleaningCache(false);
+    }
+  };
+
+  if (!showModal) return null;
+
+  return (
+    <Modal visible={showModal} transparent onRequestClose={handleClose} animationType="none">
+      <View style={{ flex: 1 }}>
+        {/* Backdrop escurecido estático que fadeia suavemente */}
+        <Animated.View style={[styles.drawerBackdrop, { opacity: fadeAnim }]}>
+          <TouchableOpacity 
+            style={StyleSheet.absoluteFill} 
+            activeOpacity={1} 
+            onPress={handleClose} 
+          />
+        </Animated.View>
+
+        {/* Gaveta lateral deslizando a 60fps com aceleração por hardware */}
+        <Animated.View 
+          renderToHardwareTextureAndroid={true}
+          style={[
+            styles.sideDrawerContainer, 
+            { width: DRAWER_WIDTH, transform: [{ translateX: slideAnim }] }
+          ]}
+        >
+          {/* Header da Gaveta */}
+          <View style={styles.sideDrawerHeader}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Ionicons name="settings" size={20} color={THEME.primary} style={{ marginRight: 8 }} />
+              <Text style={styles.sideDrawerTitle}>Configurações</Text>
+            </View>
+            <TouchableOpacity onPress={handleClose} style={styles.notifCloseBtn}>
+              <Ionicons name="close" size={20} color="#0F172A" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView 
+            style={{ flex: 1 }} 
+            contentContainerStyle={styles.sideDrawerScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Conta do Usuário / Login Google */}
+            <View style={styles.settingsCard}>
+              <View style={styles.row}>
+                <View style={styles.settingsAvatar}>
+                  <Ionicons name={user ? "person" : "phone-portrait-outline"} size={22} color={THEME.primary} />
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.settingsAccountName}>
+                    {user?.email || 'Modo Visitante (Aparelho)'}
+                  </Text>
+                  <Text style={styles.settingsAccountSub}>
+                    {user ? 'Conta sincronizada em nuvem via Google' : 'Uso anônimo livre no seu aparelho'}
+                  </Text>
+                </View>
+              </View>
+
+              {user ? (
+                <TouchableOpacity style={styles.settingsAuthBtnOutline} onPress={logoutUser}>
+                  <Ionicons name="log-out-outline" size={16} color="#EF4444" style={{ marginRight: 6 }} />
+                  <Text style={[styles.settingsAuthBtnText, { color: '#EF4444' }]}>Desconectar Conta Google</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity 
+                  style={styles.settingsAuthBtnPrimary} 
+                  onPress={() => {
+                    handleClose();
+                    openAuthModal();
+                  }}
+                >
+                  <Ionicons name="logo-google" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                  <Text style={styles.settingsAuthBtnTextPrimary}>Entrar ou Criar Conta</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* ID Único do Aparelho com Botão de Copiar */}
+              <View style={styles.settingsDeviceIdRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.settingsDeviceIdLabel}>ID DO DISPOSITIVO</Text>
+                  <Text style={styles.settingsDeviceIdValue} numberOfLines={1}>
+                    {deviceId || 'Detectando aparelho...'}
+                  </Text>
+                </View>
+                <TouchableOpacity style={styles.settingsCopyBtn} onPress={handleCopyDeviceId}>
+                  <Ionicons name="copy-outline" size={14} color="#64748B" style={{ marginRight: 4 }} />
+                  <Text style={styles.settingsCopyBtnText}>Copiar</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Plano & Benefícios (Free, Premium, Premium Light, Admin) */}
+            <View style={styles.settingsCard}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <Text style={styles.settingsCardTitle}>Seu Plano Atual</Text>
+                <View style={[styles.settingsTierBadge, { backgroundColor: tierBadgeInfo.bg, borderColor: tierBadgeInfo.border }]}>
+                  <Ionicons name={tierBadgeInfo.icon} size={12} color={tierBadgeInfo.text} style={{ marginRight: 4 }} />
+                  <Text style={[styles.settingsTierBadgeText, { color: tierBadgeInfo.text }]}>
+                    {tierBadgeInfo.label}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.settingsTierDescText}>
+                {tierBadgeInfo.desc}
+              </Text>
+
+              {/* Ações de Upgrade e Teste Grátis de 2 Dias para Plano Free */}
+              {isFree && (
+                <View style={{ marginTop: 12 }}>
+                  {trialEligibility?.canActivate && (
+                    <TouchableOpacity 
+                      style={styles.settingsTrialBtn}
+                      onPress={() => {
+                        handleClose();
+                        handleActivateTrial(deviceId, user, pushToken);
+                      }}
+                      disabled={activatingTrial}
+                    >
+                      {activatingTrial ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <>
+                          <Ionicons name="sparkles" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                          <Text style={styles.settingsTrialBtnText}>Ativar Teste Grátis de 2 Dias (Premium Light)</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  )}
+
+                  <TouchableOpacity 
+                    style={styles.settingsUpgradeBtn}
+                    onPress={() => {
+                      handleClose();
+                      handleSubscribePremium();
+                    }}
+                    disabled={subscribing}
+                  >
+                    {subscribing ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <>
+                        <Ionicons name="star" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                        <Text style={styles.settingsUpgradeBtnText}>Assinar Premium (R$ 39,90/mês)</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+
+            {/* Alertas & Notificações Push */}
+            <View style={styles.settingsCard}>
+              <Text style={styles.settingsCardTitle}>Alertas & Notificações</Text>
+              
+              <View style={styles.settingsSwitchRow}>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={styles.settingsSwitchTitle}>Notificações Push em Tempo Real</Text>
+                  <Text style={styles.settingsSwitchSub}>
+                    {notificacoesAtivas ? 'Ativado: você recebe avisos imediatos de novos preços' : 'Pausado: notificações silenciosas'}
+                  </Text>
+                </View>
+                <Switch
+                  value={Boolean(notificacoesAtivas)}
+                  onValueChange={alternarNotificacoes}
+                  thumbColor="#FFFFFF"
+                  trackColor={{ false: '#CBD5E1', true: THEME.primary }}
+                />
+              </View>
+
+              <TouchableOpacity
+                style={styles.settingsTestNotifBtn}
+                onPress={async () => {
+                  try {
+                    await testLocalNotification();
+                    showAlert({ title: "Teste Enviado!", message: "Verifique sua barra de notificações do Android.", type: "success" });
+                  } catch(e) {
+                    showAlert({ title: "Aviso", message: "Não foi possível disparar o teste.", type: "warning" });
+                  }
+                }}
+              >
+                <Ionicons name="notifications-outline" size={16} color={THEME.primary} style={{ marginRight: 6 }} />
+                <Text style={styles.settingsTestNotifBtnText}>Testar Notificação Push</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Limpeza de Cache & Manutenção */}
+            <View style={styles.settingsCard}>
+              <Text style={styles.settingsCardTitle}>Armazenamento & Cache</Text>
+              <Text style={styles.settingsCardSub}>
+                Renove o catálogo de ofertas em cache. Como medida de privacidade, sua sessão será reiniciada.
+              </Text>
+              <TouchableOpacity 
+                style={styles.settingsCleanCacheBtn}
+                onPress={handleLimparCache}
+                disabled={cleaningCache}
+              >
+                {cleaningCache ? (
+                  <ActivityIndicator size="small" color="#64748B" />
+                ) : (
+                  <>
+                    <Ionicons name="refresh-outline" size={16} color="#0F172A" style={{ marginRight: 6 }} />
+                    <Text style={styles.settingsCleanCacheBtnText}>Limpar Cache e Sincronizar</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            {/* Sobre o Motor */}
+            <View style={{ alignItems: 'center', marginVertical: 20 }}>
+              <Text style={styles.aboutVersionText}>AchôAI v2.1 • Edição 2026</Text>
+              <Text style={styles.aboutMottoText}>O radar inteligente que encontra as melhores ofertas.</Text>
+            </View>
+          </ScrollView>
+        </Animated.View>
+      </View>
+    </Modal>
+  );
+}
+
+// =====================================================================
+// MODAL: CONVITE DE LOGIN & TUTORIAL DE SINCRONIZAÇÃO EM NUVEM (COMPACTO)
+// =====================================================================
+function AuthTutorialModal({ visible, onClose }) {
+  const { 
+    linkAccount, showAlert,
+    notificacoesAtivas, alternarNotificacoes 
+  } = useContext(RadarContext);
+
+  const [authLoading, setAuthLoading] = useState(false);
+  const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const scaleAnim = useRef(new Animated.Value(0.94)).current;
+  const [showModal, setShowModal] = useState(visible);
+  const isClosingRef = useRef(false);
+
+  useEffect(() => {
+    slideAnim.stopAnimation();
+    fadeAnim.stopAnimation();
+    scaleAnim.stopAnimation();
+
+    if (visible) {
+      isClosingRef.current = false;
+      setShowModal(true);
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 260,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 280,
+          easing: Easing.bezier(0.16, 1, 0.3, 1),
+          useNativeDriver: true,
+        }),
+        Animated.timing(scaleAnim, {
+          toValue: 1,
+          duration: 280,
+          easing: Easing.bezier(0.16, 1, 0.3, 1),
+          useNativeDriver: true,
+        }),
+      ]).start();
+    } else {
+      isClosingRef.current = true;
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 0,
+          duration: 180,
+          easing: Easing.in(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: SCREEN_HEIGHT,
+          duration: 220,
+          easing: Easing.in(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(scaleAnim, {
+          toValue: 0.94,
+          duration: 220,
+          easing: Easing.in(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start(({ finished }) => {
+        if (finished && isClosingRef.current) {
+          setShowModal(false);
+          isClosingRef.current = false;
+        }
+      });
+    }
+  }, [visible, SCREEN_HEIGHT]);
+
+  const handleClose = () => {
+    onClose();
+  };
 
   const handleLoginGoogle = async () => {
     try {
@@ -5303,11 +4194,7 @@ function SettingsScreen() {
         }
       });
       if (error) {
-        showAlert({
-          title: "Google Sign-In",
-          message: error.message,
-          type: "error"
-        });
+        showAlert({ title: "Google Sign-In", message: error.message, type: "error" });
         return;
       }
       if (data?.url) {
@@ -5329,470 +4216,973 @@ function SettingsScreen() {
             if (sessionData?.user) {
               await linkAccount(sessionData.user);
             }
-            showAlert({
-              title: "Conectado!",
-              message: "Sua conta Google foi conectada com sucesso.",
-              type: "success",
-              icon: "checkmark-circle"
+            handleClose();
+            showAlert({ 
+              title: "Bem-vindo!", 
+              message: "Sua conta Google foi conectada. Seus radares e alertas agora estão sincronizados na nuvem!", 
+              type: "success" 
             });
           }
         }
       }
     } catch (e) {
-      showAlert({
-        title: "Configuração do Google",
-        message: "Para utilizar o login com o Google, ative o provedor Google no Supabase Dashboard e adicione a URL de retorno às Redirect URLs autorizadas.",
-        type: "warning",
-        icon: "alert-circle"
-      });
+      showAlert({ title: "Aviso", message: "Serviço de autenticação temporariamente indisponível.", type: "warning" });
     } finally {
       setAuthLoading(false);
     }
   };
 
-  const handleLogout = async () => {
-    showAlert({
-      title: "Desconectar Conta Google",
-      message: "Deseja realmente desconectar? Seus dados serão mantidos com segurança e este aparelho voltará ao modo anônimo local.",
-      type: "confirm_warning",
-      icon: "log-out-outline",
-      confirmText: "Sim, Sair",
-      cancelText: "Cancelar",
-      showCancel: true,
-      onConfirm: async () => {
-        await logoutUser();
+  const handleAtivarNotificacoesModal = async () => {
+    try {
+      await alternarNotificacoes(true);
+      showAlert({ 
+        title: "Notificações Ativadas!", 
+        message: "Seu aparelho agora receberá alertas instantâneos assim que uma oferta for achada.", 
+        type: "success" 
+      });
+    } catch (e) {
+      showAlert({ title: "Aviso", message: "Verifique as permissões de notificação no seu celular.", type: "warning" });
+    }
+  };
+
+  if (!showModal) return null;
+
+  return (
+    <Modal visible={showModal} transparent animationType="none" onRequestClose={handleClose}>
+      <View style={styles.authModalCenteredContainer}>
+        {/* Backdrop escuro com fade suave */}
+        <Animated.View style={[styles.modalOverlayStaticBackdrop, { opacity: fadeAnim }]}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={handleClose} />
+        </Animated.View>
+
+        {/* Modal de Login e Tutorial Compacto (100% visível na tela sem scroll) */}
+        <Animated.View 
+          renderToHardwareTextureAndroid={true}
+          style={[
+            styles.authTutorialCardCompact, 
+            { 
+              transform: [{ translateY: slideAnim }, { scale: scaleAnim }] 
+            }
+          ]}
+        >
+          {/* Header do Modal */}
+          <View style={styles.authTutorialHeader}>
+            <View style={styles.authBadgeIconBox}>
+              <Ionicons name="sparkles" size={16} color="#FF5722" />
+            </View>
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.authTutorialTitle}>Sua Conta AchôAI</Text>
+              <Text style={styles.authTutorialSubtitle}>
+                Sincronize seus radares e alertas em tempo real
+              </Text>
+            </View>
+            <TouchableOpacity onPress={handleClose} style={styles.notifCloseBtn}>
+              <Ionicons name="close" size={18} color="#0F172A" />
+            </TouchableOpacity>
+          </View>
+
+          {/* 3 Benefícios Compactos */}
+          <View style={styles.authBenefitsBox}>
+            <View style={styles.authBenefitRow}>
+              <View style={[styles.authBenefitIconBox, { backgroundColor: '#EFF6FF' }]}>
+                <Ionicons name="cloud-done-outline" size={14} color="#3B82F6" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={styles.authBenefitTitle}>Sincronização em Múltiplos Aparelhos</Text>
+                <Text style={styles.authBenefitDesc}>
+                  Acompanhe seus radares no celular, tablet ou outro dispositivo.
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.authBenefitRow}>
+              <View style={[styles.authBenefitIconBox, { backgroundColor: '#ECFDF5' }]}>
+                <Ionicons name="shield-checkmark-outline" size={14} color="#10B981" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={styles.authBenefitTitle}>Privacidade e Armazenamento Local</Text>
+                <Text style={styles.authBenefitDesc}>
+                  Seu nome e foto ficam exclusivamente na memória deste aparelho.
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.authBenefitRow}>
+              <View style={[styles.authBenefitIconBox, { backgroundColor: '#FFF7ED' }]}>
+                <Ionicons name="infinite-outline" size={14} color="#FF5722" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={styles.authBenefitTitle}>Uso Livre e Flexível</Text>
+                <Text style={styles.authBenefitDesc}>
+                  Crie radares normalmente; sua conta protege seus dados e alertas.
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Botão Principal: Conectar com o Google */}
+          <TouchableOpacity 
+            style={styles.authGoogleButton}
+            onPress={handleLoginGoogle}
+            disabled={authLoading}
+            activeOpacity={0.85}
+          >
+            {authLoading ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <>
+                <Ionicons name="logo-google" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.authGoogleButtonText}>Continuar com o Google</Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          {/* Seção Importante: Notificações no Aparelho */}
+          <View style={styles.authNotifBanner}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+              <Ionicons name="notifications" size={14} color={notificacoesAtivas ? "#16A34A" : "#EA580C"} style={{ marginRight: 5 }} />
+              <Text style={styles.authNotifBannerTitle}>
+                {notificacoesAtivas ? "Alertas Ativos no Aparelho" : "Mantenha as Notificações Ativadas"}
+              </Text>
+            </View>
+            <Text style={styles.authNotifBannerDesc}>
+              O radar vigia preços 24h. Ative para receber alertas no instante da oferta.
+            </Text>
+
+            {!notificacoesAtivas ? (
+              <TouchableOpacity 
+                style={styles.authEnableNotifBtn}
+                onPress={handleAtivarNotificacoesModal}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="notifications-outline" size={13} color="#FFFFFF" style={{ marginRight: 5 }} />
+                <Text style={styles.authEnableNotifBtnText}>Ativar Notificações no Aparelho</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.authNotifActiveBadge}>
+                <Ionicons name="checkmark-circle" size={13} color="#16A34A" style={{ marginRight: 4 }} />
+                <Text style={styles.authNotifActiveBadgeText}>Notificações push em tempo real ativadas</Text>
+              </View>
+            )}
+          </View>
+        </Animated.View>
+      </View>
+    </Modal>
+  );
+}
+// =====================================================================
+// ASSISTENTE DE CRIAÇÃO DE RADAR EM 3 ETAPAS (FULL SCREEN WIZARD)
+// =====================================================================
+function CreateMonitorScreen({ navigation, route }) {
+  const { currentOwnerId, onRefresh, showAlert } = useContext(RadarContext);
+  const editando = route?.params?.monitor;
+
+  // Etapa Atual do Assistente (1: Lojas, 2: Produto & Estratégia, 3: Frequência & Ativação)
+  const [etapa, setEtapa] = useState(1);
+
+  // Etapa 1: Plataformas (Inicia com ZERO lojas selecionadas a menos que esteja editando)
+  const [selectedPlatforms, setSelectedPlatforms] = useState(() => {
+    if (editando?.plataforma) {
+      return editando.plataforma.split(',').map(p => p.trim()).filter(Boolean);
+    }
+    if (editando?.urls) {
+      const p = identificarPlataforma(editando.urls);
+      return (p && p !== 'OUTROS') ? [p] : [];
+    }
+    return [];
+  });
+
+  // Etapa 2: Produto, Estratégia e Filtros
+  const [produto, setProduto] = useState(editando?.produto || editando?.palavras?.split(' ')[0] || '');
+  const [estrategia, setEstrategia] = useState(() => {
+    if (editando?.modo) return editando.modo;
+    if (editando?.preco_alvo) return 'preco_alvo';
+    return 'menor_preco';
+  });
+
+  // Máscara monetária em tempo real (R$ 3.500,00)
+  const formatarMoeda = (valorStr) => {
+    const digits = String(valorStr || '').replace(/\D/g, '');
+    if (!digits) return '';
+    const val = (parseInt(digits, 10) / 100).toFixed(2);
+    const parts = val.split('.');
+    const inteira = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    return `${inteira},${parts[1]}`;
+  };
+
+  const [precoAlvo, setPrecoAlvo] = useState(() => {
+    if (editando?.preco_alvo) {
+      const v = parseFloat(editando.preco_alvo);
+      if (!isNaN(v) && v > 0) {
+        return formatarMoeda((v * 100).toFixed(0));
+      }
+    }
+    return '';
+  });
+
+  const handleChangePrecoAlvo = (texto) => {
+    setPrecoAlvo(formatarMoeda(texto));
+  };
+
+  // Inteligência de Alerta Multi-Plataforma (Padrão desligado: 1 resultado consolidado do menor preço)
+  const [notificarPorLoja, setNotificarPorLoja] = useState(() => {
+    if (editando?.notificar_por_loja !== undefined) return Boolean(editando.notificar_por_loja);
+    if (editando?.palavras && editando.palavras.includes('notificar_por_loja:true')) return true;
+    return false;
+  });
+
+  const [freteGratis, setFreteGratis] = useState(true);
+
+  // Localização contextual para OLX e Facebook
+  const [olxUf, setOlxUf] = useState('SP');
+  const [olxRegiao, setOlxRegiao] = useState('');
+  const [modalOlxUfVisible, setModalOlxUfVisible] = useState(false);
+  const [modalOlxRegiaoVisible, setModalOlxRegiaoVisible] = useState(false);
+
+  const [fbUf, setFbUf] = useState('SP');
+  const [fbCidade, setFbCidade] = useState('sao-paulo');
+  const [modalFbUfVisible, setModalFbUfVisible] = useState(false);
+  const [modalFbCidadeVisible, setModalFbCidadeVisible] = useState(false);
+
+  // Itens formatados para os modais de seleção
+  const itensOlxEstados = useMemo(() => {
+    return LISTA_ESTADOS.map(e => ({ id: e.uf, uf: e.uf, nome: e.nome }));
+  }, []);
+
+  const itensOlxRegioes = useMemo(() => {
+    const estado = OLX_ESTADOS[olxUf];
+    return (estado?.regioes || []).map(r => ({ id: r.slug, nome: r.nome, slug: r.slug }));
+  }, [olxUf]);
+
+  const itensFbEstados = useMemo(() => {
+    return LISTA_ESTADOS_FACEBOOK.map(e => ({ id: e.uf, uf: e.uf, nome: e.nome }));
+  }, []);
+
+  const itensFbCidades = useMemo(() => {
+    const estado = FACEBOOK_ESTADOS_CIDADES[fbUf];
+    return (estado?.cidades || []).map(c => ({ id: c.slug, nome: c.nome, slug: c.slug }));
+  }, [fbUf]);
+
+  // Etapa 3: Frequência
+  const [frequencia, setFrequencia] = useState(editando?.intervalo_valor || editando?.intervalo_minutos || 15);
+  const [salvando, setSalvando] = useState(false);
+
+  const PLATAFORMAS_DISPONIVEIS = [
+    'MERCADO_LIVRE',
+    'SHOPEE',
+    'AMAZON',
+    'MAGALU',
+    'KABUM',
+    'AMERICANAS',
+    'CASASBAHIA',
+    'FASTSHOP',
+    'CARREFOUR',
+    'SHEIN',
+    'OLX',
+    'FACEBOOK'
+  ];
+
+  const togglePlatform = (key) => {
+    try { Vibration.vibrate(20); } catch (e) {}
+    setSelectedPlatforms(prev => {
+      if (prev.includes(key)) {
+        return prev.filter(k => k !== key);
+      } else {
+        return [...prev, key];
       }
     });
   };
 
-  const dispararTesteLocal = async () => {
-    try {
-      const res = await testLocalNotification();
-      if (res && res.success === false) {
-        showAlert({
-          title: "Informação",
-          message: res.message,
-          type: "info"
-        });
-      } else {
-        showAlert({
-          title: "Notificação Enviada!",
-          message: "Notificação de teste disparada na barra de status.",
-          type: "success",
-          icon: "notifications-outline"
-        });
-      }
-    } catch (e) {
-      showAlert({
-        title: "Aviso",
-        message: "Notificações locais requerem o app compilado.",
-        type: "warning"
-      });
+  const mudarEtapa = (novaEtapa) => {
+    try { Vibration.vibrate(25); } catch (e) {}
+    setEtapa(novaEtapa);
+  };
+
+  const montarUrlPorPlataforma = (platKey, termo) => {
+    const t = encodeURIComponent(termo.trim());
+    switch(platKey) {
+      case 'MERCADO_LIVRE':
+        return `https://lista.mercadolivre.com.br/${termo.trim().replace(/\s+/g, '-')}${freteGratis ? '_CustoFrete_Gratis' : ''}`;
+      case 'SHOPEE':
+        return `https://shopee.com.br/search?keyword=${t}`;
+      case 'AMAZON':
+        return `https://www.amazon.com.br/s?k=${t}`;
+      case 'MAGALU':
+        return `https://www.magazineluiza.com.br/busca/${t}/`;
+      case 'KABUM':
+        return `https://www.kabum.com.br/busca/${t}`;
+      case 'AMERICANAS':
+        return `https://www.americanas.com.br/busca/${t}`;
+      case 'SHEIN':
+        return `https://br.shein.com/pdsearch/${t}/`;
+      case 'FASTSHOP':
+        return `https://site.fastshop.com.br/s?q=${t}`;
+      case 'CARREFOUR':
+        return `https://www.carrefour.com.br/busca/${t}`;
+      case 'CASASBAHIA':
+        return `https://www.casasbahia.com.br/${encodeURIComponent(termo.trim().toLowerCase().replace(/\s+/g, '-'))}/b`;
+      case 'OLX':
+        return gerarUrlOlx(olxUf, olxRegiao, termo);
+      case 'FACEBOOK':
+        return gerarUrlFacebook(fbCidade, termo);
+      default:
+        return `https://lista.mercadolivre.com.br/${termo.trim().replace(/\s+/g, '-')}`;
     }
   };
 
+  const handleSalvarRadar = async () => {
+    if (!produto.trim()) {
+      showAlert({
+        title: "Atenção",
+        message: "Por favor, digite o nome do produto que deseja rastrear.",
+        type: "warning"
+      });
+      return;
+    }
+
+    try {
+      setSalvando(true);
+
+      const urlsArray = selectedPlatforms.map(platKey => montarUrlPorPlataforma(platKey, produto));
+      const urlsFinal = urlsArray.join(', ');
+
+      const precoAlvoLimpo = (precoAlvo || '').replace(/\./g, '').replace(',', '.');
+      const precoAlvoNum = precoAlvoLimpo ? parseFloat(precoAlvoLimpo) : null;
+
+      let palavrasFinal = produto.trim();
+      if (estrategia === 'preco_alvo' && precoAlvoNum > 0) {
+        palavrasFinal += ` preco_alvo:${precoAlvoNum}`;
+      }
+      if (freteGratis) {
+        palavrasFinal += ` frete_gratis:true`;
+      }
+      if (notificarPorLoja && selectedPlatforms.length > 1) {
+        palavrasFinal += ` notificar_por_loja:true`;
+      }
+
+      // PAYLOAD 100% COMPATÍVEL COM SCHEMA DO SUPABASE
+      const payload = {
+        usuario_id: currentOwnerId,
+        nome: produto.trim().toUpperCase(),
+        urls: urlsFinal,
+        modo: estrategia, // 'menor_preco' | 'preco_alvo' | 'maior_desconto'
+        produto: produto.trim(),
+        preco_alvo: (estrategia === 'preco_alvo' && precoAlvoNum > 0) ? precoAlvoNum : null,
+        margem: 15,
+        palavras: palavrasFinal,
+        intervalo_valor: parseInt(frequencia, 10) || 15,
+        intervalo_unidade: 'minutos',
+        ativo: true,
+        forcar_teste: false,
+        proxima_execucao: new Date(Date.now() + (parseInt(frequencia, 10) || 15) * 60 * 1000).toISOString(),
+        plataforma: selectedPlatforms.join(', '),
+        notificar_por_loja: Boolean(notificarPorLoja && selectedPlatforms.length > 1)
+      };
+
+      if (editando) {
+        await RadarAPI.updateMonitor(editando.id, payload);
+      } else {
+        await RadarAPI.createMonitor(payload);
+      }
+
+      // Registra o interesse local do usuário (peso 5)
+      RecommendationEngine.registrarPesquisaOuRadar(produto.trim(), currentOwnerId);
+
+      if (onRefresh) onRefresh();
+
+      showAlert({
+        title: "Radar Ativado!",
+        message: `Seu radar para "${produto.trim()}" está ativo e buscando ofertas nas ${selectedPlatforms.length} lojas selecionadas.`,
+        type: "success",
+        icon: "checkmark-circle",
+        onConfirm: () => navigation.goBack()
+      });
+    } catch (e) {
+      console.log("[CreateMonitor] Erro ao salvar radar:", e);
+      showAlert({
+        title: "Erro",
+        message: "Não foi possível salvar o radar. Verifique sua conexão e tente novamente.",
+        type: "error"
+      });
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const primeiraLoja = selectedPlatforms[0] ? (THEME.platforms[selectedPlatforms[0]]?.nome || selectedPlatforms[0]) : 'loja';
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" backgroundColor={THEME.bg} />
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
-      {/* TOP HEADER */}
-      <View style={styles.screenHeader}>
-        <View>
-          <Text style={styles.screenHeaderTitle}>Configurações</Text>
-          <Text style={styles.screenHeaderSub}>Plano, Conta e Notificações</Text>
+      {/* Header com Barra de Progresso das 3 Etapas */}
+      <View style={styles.wizardHeader}>
+        <TouchableOpacity 
+          onPress={() => {
+            if (etapa > 1) mudarEtapa(etapa - 1);
+            else navigation.goBack();
+          }} 
+          style={styles.wizardBackBtn}
+        >
+          <Ionicons name={etapa > 1 ? "arrow-back" : "close"} size={22} color="#0F172A" />
+        </TouchableOpacity>
+
+        <View style={{ flex: 1, alignItems: 'center' }}>
+          <Text style={styles.wizardHeaderTitle}>Configurar Radar</Text>
+          <Text style={styles.wizardStepIndicator}>Etapa {etapa} de 3</Text>
         </View>
-        <TierBadge tier={tier} size="md" />
+
+        <View style={{ width: 36 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollArea} showsVerticalScrollIndicator={false}>
-        
-        {/* SEÇÃO 1: MINHA ASSINATURA & PLANO */}
-        <SectionHeader title="MINHA ASSINATURA & PLANO" icon="sparkles-outline" />
-        <Surface style={styles.settingsCard} elevated>
-          <View style={styles.rowBetween}>
-            <View style={{ flex: 1, paddingRight: 10 }}>
-              <Text style={styles.settingsItemTitle}>
-                {tier === TIERS.ADMIN ? 'Administrador Master' :
-                 tier === TIERS.PREMIUM ? 'Plano Premium Ativo' :
-                 tier === TIERS.LITE ? 'Teste Grátis (Premium Lite)' : 'Plano Gratuito'}
-              </Text>
-              <Text style={styles.helperText}>
-                {tier === TIERS.ADMIN ? 'Acesso vitalício irrestrito a todas as ferramentas.' :
-                 tier === TIERS.PREMIUM ? 'Varreduras sem cooldown, 5 radares e sincronização.' :
-                 tier === TIERS.LITE ? 'Aproveite 48 horas completas com todos os benefícios Premium.' :
-                 'Monitoramento essencial de 1 radar restrito a este aparelho.'}
+      {/* Barra de Progresso Visual */}
+      <View style={styles.wizardProgressBarContainer}>
+        <View style={[styles.wizardProgressBar, { width: `${(etapa / 3) * 100}%` }]} />
+      </View>
+
+      {/* ETAPA 1: SELEÇÃO DE PLATAFORMAS EM CÍRCULOS (GRID 3x4 RESPONSIVO) */}
+      {etapa === 1 && (
+        <View style={{ flex: 1 }}>
+          <ScrollView 
+            contentContainerStyle={styles.wizardStepContent} 
+            showsVerticalScrollIndicator={false}
+          >
+            <Text style={styles.wizardTitle}>Onde você quer buscar?</Text>
+            <Text style={styles.wizardSubtitle}>
+              Selecione as lojas que o AchôAI deve monitorar simultaneamente.
+            </Text>
+
+            <View style={styles.wizardCirclesGrid}>
+              {PLATAFORMAS_DISPONIVEIS.map(platKey => (
+                <PlatformCircle
+                  key={platKey}
+                  platformKey={platKey}
+                  selected={selectedPlatforms.includes(platKey)}
+                  onToggle={() => togglePlatform(platKey)}
+                />
+              ))}
+            </View>
+          </ScrollView>
+
+          {/* Rodapé Etapa 1 */}
+          <View style={styles.wizardFooterBar}>
+            <View>
+              <Text style={styles.wizardFooterCountText}>
+                {selectedPlatforms.length === 0 
+                  ? 'Nenhuma loja selecionada' 
+                  : (selectedPlatforms.length === 1 ? '1 loja selecionada' : `${selectedPlatforms.length} lojas selecionadas`)}
               </Text>
             </View>
-            <TierBadge tier={tier} size="md" />
+            <TouchableOpacity 
+              style={[styles.wizardContinueBtn, selectedPlatforms.length === 0 && { opacity: 0.45 }]}
+              onPress={() => {
+                if (selectedPlatforms.length > 0) mudarEtapa(2);
+              }}
+              disabled={selectedPlatforms.length === 0}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.wizardContinueBtnText}>Continuar</Text>
+              <Ionicons name="arrow-forward" size={16} color="#FFFFFF" style={{ marginLeft: 6 }} />
+            </TouchableOpacity>
           </View>
+        </View>
+      )}
 
-          {/* Contador de Tempo do Plano */}
-          {tier === TIERS.PREMIUM && timeRemaining && (
-            <View style={styles.subscriptionTimeBox}>
-              <View style={styles.row}>
-                <Ionicons 
-                  name="time-outline" 
-                  size={16} 
-                  color={timeRemaining.isExpiringSoon ? THEME.warning : THEME.primary} 
-                  style={{ marginRight: 6 }} 
-                />
-                <Text style={[styles.subscriptionTimeText, timeRemaining.isExpiringSoon && { color: THEME.warning }]}>
-                  {timeRemaining.days > 0 
-                    ? `${timeRemaining.days} dias, ${timeRemaining.hours}h e ${timeRemaining.minutes}m restantes`
-                    : `${timeRemaining.hours}h e ${timeRemaining.minutes}m restantes`}
-                </Text>
-              </View>
-              {timeRemaining.isExpiringSoon && (
-                <View style={styles.expiringSoonAlert}>
-                  <Ionicons name="alert-circle" size={14} color={THEME.warning} style={{ marginRight: 6 }} />
-                  <Text style={styles.expiringSoonText}>
-                    Sua assinatura expira em breve! Renove agora para manter seus radares adicionais ativos.
+      {/* ETAPA 2: PRODUTO, ESTRATÉGIA, PREÇO ALVO E ALERTA POR LOJA */}
+      {etapa === 2 && (
+        <KeyboardAvoidingView 
+          style={{ flex: 1 }} 
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
+        >
+          <ScrollView 
+            contentContainerStyle={styles.wizardStepContent} 
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            <Text style={styles.wizardTitle}>O que você procura?</Text>
+            <Text style={styles.wizardSubtitle}>
+              Digite o nome ou modelo do produto desejado para o rastreador.
+            </Text>
+
+            <View style={styles.wizardInputBox}>
+              <Ionicons name="search" size={20} color="#FF5722" style={{ marginRight: 10 }} />
+              <TextInput
+                style={styles.wizardInputField}
+                placeholder="Ex: iPhone 15 Pro, PS5 Slim, Air Fryer..."
+                placeholderTextColor="#94A3B8"
+                value={produto}
+                onChangeText={setProduto}
+                autoFocus={!produto}
+              />
+            </View>
+
+            {/* Estratégias de Alerta */}
+            <Text style={[styles.wizardSectionTitle, { marginTop: 22 }]}>Estratégia de Alerta</Text>
+            <Text style={styles.wizardSectionSub}>Como você deseja ser notificado pelo radar?</Text>
+
+            <View style={styles.wizardStrategiesContainer}>
+              {/* Opção 1: Menor Preço Disponível */}
+              <TouchableOpacity
+                style={[styles.wizardStrategyCard, estrategia === 'menor_preco' && styles.wizardStrategyCardActive]}
+                onPress={() => setEstrategia('menor_preco')}
+                activeOpacity={0.85}
+              >
+                <View style={[styles.wizardRadio, estrategia === 'menor_preco' && styles.wizardRadioActive]}>
+                  {estrategia === 'menor_preco' && <View style={styles.wizardRadioDot} />}
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={[styles.wizardStrategyTitle, estrategia === 'menor_preco' && styles.wizardStrategyTitleActive]}>
+                    Menor Preço Disponível
+                  </Text>
+                  <Text style={styles.wizardStrategyDesc}>
+                    O AchôAI alerta imediatamente a oferta mais barata encontrada no momento da busca.
                   </Text>
                 </View>
-              )}
-            </View>
-          )}
-
-          {tier === TIERS.LITE && timeRemaining && (
-            <View style={styles.subscriptionTimeBox}>
-              <View style={styles.row}>
-                <Ionicons name="hourglass-outline" size={16} color={THEME.primary} style={{ marginRight: 6 }} />
-                <Text style={styles.subscriptionTimeText}>
-                  {timeRemaining.hours > 0 
-                    ? `${timeRemaining.hours} horas e ${timeRemaining.minutes} minutos restantes`
-                    : `${timeRemaining.minutes} minutos restantes`}
-                </Text>
-              </View>
-              <Text style={styles.trialInfoSub}>
-                Após o término das 48h, sua conta voltará automaticamente ao plano Free.
-              </Text>
-            </View>
-          )}
-
-          {tier === TIERS.ADMIN && (
-            <View style={styles.adminPerksBox}>
-              <Ionicons name="shield-checkmark" size={16} color={THEME.success} style={{ marginRight: 8 }} />
-              <Text style={styles.adminPerksText}>
-                Acesso Vitalício Irrestrito • Radares Ilimitados • Sem Cooldown
-              </Text>
-            </View>
-          )}
-
-          <View style={styles.divider} />
-
-          {/* Botões de Ação de Assinatura */}
-          {tier === TIERS.FREE && (
-            <View>
-              <TouchableOpacity 
-                style={styles.btnUpgradeSaaS}
-                onPress={handleSubscribePremium}
-                activeOpacity={0.85}
-                disabled={subscribing}
-              >
-                {subscribing ? (
-                  <ActivityIndicator size="small" color="#08090D" />
-                ) : (
-                  <>
-                    <Ionicons name="sparkles" size={16} color="#08090D" style={{ marginRight: 8 }} />
-                    <Text style={styles.btnUpgradeSaaSText}>Assinar Premium (R$ 39,90/mês)</Text>
-                  </>
-                )}
               </TouchableOpacity>
 
-              {trialEligibility?.canActivate && (
-                <TouchableOpacity 
-                  style={styles.btnTrialSaaS}
-                  onPress={handleActivateTrial}
-                  activeOpacity={0.8}
-                  disabled={activatingTrial}
-                >
-                  {activatingTrial ? (
-                    <ActivityIndicator size="small" color={THEME.primary} />
-                  ) : (
-                    <>
-                      <Ionicons name="gift-outline" size={15} color={THEME.primary} style={{ marginRight: 6 }} />
-                      <Text style={styles.btnTrialSaaSText}>Ativar 2 Dias Grátis (Premium Lite)</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-              )}
-            </View>
-          )}
-
-          {tier === TIERS.LITE && (
-            <TouchableOpacity 
-              style={styles.btnUpgradeSaaS}
-              onPress={handleSubscribePremium}
-              activeOpacity={0.85}
-              disabled={subscribing}
-            >
-              {subscribing ? (
-                <ActivityIndicator size="small" color="#08090D" />
-              ) : (
-                <>
-                  <Ionicons name="sparkles" size={16} color="#08090D" style={{ marginRight: 8 }} />
-                  <Text style={styles.btnUpgradeSaaSText}>Garantir Assinatura Premium (R$ 39,90/mês)</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          )}
-
-          {tier === TIERS.PREMIUM && (
-            <TouchableOpacity 
-              style={[styles.btnUpgradeSaaS, timeRemaining?.isExpiringSoon && { backgroundColor: THEME.warning }]}
-              onPress={handleSubscribePremium}
-              activeOpacity={0.85}
-              disabled={subscribing}
-            >
-              {subscribing ? (
-                <ActivityIndicator size="small" color="#08090D" />
-              ) : (
-                <>
-                  <Ionicons name="repeat" size={16} color="#08090D" style={{ marginRight: 8 }} />
-                  <Text style={styles.btnUpgradeSaaSText}>Renovar Assinatura (R$ 39,90/mês)</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          )}
-        </Surface>
-
-        {/* SEÇÃO 2: IDENTIDADE & CONTA GOOGLE */}
-        <SectionHeader title="IDENTIDADE E CONTA" icon="person-circle-outline" />
-
-        {user ? (
-          <Surface style={styles.settingsCard} elevated>
-            <View style={styles.rowBetween}>
-              <View style={[styles.row, { flex: 1, marginRight: 10 }]}>
-                <View style={styles.userAvatarBox}>
-                  <Ionicons name="person" size={18} color={THEME.primary} />
+              {/* Opção 2: Preço Alvo */}
+              <TouchableOpacity
+                style={[styles.wizardStrategyCard, estrategia === 'preco_alvo' && styles.wizardStrategyCardActive]}
+                onPress={() => setEstrategia('preco_alvo')}
+                activeOpacity={0.85}
+              >
+                <View style={[styles.wizardRadio, estrategia === 'preco_alvo' && styles.wizardRadioActive]}>
+                  {estrategia === 'preco_alvo' && <View style={styles.wizardRadioDot} />}
                 </View>
-                <View style={{ flex: 1, marginLeft: 10 }}>
-                  <Text style={styles.userEmailText} numberOfLines={1}>{user.email}</Text>
-                  <Text style={styles.userProviderText}>Conta Google Conectada</Text>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={[styles.wizardStrategyTitle, estrategia === 'preco_alvo' && styles.wizardStrategyTitleActive]}>
+                    Preço Alvo Personalizado
+                  </Text>
+                  <Text style={styles.wizardStrategyDesc}>
+                    Receba o alerta somente quando o produto atingir ou ficar abaixo do valor que você quer pagar.
+                  </Text>
                 </View>
-              </View>
-              <View style={[styles.badgeSuccessPill, { flexShrink: 0 }]}>
-                <View style={styles.badgeSuccessDot} />
-                <Text style={styles.badgeSuccessPillText}>CONECTADO</Text>
-              </View>
+              </TouchableOpacity>
+
+              {estrategia === 'preco_alvo' && (
+                <View style={styles.wizardPriceTargetBox}>
+                  <Text style={styles.wizardPriceTargetPrefix}>R$</Text>
+                  <TextInput
+                    style={styles.wizardPriceTargetInput}
+                    placeholder="0,00"
+                    placeholderTextColor="#94A3B8"
+                    keyboardType="numeric"
+                    value={precoAlvo}
+                    onChangeText={handleChangePrecoAlvo}
+                  />
+                </View>
+              )}
+
+              {/* Opção 3: Maior Desconto */}
+              <TouchableOpacity
+                style={[styles.wizardStrategyCard, estrategia === 'maior_desconto' && styles.wizardStrategyCardActive]}
+                onPress={() => setEstrategia('maior_desconto')}
+                activeOpacity={0.85}
+              >
+                <View style={[styles.wizardRadio, estrategia === 'maior_desconto' && styles.wizardRadioActive]}>
+                  {estrategia === 'maior_desconto' && <View style={styles.wizardRadioDot} />}
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={[styles.wizardStrategyTitle, estrategia === 'maior_desconto' && styles.wizardStrategyTitleActive]}>
+                    Maior Desconto (% OFF)
+                  </Text>
+                  <Text style={styles.wizardStrategyDesc}>
+                    Prioriza produtos com grandes quedas de preço e promoções relâmpago.
+                  </Text>
+                </View>
+              </TouchableOpacity>
             </View>
 
-            <View style={styles.divider} />
-            
-            {tier === TIERS.FREE ? (
-              <View style={styles.deviceNoticeBox}>
-                <Ionicons name="phone-portrait-outline" size={16} color={THEME.textMuted} style={{ marginRight: 8, marginTop: 2 }} />
-                <Text style={styles.deviceNoticeText}>
-                  <Text style={{ fontWeight: 'bold', color: THEME.text }}>Modo Dispositivo Único (Free): </Text>
-                  Seus radares e notificações ficam salvos exclusivamente neste aparelho. Para sincronizar em múltiplos dispositivos, ative o plano Premium.
-                </Text>
+            {/* Inteligência de Alerta Multi-Plataforma (Exibido apenas se > 1 loja selecionada) */}
+            {selectedPlatforms.length > 1 && (
+              <TouchableOpacity 
+                style={[styles.wizardToggleRow, { marginTop: 16 }]}
+                onPress={() => setNotificarPorLoja(!notificarPorLoja)}
+                activeOpacity={0.85}
+              >
+                <View style={{ flex: 1, marginRight: 10 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Ionicons name="git-branch-outline" size={16} color="#FF5722" style={{ marginRight: 6 }} />
+                    <Text style={styles.wizardToggleTitle}>Notificar por Loja Separadamente</Text>
+                  </View>
+                  <Text style={styles.wizardToggleDesc}>
+                    {notificarPorLoja
+                      ? "1 resultado individual para cada loja monitorada."
+                      : "1 única notificação consolidada com o melhor preço geral."}
+                  </Text>
+                </View>
+                <Switch
+                  value={notificarPorLoja}
+                  onValueChange={setNotificarPorLoja}
+                  trackColor={{ false: '#CBD5E1', true: THEME.primary }}
+                  thumbColor="#FFFFFF"
+                />
+              </TouchableOpacity>
+            )}
+
+            {/* Filtro Frete Grátis */}
+            <TouchableOpacity 
+              style={[styles.wizardToggleRow, { marginTop: selectedPlatforms.length > 1 ? 8 : 16 }]}
+              onPress={() => setFreteGratis(!freteGratis)}
+              activeOpacity={0.85}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.wizardToggleTitle}>Apenas com Frete Grátis</Text>
+                <Text style={styles.wizardToggleDesc}>Filtra produtos elegíveis a envio gratuito nas lojas.</Text>
               </View>
-            ) : (
-              <View style={styles.syncNoticeBox}>
-                <Ionicons name="cloud-done-outline" size={16} color={THEME.success} style={{ marginRight: 8, marginTop: 2 }} />
-                <Text style={styles.syncNoticeText}>
-                  <Text style={{ fontWeight: 'bold', color: THEME.text }}>Sincronização em Nuvem Ativa: </Text>
-                  Seus radares e oportunidades são sincronizados automaticamente em tempo real em todos os seus aparelhos conectados.
-                </Text>
+              <Switch
+                value={freteGratis}
+                onValueChange={setFreteGratis}
+                trackColor={{ false: '#CBD5E1', true: THEME.primary }}
+                thumbColor="#FFFFFF"
+              />
+            </TouchableOpacity>
+
+            {/* Localização para OLX / Facebook caso selecionados */}
+            {selectedPlatforms.includes('OLX') && (
+              <View style={styles.wizardLocationBox}>
+                <View style={[styles.row, { marginBottom: 8 }]}>
+                  <StoreLogoBadge storeKey="OLX" size={18} style={{ marginRight: 6 }} />
+                  <Text style={styles.wizardLocationTitle}>Localização na OLX</Text>
+                </View>
+                <View style={styles.smartLocationSelectorsRow}>
+                  {/* Botão Estado OLX */}
+                  <TouchableOpacity
+                    style={styles.smartLocationBtn}
+                    activeOpacity={0.7}
+                    onPress={() => setModalOlxUfVisible(true)}
+                  >
+                    <View style={{ flex: 1, marginRight: 4 }}>
+                      <Text style={styles.smartLocationBtnLabel}>Estado</Text>
+                      <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                        {olxUf === 'BR' ? 'Brasil Inteiro' : (OLX_ESTADOS[olxUf]?.nome || olxUf)}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-down" size={14} color="#64748B" />
+                  </TouchableOpacity>
+
+                  {/* Botão Região OLX */}
+                  <TouchableOpacity
+                    style={[styles.smartLocationBtn, olxUf === 'BR' && styles.smartLocationBtnDisabled]}
+                    activeOpacity={olxUf === 'BR' ? 1 : 0.7}
+                    onPress={() => {
+                      if (olxUf !== 'BR') setModalOlxRegiaoVisible(true);
+                    }}
+                  >
+                    <View style={{ flex: 1, marginRight: 4 }}>
+                      <Text style={styles.smartLocationBtnLabel}>Região</Text>
+                      <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                        {olxUf === 'BR' 
+                          ? 'Todas as Regiões' 
+                          : (olxRegiao 
+                            ? (OLX_ESTADOS[olxUf]?.regioes.find(r => r.slug === olxRegiao)?.nome || olxRegiao) 
+                            : 'Todo o Estado')}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-down" size={14} color={olxUf === 'BR' ? '#CBD5E1' : '#64748B'} />
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
 
+            {selectedPlatforms.includes('FACEBOOK') && (
+              <View style={styles.wizardLocationBox}>
+                <View style={[styles.row, { marginBottom: 8 }]}>
+                  <StoreLogoBadge storeKey="Facebook" size={18} style={{ marginRight: 6 }} />
+                  <Text style={styles.wizardLocationTitle}>Localização no Facebook</Text>
+                </View>
+                <View style={styles.smartLocationSelectorsRow}>
+                  {/* Botão Estado FB */}
+                  <TouchableOpacity
+                    style={styles.smartLocationBtn}
+                    activeOpacity={0.7}
+                    onPress={() => setModalFbUfVisible(true)}
+                  >
+                    <View style={{ flex: 1, marginRight: 4 }}>
+                      <Text style={styles.smartLocationBtnLabel}>Estado</Text>
+                      <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                        {fbUf === 'BR' ? 'Brasil Inteiro' : (FACEBOOK_ESTADOS_CIDADES[fbUf]?.nome || fbUf)}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-down" size={14} color="#64748B" />
+                  </TouchableOpacity>
+
+                  {/* Botão Cidade FB */}
+                  <TouchableOpacity
+                    style={[styles.smartLocationBtn, fbUf === 'BR' && styles.smartLocationBtnDisabled]}
+                    activeOpacity={fbUf === 'BR' ? 1 : 0.7}
+                    onPress={() => {
+                      if (fbUf !== 'BR') setModalFbCidadeVisible(true);
+                    }}
+                  >
+                    <View style={{ flex: 1, marginRight: 4 }}>
+                      <Text style={styles.smartLocationBtnLabel}>Cidade</Text>
+                      <Text style={styles.smartLocationBtnValue} numberOfLines={1}>
+                        {fbUf === 'BR' 
+                          ? 'Brasil Inteiro' 
+                          : (FACEBOOK_ESTADOS_CIDADES[fbUf]?.cidades.find(c => c.slug === fbCidade)?.nome || fbCidade)}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-down" size={14} color={fbUf === 'BR' ? '#CBD5E1' : '#64748B'} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </ScrollView>
+
+          {/* Rodapé Etapa 2 */}
+          <View style={styles.wizardFooterBar}>
             <TouchableOpacity 
-              style={styles.btnLogoutModern}
-              onPress={handleLogout}
-              activeOpacity={0.8}
+              style={styles.wizardBackTextBtn}
+              onPress={() => mudarEtapa(1)}
             >
-              <Ionicons name="log-out-outline" size={15} color={THEME.danger} style={{ marginRight: 6 }} />
-              <Text style={styles.btnLogoutModernText}>Desconectar Conta Google</Text>
+              <Text style={styles.wizardBackTextBtnLabel}>Voltar</Text>
             </TouchableOpacity>
-          </Surface>
-        ) : (
-          <Surface style={styles.settingsCard} elevated>
-            <Text style={styles.syncDescText}>
-              Conecte sua conta Google com 1 clique para gerenciar sua assinatura e usufruir da sincronização em nuvem caso seja assinante Premium.
-            </Text>
 
             <TouchableOpacity 
-              style={styles.btnGoogleModern}
-              onPress={handleLoginGoogle}
+              style={[styles.wizardContinueBtn, !produto.trim() && { opacity: 0.5 }]}
+              onPress={() => {
+                if (produto.trim()) mudarEtapa(3);
+                else showAlert({ title: "Atenção", message: "Digite o produto que deseja rastrear.", type: "warning" });
+              }}
+              disabled={!produto.trim()}
               activeOpacity={0.85}
-              disabled={authLoading}
             >
-              {authLoading ? (
-                <ActivityIndicator size="small" color="#08090D" />
+              <Text style={styles.wizardContinueBtnText}>Continuar</Text>
+              <Ionicons name="arrow-forward" size={16} color="#FFFFFF" style={{ marginLeft: 6 }} />
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      )}
+
+      {/* ETAPA 3: FREQUÊNCIA DE VARREDURAS & ATIVAÇÃO */}
+      {etapa === 3 && (
+        <View style={{ flex: 1 }}>
+          <ScrollView contentContainerStyle={styles.wizardStepContent} showsVerticalScrollIndicator={false}>
+            <Text style={styles.wizardTitle}>Frequência de varreduras</Text>
+            <Text style={styles.wizardSubtitle}>
+              Escolha de quanto em quanto tempo nossos servidores devem consultar as lojas.
+            </Text>
+
+            <FrequencySelector
+              value={frequencia}
+              onChange={setFrequencia}
+              lojaNome={primeiraLoja}
+            />
+          </ScrollView>
+
+          {/* Rodapé Etapa 3 */}
+          <View style={styles.wizardFooterBar}>
+            <TouchableOpacity 
+              style={styles.wizardBackTextBtn}
+              onPress={() => mudarEtapa(2)}
+            >
+              <Text style={styles.wizardBackTextBtnLabel}>Voltar</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.wizardActivateBtn, salvando && { opacity: 0.6 }]}
+              onPress={handleSalvarRadar}
+              disabled={salvando}
+              activeOpacity={0.85}
+            >
+              {salvando ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <>
-                  <Ionicons name="logo-google" size={18} color="#08090D" style={{ marginRight: 10 }} />
-                  <Text style={styles.btnGoogleModernText}>Continuar com o Google</Text>
+                  <Ionicons name="flash" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                  <Text style={styles.wizardActivateBtnText}>Ativar Radar Inteligente</Text>
                 </>
               )}
             </TouchableOpacity>
-
-            <Text style={[styles.helperText, { textAlign: 'center', marginTop: 4 }]}>
-              Login rápido e seguro sem formulários ou senhas.
-            </Text>
-          </Surface>
-        )}
-
-        {/* SEÇÃO 3: MOTOR DE VARREDURA */}
-        <SectionHeader title="MOTOR DE VARREDURA" icon="hardware-chip-outline" />
-        <Surface style={styles.settingsCard}>
-          <View style={styles.rowBetween}>
-            <View>
-              <Text style={styles.settingsItemTitle}>Servidor de Varredura</Text>
-              <Text style={styles.settingsItemSub}>Online e Operante</Text>
-            </View>
-            <View style={styles.badgeSuccessPill}>
-              <View style={styles.badgeSuccessDot} />
-              <Text style={styles.badgeSuccessPillText}>ONLINE</Text>
-            </View>
           </View>
-          <View style={styles.divider} />
-          <Text style={styles.helperText}>
-            • Responsável pelo processamento autônomo e varredura periódica de anúncios e ofertas na internet.
-          </Text>
-        </Surface>
+        </View>
+      )}
 
-        {/* SEÇÃO 5: NOTIFICAÇÕES */}
-        <SectionHeader title="NOTIFICAÇÕES DO DISPOSITIVO" icon="notifications-outline" />
-        <Surface style={styles.settingsCard}>
-          <View style={styles.rowBetween}>
-            <View style={{ flex: 1, paddingRight: 10 }}>
-              <Text style={styles.settingsItemTitle}>Alertas na Barra de Status</Text>
-              <Text style={styles.helperText}>
-                Notificar imediatamente sempre que uma nova oportunidade for capturada.
-              </Text>
-            </View>
-            <Switch 
-              value={notificacoesAtivas}
-              onValueChange={alternarNotificacoes}
-              trackColor={{ false: '#1E2333', true: THEME.primary }}
-              thumbColor="#FFF"
-            />
-          </View>
 
-          {checkIsExpoGo() && (
-            <View style={styles.infoNoticeBanner}>
-              <Ionicons name="information-circle" size={16} color={THEME.warning} style={{ marginRight: 6 }} />
-              <Text style={styles.infoNoticeText}>
-                Em ambiente Expo Go, notificações em segundo plano têm restrições no Android 13+. No APK final, operam 100%.
-              </Text>
-            </View>
-          )}
+      {/* Modais Seletores de Localização para OLX e Facebook */}
+      <SelectionModal
+        visible={modalOlxUfVisible}
+        title="Selecione o Estado (OLX)"
+        items={itensOlxEstados}
+        selectedId={olxUf}
+        onSelect={(item) => {
+          setOlxUf(item.id);
+          setOlxRegiao('');
+          setModalOlxUfVisible(false);
+        }}
+        onClose={() => setModalOlxUfVisible(false)}
+      />
 
-          <TouchableOpacity 
-            style={styles.btnTestNotification}
-            onPress={dispararTesteLocal}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="notifications-outline" size={15} color={THEME.primary} style={{ marginRight: 6 }} />
-            <Text style={styles.btnTestNotificationText}>Testar Notificação Local</Text>
-          </TouchableOpacity>
-        </Surface>
+      <SelectionModal
+        visible={modalOlxRegiaoVisible}
+        title={`Região em ${OLX_ESTADOS[olxUf]?.nome || olxUf} (OLX)`}
+        items={itensOlxRegioes}
+        selectedId={olxRegiao}
+        onSelect={(item) => {
+          setOlxRegiao(item.id);
+          setModalOlxRegiaoVisible(false);
+        }}
+        onClose={() => setModalOlxRegiaoVisible(false)}
+      />
 
-        {/* SEÇÃO 6: SOBRE O ACHÔAI */}
-        <SectionHeader title="SOBRE O ACHÔAI" icon="information-circle-outline" />
-        <Surface style={styles.settingsCard}>
-          <View style={styles.rowBetween}>
-            <View>
-              <Text style={[styles.settingsItemTitle, { fontSize: 16, fontWeight: 'bold' }]}>AchôAI</Text>
-              <Text style={styles.helperText}>Monitoramento inteligente de anúncios e ofertas</Text>
-            </View>
-            <View style={[styles.badgeSuccessPill, { backgroundColor: THEME.primaryGlow }]}>
-              <Text style={[styles.badgeSuccessPillText, { color: THEME.primary }]}>PRODUÇÃO</Text>
-            </View>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.rowBetween}>
-            <Text style={styles.aboutMetaLabel}>Versão do App</Text>
-            <Text style={styles.aboutMetaValue}>1.0.0 (Build 2026 SaaS)</Text>
-          </View>
-          <View style={[styles.rowBetween, { marginTop: 6 }]}>
-            <Text style={styles.aboutMetaLabel}>Fontes Integradas</Text>
-            <Text style={styles.aboutMetaValue}>OLX, Facebook, Zoom & Web</Text>
-          </View>
-          <View style={styles.divider} />
-          <Text style={styles.aboutCopyrightText}>
-            AchôAI © 2026. Todos os direitos reservados.
-          </Text>
-        </Surface>
+      <SelectionModal
+        visible={modalFbUfVisible}
+        title="Selecione o Estado (Facebook)"
+        items={itensFbEstados}
+        selectedId={fbUf}
+        onSelect={(item) => {
+          setFbUf(item.id);
+          setFbCidade('brasil');
+          setModalFbUfVisible(false);
+        }}
+        onClose={() => setModalFbUfVisible(false)}
+      />
 
-        <View style={{ height: 90 }} />
-      </ScrollView>
-
+      <SelectionModal
+        visible={modalFbCidadeVisible}
+        title={`Cidade em ${FACEBOOK_ESTADOS_CIDADES[fbUf]?.nome || fbUf} (Facebook)`}
+        items={itensFbCidades}
+        selectedId={fbCidade}
+        onSelect={(item) => {
+          setFbCidade(item.id);
+          setModalFbCidadeVisible(false);
+        }}
+        onClose={() => setModalFbCidadeVisible(false)}
+      />
     </View>
   );
 }
 
 // =====================================================================
-// 5. NAVEGAÇÃO MODERNA 2026 (BOTTOM TABS & STACK)
+// 5. NAVEGAÇÃO POR TABS - 100% VETORIAL (ESTILO PECHINCHOU)
 // =====================================================================
-
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
 function MainTabs() {
-  const { resultados } = useContext(RadarContext);
   const insets = useSafeAreaInsets();
-  const bottomInset = Math.max(insets.bottom, Platform.OS === 'android' ? 20 : 24);
+  const bottomInset = Math.max(insets.bottom, Platform.OS === 'android' ? 12 : 20);
 
   return (
     <Tab.Navigator
-      screenOptions={({ route }) => ({
-        headerShown: false,
-        tabBarStyle: [
-          styles.bottomTabBar,
-          {
-            height: 58 + bottomInset,
-            paddingBottom: bottomInset,
-          }
-        ],
-        tabBarActiveTintColor: THEME.primary,
-        tabBarInactiveTintColor: THEME.textSubtle,
-        tabBarLabelStyle: styles.bottomTabLabel,
-        tabBarItemStyle: {
-          paddingTop: 6,
-          paddingBottom: 2,
-        },
-        tabBarIcon: ({ color, focused }) => {
-          let iconName;
-          if (route.name === 'Home') iconName = focused ? 'grid' : 'grid-outline';
-          else if (route.name === 'Radares') iconName = focused ? 'radio' : 'radio-outline';
-          else if (route.name === 'Alertas') iconName = focused ? 'notifications' : 'notifications-outline';
-          else if (route.name === 'Config') iconName = focused ? 'settings' : 'settings-outline';
-          return (
-            <View style={[styles.tabIconWrap, focused && styles.tabIconWrapFocused]}>
-              <Ionicons name={iconName} size={20} color={color} />
-            </View>
-          );
-        },
-      })}
-    >
-      <Tab.Screen name="Home" component={DashboardScreen} />
-      <Tab.Screen name="Radares" component={MonitorListScreen} />
-      <Tab.Screen 
-        name="Alertas" 
-        component={AlertsScreen} 
-        options={{
-          tabBarBadge: resultados.length > 0 ? (resultados.length > 99 ? '99+' : resultados.length) : undefined,
-          tabBarBadgeStyle: styles.tabBadgeStyle
+        screenOptions={{
+          headerShown: false,
+          tabBarShowLabel: false,
+          tabBarStyle: [
+            styles.pechBottomTabBar,
+            {
+              height: 56 + bottomInset,
+              paddingBottom: bottomInset,
+            }
+          ],
+          tabBarActiveTintColor: THEME.primary,
+          tabBarInactiveTintColor: '#94A3B8',
         }}
-      />
-      <Tab.Screen name="Config" component={SettingsScreen} />
-    </Tab.Navigator>
+      >
+        {/* 1. Início (Home - Promoções do Momento) */}
+        <Tab.Screen 
+          name="HomeTab" 
+          component={HomePromotionsScreen}
+          options={{
+            tabBarIcon: ({ focused }) => (
+              <View style={styles.pechTabItemWrap}>
+                <Ionicons 
+                  name={focused ? "home" : "home-outline"} 
+                  size={23} 
+                  color={focused ? THEME.primary : '#94A3B8'} 
+                />
+                {focused && <View style={styles.pechTabActiveIndicator} />}
+              </View>
+            )
+          }}
+        />
+
+        {/* 2. Radares Inteligentes */}
+        <Tab.Screen 
+          name="RadarsTab" 
+          component={RadarsScreen}
+          options={{
+            tabBarIcon: ({ focused }) => (
+              <View style={styles.pechTabItemWrap}>
+                <Ionicons 
+                  name={focused ? "radio" : "radio-outline"} 
+                  size={23} 
+                  color={focused ? THEME.primary : '#94A3B8'} 
+                />
+                {focused && <View style={styles.pechTabActiveIndicator} />}
+              </View>
+            )
+          }}
+        />
+
+        {/* 3. Cupons de Desconto */}
+        <Tab.Screen 
+          name="CouponsTab" 
+          component={CouponsScreen}
+          options={{
+            tabBarIcon: ({ focused }) => (
+              <View style={styles.pechTabItemWrap}>
+                <Ionicons 
+                  name={focused ? "ticket" : "ticket-outline"} 
+                  size={23} 
+                  color={focused ? THEME.primary : '#94A3B8'} 
+                />
+                {focused && <View style={styles.pechTabActiveIndicator} />}
+              </View>
+            )
+          }}
+        />
+
+        {/* 4. Recomendados Para Você (Aba Dedicada) */}
+        <Tab.Screen 
+          name="RecommendationsTab" 
+          component={RecommendationsFeedScreen}
+          options={{
+            tabBarIcon: ({ focused }) => (
+              <View style={styles.pechTabItemWrap}>
+                <Ionicons 
+                  name={focused ? "sparkles" : "sparkles-outline"} 
+                  size={23} 
+                  color={focused ? THEME.primary : '#94A3B8'} 
+                />
+                {focused && <View style={styles.pechTabActiveIndicator} />}
+              </View>
+            )
+          }}
+        />
+
+        {/* 5. Pesquisar */}
+        <Tab.Screen 
+          name="SearchTab" 
+          component={SearchScreen}
+          options={{
+            tabBarIcon: ({ focused }) => (
+              <View style={styles.pechTabItemWrap}>
+                <Ionicons 
+                  name={focused ? "search" : "search-outline"} 
+                  size={23} 
+                  color={focused ? THEME.primary : '#94A3B8'} 
+                />
+                {focused && <View style={styles.pechTabActiveIndicator} />}
+              </View>
+            )
+          }}
+        />
+      </Tab.Navigator>
   );
 }
 
 export default function App() {
   const customTheme = {
-    ...DarkTheme,
+    ...DefaultTheme,
     colors: {
-      ...DarkTheme.colors,
-      background: THEME.bg,
-      card: THEME.cardBg,
-      text: THEME.text,
-      border: THEME.cardBorder,
+      ...DefaultTheme.colors,
+      background: '#F8FAFC',
+      card: '#FFFFFF',
+      text: '#0F172A',
+      border: '#E2E8F0',
       primary: THEME.primary
     },
   };
@@ -5802,7 +5192,7 @@ export default function App() {
       <RadarProvider>
         <NavigationContainer theme={customTheme}>
           <Stack.Navigator screenOptions={{ 
-            headerStyle: { backgroundColor: THEME.bgSecondary }, 
+            headerStyle: { backgroundColor: '#FFFFFF' }, 
             headerTintColor: THEME.primary,
             headerShadowVisible: false,
             headerTitleStyle: { fontWeight: 'bold', fontSize: 16 }
@@ -5812,7 +5202,7 @@ export default function App() {
               name="Criar" 
               component={CreateMonitorScreen} 
               options={{ 
-                title: 'Configurar Radar',
+                headerShown: false,
                 presentation: 'modal',
                 animation: 'slide_from_bottom' 
               }} 
@@ -5825,869 +5215,2319 @@ export default function App() {
 }
 
 // =====================================================================
-// 6. ESTILOS MODERNOS (EDITION 2026)
+// 6. ESTILOS VISUAIS - INSPIRAÇÃO PECHINCHOU (TEMA CLARO & VIBRANTE)
 // =====================================================================
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: THEME.bg },
-  scrollArea: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 60 },
+  screen: { flex: 1, backgroundColor: '#F8FAFC' },
   row: { flexDirection: 'row', alignItems: 'center' },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
 
-  // Brand Header (Home)
-  brandHeader: {
-    paddingTop: Platform.OS === 'android' ? 44 : 52,
-    paddingHorizontal: 16,
-    paddingBottom: 14,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: THEME.bgSecondary,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.cardBorder
-  },
-  brandGroup: { flexDirection: 'row', alignItems: 'center' },
-  brandLogoImage: {
-    width: 44,
-    height: 44,
-    marginRight: 10
-  },
-  brandTextGroup: { justifyContent: 'center' },
-  brandName: { fontSize: 20, fontWeight: '900', color: THEME.text, letterSpacing: 0.4 },
-  livePulseRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  livePulseDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: THEME.success, marginRight: 5 },
-  livePulseText: { fontSize: 10, fontWeight: '600', color: THEME.success, letterSpacing: 0.3 },
-  btnHeaderAction: {
+  // Pechinchou Top Header
+  
+  // Badge de Atualização Autônoma (Substituto do refresh manual)
+  pechAutoBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: THEME.primary,
-    paddingHorizontal: 13,
-    paddingVertical: 8,
-    borderRadius: THEME.radius.sm
-  },
-  btnHeaderActionText: { fontSize: 12, fontWeight: '800', color: '#08090D' },
-
-  // Screen Headers (Telas Secundárias)
-  screenHeader: {
-    paddingTop: Platform.OS === 'android' ? 44 : 52,
-    paddingHorizontal: 16,
-    paddingBottom: 14,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: THEME.bgSecondary,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.cardBorder
-  },
-  screenHeaderTitle: { fontSize: 20, fontWeight: '900', color: THEME.text, letterSpacing: 0.3 },
-  screenHeaderSub: { fontSize: 12, color: THEME.textMuted, marginTop: 2 },
-  headerBtnSquare: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: THEME.cardBgElevated,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-
-  // Métricas
-  metricsRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 12 },
-
-  // Oportunidades (Home)
-  opportunityCard: { padding: 14, marginBottom: 10 },
-  opportunityHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
-  opportunityHeaderTags: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', flex: 1, marginRight: 8 },
-  opportunityDate: { fontSize: 11, color: THEME.textSubtle },
-  opportunityTitle: { fontSize: 14, fontWeight: '700', color: THEME.text, lineHeight: 19 },
-  opportunityFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
-  priceContainer: { flexDirection: 'row', alignItems: 'baseline' },
-  pricePrefix: { fontSize: 11, fontWeight: '700', color: THEME.success, marginRight: 3 },
-  priceNumber: { fontSize: 17, fontWeight: '900', color: THEME.success },
-  priceConsult: { fontSize: 13, fontWeight: '600', color: THEME.textMuted },
-  btnOpenOffer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.primaryGlow,
+    backgroundColor: '#FFF3E0',
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: THEME.radius.sm,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(255, 122, 0, 0.3)'
+    borderColor: '#FFE0B2',
   },
-  btnOpenOfferText: { fontSize: 11, fontWeight: '700', color: THEME.primary },
-
-  // Telemetria (Logs)
-  telemetryCard: { padding: 14 },
-  telemetryTargetContainer: { width: '100%' },
-  telemetryEmpty: { alignItems: 'center', paddingVertical: 15 },
-  telemetryRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: THEME.cardBorder },
-  telemetryDot: { width: 7, height: 7, borderRadius: 3.5, marginTop: 5, marginRight: 10 },
-  telemetryMessage: { fontSize: 12, color: THEME.textSecondary, lineHeight: 17 },
-  telemetryMetaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
-  telemetryTime: { fontSize: 10, color: THEME.textSubtle },
-  telemetrySeparator: { fontSize: 10, color: THEME.textSubtle, marginHorizontal: 5 },
-  telemetrySource: { fontSize: 10, color: THEME.textMuted },
-
-  // Frosted Glass Overlays (Home Telemetria)
-  frostedOverlay: {
-    backgroundColor: 'rgba(17, 20, 29, 0.76)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 16,
-    borderRadius: THEME.radius.lg,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  frostedLockContent: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 12
-  },
-  frostedLockCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: THEME.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-    shadowColor: THEME.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 4
-  },
-  frostedLockTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: THEME.text,
-    textAlign: 'center',
-    marginBottom: 4
-  },
-  frostedLockSub: {
-    fontSize: 12,
-    color: THEME.textMuted,
-    textAlign: 'center',
-    lineHeight: 16,
-    marginBottom: 12
-  },
-  btnFrostedUnlock: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.primary,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: THEME.radius.sm
-  },
-  btnFrostedUnlockText: {
-    fontSize: 12,
-    fontWeight: '900',
-    color: '#08090D'
-  },
-
-  // Controles de Varredura (Home Emergency Controls)
-  emergencyControlsCard: {
-    padding: 16,
-    borderRadius: THEME.radius.lg,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-    backgroundColor: THEME.cardBg,
-    marginTop: 4,
-    marginBottom: 8
-  },
-  emergencyHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 6
-  },
-  statusIndicatorDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 8
-  },
-  emergencyStatusText: {
-    fontSize: 13,
+  pechAutoBadgeText: {
+    fontSize: 11,
     fontWeight: '700',
-    color: THEME.text
+    color: '#FF5722',
   },
-  emergencyCardDesc: {
-    fontSize: 12,
-    color: THEME.textSubtle,
-    lineHeight: 17,
-    marginBottom: 14
-  },
-  emergencyButtonsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10
-  },
-  btnEmergencyAction: {
+
+  // Onboarding Sweep Screen (~10s no primeiro lançamento)
+  
+  fullscreenOnboardingOverlay: {
     flex: 1,
-    flexDirection: 'row',
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: THEME.radius.md,
-    borderWidth: 1
+    paddingHorizontal: 28,
   },
-  btnPauseMode: {
-    backgroundColor: 'rgba(245, 158, 11, 0.12)',
-    borderColor: 'rgba(245, 158, 11, 0.35)'
+  onboardingCategoryIconBox: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: '#F1F5F9',
   },
-  btnResumeMode: {
-    backgroundColor: THEME.primaryGlow,
-    borderColor: THEME.primary
-  },
-  btnStopMode: {
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
-    borderColor: 'rgba(239, 68, 68, 0.4)'
-  },
-  btnEmergencyText: {
+  onboardingCategoryBadgeText: {
     fontSize: 13,
-    fontWeight: '700'
+    fontWeight: '800',
+    marginBottom: 20,
+    textAlign: 'center',
   },
 
-  // Frosted Glass Overlays (Aba Alertas Completa)
-  alertsTargetContainer: { width: '100%' },
-  alertsFrostedOverlay: {
-    backgroundColor: 'rgba(8, 9, 13, 0.65)',
+  onboardingSweepContainer: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
-    zIndex: 10
+    paddingHorizontal: 28,
   },
-  blurredTextTitle: {
-    color: 'transparent',
-    textShadowColor: 'rgba(240, 242, 248, 0.40)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 11,
-  },
-  blurredPrice: {
-    color: 'transparent',
-    textShadowColor: 'rgba(16, 185, 129, 0.55)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 13,
-  },
-  blurredTime: {
-    color: 'transparent',
-    textShadowColor: 'rgba(148, 163, 184, 0.35)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 8,
-  },
-  blurredTelemetryMessage: {
-    color: 'transparent',
-    textShadowColor: 'rgba(240, 242, 248, 0.40)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 9,
-  },
-  btnAlertActionLocked: {
-    backgroundColor: THEME.cardBgElevated,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-  },
-  btnAlertActionLockedText: {
-    color: THEME.textMuted,
-    fontWeight: '700',
-  },
-  alertsLockCard: {
-    backgroundColor: 'rgba(17, 20, 29, 0.94)',
-    borderRadius: THEME.radius.xl,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 122, 0, 0.35)',
-    padding: 22,
+  onboardingSweepCenterBox: {
     alignItems: 'center',
     width: '100%',
-    maxWidth: 340,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    elevation: 8
+    maxWidth: 380,
   },
-  alertsLockIconCircle: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: THEME.primary,
+  onboardingPulseWrapper: {
+    width: 130,
+    height: 130,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 12,
-    shadowColor: THEME.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 10,
-    elevation: 5
+    marginBottom: 24,
   },
-  alertsLockTitle: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: THEME.text,
-    textAlign: 'center',
-    letterSpacing: 0.3,
-    marginBottom: 8
-  },
-  alertsLockSub: {
-    fontSize: 13,
-    color: THEME.textMuted,
-    textAlign: 'center',
-    lineHeight: 18,
-    marginBottom: 18
-  },
-  btnAlertsUnlock: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.primary,
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-    borderRadius: THEME.radius.md,
-    width: '100%',
-    shadowColor: THEME.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.45,
-    shadowRadius: 8,
-    elevation: 4
-  },
-  btnAlertsUnlockText: {
-    fontSize: 13,
-    fontWeight: '900',
-    color: '#08090D',
-    letterSpacing: 0.3
-  },
-
-  // Cards de Radar (Aba 2)
-  radarCard: { padding: 15, marginBottom: 12 },
-  radarCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  radarModeIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  radarTitle: { fontSize: 15, fontWeight: '800', color: THEME.text },
-  radarTagsRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, flexWrap: 'wrap' },
-  locationChip: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.04)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  locationChipText: { fontSize: 10, color: THEME.textMuted, fontWeight: '600' },
-  radarSearchTermBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    borderRadius: THEME.radius.sm,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  radarSearchTermText: { fontSize: 12, color: THEME.textSecondary, fontWeight: '600' },
-  radarCardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
-  radarFrequencyLabel: { fontSize: 11, color: THEME.textMuted },
-  radarCountdownRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  radarCountdownText: { fontSize: 12, fontWeight: '700', color: THEME.primary },
-  radarActionsGroup: { flexDirection: 'row', alignItems: 'center' },
-  btnScanNow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.primary,
-    paddingHorizontal: 11,
-    paddingVertical: 7,
-    borderRadius: THEME.radius.sm
-  },
-  btnScanNowText: { fontSize: 11, fontWeight: '900', color: '#08090D' },
-  fabGlow: {
+  onboardingPulseRing: {
     position: 'absolute',
-    bottom: 22,
-    right: 20,
-    width: 54,
-    height: 54,
-    borderRadius: 27,
-    backgroundColor: THEME.primary,
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: 'rgba(255, 87, 34, 0.12)',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 87, 34, 0.35)',
+  },
+  onboardingPulseCore: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: '#FF5722',
     alignItems: 'center',
     justifyContent: 'center',
     elevation: 8,
-    shadowColor: THEME.primary,
+    shadowColor: '#FF5722',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 10
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
   },
-
-  // Busca e Filtros (Aba Alertas)
-  searchBarContainer: { paddingHorizontal: 16, paddingTop: 10 },
-  searchInputWrap: {
+  onboardingBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: THEME.cardBgElevated,
-    borderRadius: THEME.radius.md,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  searchInput: { flex: 1, fontSize: 13, color: THEME.text, padding: 0 },
-  filterChipRow: { flexDirection: 'row', paddingHorizontal: 16, paddingVertical: 10 },
-  filterChip: {
+    backgroundColor: '#FFF7ED',
     paddingHorizontal: 12,
     paddingVertical: 5,
-    borderRadius: THEME.radius.pill,
-    backgroundColor: THEME.cardBgElevated,
-    marginRight: 6,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  filterChipActive: { backgroundColor: THEME.primary, borderColor: THEME.primary },
-  filterChipText: { fontSize: 11, fontWeight: '700', color: THEME.textMuted },
-  filterChipTextActive: { color: '#08090D' },
-
-  // Cards de Alerta Completo (Aba Alertas)
-  alertCardFull: { padding: 15, marginBottom: 12 },
-  alertHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  alertHeaderTagsWrap: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', flex: 1, marginRight: 8 },
-  robotTag: { flexDirection: 'row', alignItems: 'center', marginLeft: 6 },
-  robotTagText: { fontSize: 10, color: THEME.success, fontWeight: '700' },
-  alertTime: { fontSize: 11, color: THEME.textSubtle },
-  alertTitleFull: { fontSize: 15, fontWeight: '700', color: THEME.text, marginVertical: 8, lineHeight: 21 },
-  alertPriceRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
-  alertPriceLabel: { fontSize: 9, fontWeight: '800', color: THEME.textSubtle, letterSpacing: 0.5 },
-  alertPriceValue: { fontSize: 19, fontWeight: '900', color: THEME.success, marginTop: 2 },
-  btnAlertAction: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.primary,
-    paddingHorizontal: 13,
-    paddingVertical: 8,
-    borderRadius: THEME.radius.sm
-  },
-  btnAlertActionText: { fontSize: 11, fontWeight: '900', color: '#08090D' },
-
-  // Formulário de Criação (Aba Criar)
-  editNoticeBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.primaryGlow,
-    padding: 10,
-    borderRadius: THEME.radius.sm,
-    borderWidth: 1,
-    borderColor: THEME.cardBorderActive,
-    marginBottom: 12
-  },
-  editNoticeText: { fontSize: 12, fontWeight: '700', color: THEME.primary },
-  formSectionTitle: { fontSize: 11, fontWeight: '800', color: THEME.textMuted, letterSpacing: 1, marginBottom: 8 },
-  platformGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 10 },
-  platformCardBtn: {
-    width: '48%',
-    backgroundColor: THEME.cardBg,
-    borderRadius: THEME.radius.md,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-    padding: 12,
-    alignItems: 'center',
-    marginBottom: 8
-  },
-  platformCardBtnActive: { borderColor: THEME.primary, backgroundColor: THEME.primaryGlow },
-  platformIconCircle: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
-  platformCardBtnText: { fontSize: 12, fontWeight: '700', color: THEME.textSecondary },
-  platformCardBtnTextActive: { color: THEME.primary, fontWeight: '800' },
-  comparatorBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.primaryGlow,
-    padding: 10,
-    borderRadius: THEME.radius.sm,
-    borderWidth: 1,
-    borderColor: 'rgba(255,122,0,0.2)',
-    marginBottom: 10
-  },
-  comparatorBannerText: { flex: 1, fontSize: 11, color: THEME.textSecondary, lineHeight: 16 },
-  formSurface: { padding: 14, marginBottom: 14 },
-  selectBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.cardBgElevated,
-    borderRadius: THEME.radius.sm,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  selectBtnLabel: { fontSize: 9, fontWeight: '800', color: THEME.textSubtle, letterSpacing: 0.5 },
-  selectBtnValue: { fontSize: 12, fontWeight: '700', color: THEME.text, marginTop: 2 },
-  urlPreviewBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    borderRadius: THEME.radius.sm,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  urlPreviewText: { fontSize: 11, color: THEME.textSubtle, flex: 1 },
-  segmentWrap: { flexDirection: 'row', backgroundColor: THEME.cardBgElevated, borderRadius: THEME.radius.sm, padding: 3, marginBottom: 12 },
-  segmentOption: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8, borderRadius: 6 },
-  segmentOptionActive: { backgroundColor: THEME.primary },
-  segmentLabel: { fontSize: 12, color: THEME.textMuted, fontWeight: '600' },
-  segmentLabelActive: { color: '#08090D', fontWeight: '800' },
-  inputTitle: { fontSize: 10, fontWeight: '800', color: THEME.textSubtle, letterSpacing: 0.6, marginBottom: 6 },
-  inputField: {
-    backgroundColor: THEME.cardBgElevated,
-    borderRadius: THEME.radius.sm,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 13,
-    color: THEME.text,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  helperText: { fontSize: 11, color: THEME.textSubtle, marginTop: 5, lineHeight: 16 },
-
-  // Cards de Estratégia
-  strategyCard: {
-    backgroundColor: THEME.cardBg,
-    borderRadius: THEME.radius.md,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-    padding: 14,
-    marginBottom: 10
-  },
-  strategyCardActive: { borderColor: THEME.primary, backgroundColor: THEME.cardBgElevated },
-  strategyHeader: { flexDirection: 'row', alignItems: 'center' },
-  strategyIconCircle: { width: 32, height: 32, borderRadius: 16, backgroundColor: THEME.cardBgElevated, alignItems: 'center', justifyContent: 'center' },
-  strategyIconCircleActive: { backgroundColor: THEME.primaryGlow },
-  strategyTitle: { fontSize: 13, fontWeight: '700', color: THEME.textSecondary },
-  strategyTitleActive: { color: THEME.primary, fontWeight: '800' },
-  strategyDesc: { fontSize: 11, color: THEME.textMuted, marginTop: 2, lineHeight: 16 },
-  strategyExtraBox: { marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: THEME.cardBorder },
-  sortToggleTitle: { fontSize: 12, fontWeight: '700', color: THEME.textSecondary },
-  sortToggleDesc: { fontSize: 10, color: THEME.textSubtle, marginTop: 2 },
-  targetPreviewCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.primaryGlow,
-    padding: 9,
-    borderRadius: THEME.radius.sm,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,122,0,0.3)'
-  },
-  targetPreviewText: { fontSize: 11, color: THEME.textSecondary },
-
-  // Shopee Procedência Options
-  shopeeOptionsCard: {
-    padding: 14,
-    borderRadius: THEME.radius.md,
-    borderWidth: 1,
-    borderColor: 'rgba(238, 77, 45, 0.35)',
-    backgroundColor: 'rgba(238, 77, 45, 0.05)',
-    marginTop: 10,
-    marginBottom: 12
-  },
-  shopeeOptionsHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4
-  },
-  shopeeOptionsTitle: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#EE4D2D',
-    letterSpacing: 0.8
-  },
-  shopeeOptionsDesc: {
-    fontSize: 11,
-    color: THEME.textMuted,
-    marginBottom: 10,
-    lineHeight: 15
-  },
-  checkboxContainer: {
-    gap: 8
-  },
-  checkboxRowItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.cardBgElevated,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-    borderRadius: THEME.radius.sm,
-    padding: 10
-  },
-  checkboxRowItemActive: {
-    borderColor: 'rgba(238, 77, 45, 0.5)',
-    backgroundColor: 'rgba(238, 77, 45, 0.08)'
-  },
-  checkboxItemTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: THEME.text,
-    marginRight: 6
-  },
-  checkboxItemTitleActive: {
-    color: '#FFF'
-  },
-  checkboxItemSub: {
-    fontSize: 10,
-    color: THEME.textSubtle,
-    marginTop: 1
-  },
-  miniOriginBadge: {
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    borderRadius: 3,
-    borderWidth: 1
-  },
-
-  // Presets de Frequência
-  presetsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
-  presetPill: {
-    flex: 1,
-    marginHorizontal: 3,
-    paddingVertical: 7,
-    borderRadius: THEME.radius.sm,
-    backgroundColor: THEME.cardBgElevated,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  presetPillActive: { backgroundColor: THEME.primary, borderColor: THEME.primary },
-  presetPillText: { fontSize: 11, fontWeight: '700', color: THEME.textMuted },
-  presetPillTextActive: { color: '#08090D', fontWeight: '800' },
-
-  // Configurações
-  settingsCard: { padding: 16, marginBottom: 14 },
-  userAvatarBox: {
-    width: 40,
-    height: 40,
     borderRadius: 20,
-    backgroundColor: THEME.primaryGlow,
     borderWidth: 1,
-    borderColor: THEME.cardBorderActive,
-    alignItems: 'center',
-    justifyContent: 'center'
+    borderColor: '#FFEDD5',
+    marginBottom: 16,
   },
-  userEmailText: { fontSize: 14, fontWeight: '800', color: THEME.text },
-  userProviderText: { fontSize: 11, color: THEME.textMuted, marginTop: 2 },
-  badgeSuccessPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.successBg,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: THEME.radius.pill,
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)'
+  onboardingBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FF5722',
   },
-  badgeSuccessDot: { width: 5, height: 5, borderRadius: 2.5, backgroundColor: THEME.success, marginRight: 5 },
-  badgeSuccessPillText: { fontSize: 10, fontWeight: '800', color: THEME.success },
-  syncDescText: { fontSize: 12, color: THEME.textMuted, lineHeight: 18, marginBottom: 10 },
-  divider: { height: 1, backgroundColor: THEME.cardBorder, marginVertical: 12 },
-  btnLogoutModern: {
+  onboardingTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#0F172A',
+    textAlign: 'center',
+    marginBottom: 8,
+    lineHeight: 24,
+  },
+  onboardingSub: {
+    fontSize: 13,
+    color: '#64748B',
+    textAlign: 'center',
+    marginBottom: 28,
+    lineHeight: 18,
+    paddingHorizontal: 12,
+  },
+  onboardingProgressTrack: {
+    width: '88%',
+    height: 6,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 24,
+  },
+  onboardingProgressBar: {
+    height: '100%',
+    backgroundColor: '#FF5722',
+    borderRadius: 3,
+  },
+  onboardingFooterRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: THEME.dangerBg,
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.3)',
-    borderRadius: THEME.radius.sm,
-    paddingVertical: 10,
-    marginTop: 4
+    paddingHorizontal: 16,
   },
-  btnLogoutModernText: { fontSize: 12, fontWeight: '800', color: THEME.danger },
-  btnGoogleModern: {
+  onboardingFooterText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    textAlign: 'center',
+  },
+
+  pechTopHeader: {
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  pechAvatarRing: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 2,
+    borderColor: '#FF5722',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pechAvatarInner: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#FFF7ED',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pechGreetingSub: {
+    fontSize: 14,
+    color: '#0F172A',
+    fontWeight: '500',
+  },
+  pechGreetingName: {
+    fontSize: 14,
+    color: '#0F172A',
+    fontWeight: '900',
+  },
+  pechHeaderIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // Pechinchou Sub Filters Row
+  pechSubFilterRow: {
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  pechSubFilterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  pechSubFilterChipActive: {
+    backgroundColor: '#F1F5F9',
+    borderColor: '#0F172A',
+  },
+  pechSubFilterChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  pechSubFilterChipTextActive: {
+    color: '#0F172A',
+    fontWeight: '800',
+  },
+
+  // Pechinchou Story Circles
+  pechStoriesContainer: {
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  pechStoryItem: {
+    alignItems: 'center',
+    width: 58,
+  },
+  pechStoryCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.04)',
+  },
+  pechStoryLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#334155',
+  },
+
+  // Store filter pills
+  filterPillsContainer: {
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    gap: 8,
+  },
+  filterPill: {
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+    borderRadius: 16,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  filterPillActive: {
+    backgroundColor: '#FF5722',
+    borderColor: '#FF5722',
+  },
+  filterPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  filterPillTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
+
+  // Feed Scroll
+  feedScrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    paddingBottom: 80,
+  },
+  pechFeedSectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingTop: 2,
+  },
+  pechFeedSectionTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+
+  emptyFeedBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 50,
+    paddingHorizontal: 20,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginTop: 10,
+    marginBottom: 6,
+  },
+  emptyDesc: {
+    fontSize: 13,
+    color: '#64748B',
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  emptyResetBtn: {
+    marginTop: 14,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderRadius: 20,
+    backgroundColor: '#FF5722',
+  },
+  emptyResetBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+
+  // Header Radares
+  brandHeaderClean: {
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+  },
+  brandTitleText: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  brandSubtitleText: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '500',
+  },
+  headerPrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF5722',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+  },
+  headerPrimaryBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+
+  // Onboarding Radares
+  onboardingContainer: {
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 60,
+    alignItems: 'center',
+  },
+  onboardingHeroIcon: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#FFF7ED',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  onboardingTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#0F172A',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  onboardingSubtitle: {
+    fontSize: 13,
+    color: '#64748B',
+    textAlign: 'center',
+    lineHeight: 19,
+    marginBottom: 24,
+  },
+  onboardingCardsWrap: {
+    width: '100%',
+    gap: 12,
+    marginBottom: 28,
+  },
+  onboardingCard: {
+    flexDirection: 'row',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+  },
+  onboardingCardIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  onboardingCardTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 3,
+  },
+  onboardingCardDesc: {
+    fontSize: 12,
+    color: '#64748B',
+    lineHeight: 17,
+  },
+  onboardingCtaBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    backgroundColor: '#FF5722',
+    paddingVertical: 14,
+    borderRadius: 14,
+    elevation: 3,
+  },
+  onboardingCtaBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '900',
+    fontSize: 15,
+  },
+
+  // Radares Ativos List
+  radarsScrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 90,
+  },
+  countBadge: {
+    marginLeft: 8,
+    backgroundColor: '#FFF7ED',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  countBadgeText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FF5722',
+  },
+  radarCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    elevation: 1,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  radarCardActiveIndicator: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: 4,
+    backgroundColor: '#FF5722',
+  },
+  radarCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  radarCardTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  miniPlatBadgeWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    marginRight: 6,
+  },
+  miniPlatBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#334155',
+  },
+  miniIntervalBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  miniIntervalBadgeText: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  radarCardStatusRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  statusLabelText: {
+    fontSize: 12,
+    color: '#64748B',
+    fontWeight: '500',
+  },
+  countdownText: {
+    fontSize: 12,
+    color: '#334155',
+  },
+  accordionToggleBtn: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginTop: 12,
+  },
+  accordionToggleText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FF5722',
+  },
+  accordionBody: {
+    marginTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    paddingTop: 8,
+  },
+  accordionEmpty: {
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  accordionEmptyText: {
+    fontSize: 12,
+    color: '#64748B',
+    textAlign: 'center',
+    lineHeight: 17,
+  },
+  radarResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  radarResultThumb: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+  },
+  radarResultThumbFallback: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radarPlatMiniLogoBox: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  radarResultTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0F172A',
+  },
+  radarResultStoreBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  radarResultStoreName: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#475569',
+    textTransform: 'uppercase',
+  },
+  radarResultDiscountTag: {
+    backgroundColor: '#FEF2F2',
+    paddingHorizontal: 5,
+    paddingVertical: 1.5,
+    borderRadius: 4,
+    borderWidth: 0.5,
+    borderColor: '#FECACA',
+  },
+  radarResultDiscountText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#EF4444',
+  },
+  radarResultPrice: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#16A34A',
+    marginTop: 2,
+  },
+  radarCardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 12,
+    paddingTop: 8,
+  },
+  radarActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#F8FAFC',
+  },
+  radarActionBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  fabBtn: {
+    position: 'absolute',
+    right: 20,
+    bottom: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#FF5722',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 6,
+  },
+
+  // Pechinchou Cupons Header (Screenshot 2)
+  pechCuponsHeader: {
+    backgroundColor: '#FFFFFF',
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 20,
+    paddingBottom: 14,
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  pechCuponsPreTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  pechCuponsMainTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: '#0F172A',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  pechCuponsSub: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 4,
+    marginBottom: 14,
+    textAlign: 'center',
+  },
+  pechCuponsSearchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 16,
+    height: 44,
+    width: '100%',
+  },
+  pechCuponsSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#0F172A',
+    padding: 0,
+  },
+  pechStoreCardMini: {
+    width: 90,
+    height: 90,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 6,
+  },
+  pechStoreCardMiniName: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginTop: 4,
+  },
+  pechStoreCardMiniCount: {
+    fontSize: 9,
+    color: '#64748B',
+    marginTop: 1,
+  },
+  cuponsScrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 80,
+  },
+  couponCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    elevation: 1,
+  },
+  couponCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  couponStorePillText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  couponDiscountBadge: {
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  couponDiscountBadgeText: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: '#16A34A',
+  },
+  couponDescText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginBottom: 4,
+  },
+  couponRulesText: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 12,
+  },
+  couponCodeBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF7ED',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: '#FF5722',
+    padding: 6,
+  },
+  couponCodeTextWrap: {
+    flex: 1,
+    paddingHorizontal: 12,
+  },
+  couponCodeText: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#FF5722',
+    letterSpacing: 1.5,
+  },
+  couponCopyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF5722',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  couponCopyBtnDone: {
+    backgroundColor: '#16A34A',
+  },
+  couponCopyBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  couponStoreLinkBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+    paddingVertical: 4,
+  },
+  couponStoreLinkText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FF5722',
+  },
+
+  searchBarContainerFull: {
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    backgroundColor: '#FFFFFF',
+  },
+  sideDrawerContainer: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    height: '100%',
+    backgroundColor: '#FFFFFF',
+    elevation: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: -4, height: 0 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    zIndex: 9999,
+  },
+  drawerBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.6)',
+  },
+  sideDrawerHeader: {
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    backgroundColor: '#FFFFFF',
+  },
+  sideDrawerTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  sideDrawerScrollContent: {
+    padding: 16,
+    paddingBottom: 40,
+  },
+  notifClearAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 5,
+    paddingHorizontal: 9,
+    borderRadius: 8,
+    backgroundColor: '#FEF2F2',
+  },
+  notifClearAllBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#EF4444',
+  },
+  notifTestPushBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFF7ED',
+    borderWidth: 1,
+    borderColor: '#FFEDD5',
+    borderRadius: 10,
+    paddingVertical: 9,
+    marginBottom: 14,
+  },
+  notifTestPushBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#EA580C',
+  },
+  notifCountSub: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FF5722',
+  },
+  notifEmptySubText: {
+    marginTop: 4,
+    fontSize: 12,
+    color: '#94A3B8',
+    textAlign: 'center',
+    paddingHorizontal: 20,
+  },
+
+  // Search Screen & Pechinchou Categories (Screenshot 3)
+  searchTopHeader: {
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    gap: 8,
+  },
+  searchMainInputContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    height: 42,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#0F172A',
+    padding: 0,
+  },
+  searchHeaderIconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notifHeaderBadge: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    backgroundColor: '#FF5722',
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  notifHeaderBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '900',
+  },
+  pechCategoriesSectionTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  pechCategoriesGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  pechCategoryCard: {
+    width: '48%',
+    borderRadius: 16,
+    padding: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 110,
+  },
+  pechCategoryIconBox: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  pechCategoryLabel: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+    textAlign: 'center',
+  },
+
+  // Modais de Notificações e Config
+  modalOverlayClean: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    justifyContent: 'flex-end',
+  },
+  modalOverlayStaticBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+  },
+  authModalCenteredContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+  },
+  authTutorialCardCompact: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 18,
+    width: '100%',
+    maxWidth: 420,
+    elevation: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+  },
+  // Smart Multi-Platform Search 5-Step Wizard
+  smartSearchSectionTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  smartSearchSectionSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 14,
+  },
+  smartCategoriesGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  smartCategoryCard: {
+    width: '48%',
+    borderRadius: 16,
+    padding: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    position: 'relative',
+    minHeight: 100,
+  },
+  smartCategoryCardActive: {
+    borderColor: '#FF5722',
+    backgroundColor: '#FFF7ED',
+    elevation: 4,
+    shadowColor: '#FF5722',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+  },
+  smartCategoryIconBox: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  smartCategoryLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0F172A',
+    textAlign: 'center',
+  },
+  smartCategoryLabelActive: {
+    color: '#FF5722',
+    fontWeight: '900',
+  },
+  smartCategoryActiveIndicator: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+  },
+    // Smart Search Modern Styles
+  smartSearchInstructionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#475569',
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  smartToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  smartToggleLabelWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingRight: 8,
+  },
+  smartToggleTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  smartToggleSubtitle: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#64748B',
+    marginTop: 2,
+  },
+  smartLocationContainer: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  smartLocationSection: {
+    marginBottom: 2,
+  },
+  smartLocationPlatformTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#FF5722',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  smartLocationSelectorsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  smartLocationBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  smartLocationBtnDisabled: {
+    backgroundColor: '#F1F5F9',
+    borderColor: '#E2E8F0',
+  },
+  smartLocationBtnLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+  },
+  smartLocationBtnValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginTop: 1,
+  },
+  smartCategoryActionHint: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#FF5722',
+    marginTop: 4,
+  },
+    // Dropdown Modal Selector (OLX & Facebook)
+  dropdownModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.70)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 35,
+  },
+  dropdownModalCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    width: '100%',
+    maxHeight: '85%',
+    padding: 18,
+    elevation: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.35,
+    shadowRadius: 20,
+  },
+  dropdownModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  dropdownIconCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#FFF7ED',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  dropdownModalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  dropdownCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dropdownSearchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 12,
+    height: 44,
+    marginVertical: 12,
+  },
+  dropdownSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0F172A',
+  },
+  dropdownSeparator: {
+    height: 1,
+    backgroundColor: '#F8FAFC',
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+  },
+  dropdownItemSelected: {
+    backgroundColor: '#FFF7ED',
+  },
+  dropdownItemText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  dropdownItemTextSelected: {
+    color: '#FF5722',
+    fontWeight: '800',
+  },
+  smartSearchPromptBox: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 18,
+    marginTop: 18,
+    borderWidth: 1.5,
+    borderColor: '#FED7AA',
+    elevation: 4,
+    shadowColor: '#FF5722',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  smartSearchPromptHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  smartSearchPromptTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  smartSearchInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 14,
+    height: 48,
+    marginBottom: 14,
+  },
+  smartSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0F172A',
+  },
+  smartSearchActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FF5722',
+    borderRadius: 14,
+    height: 50,
+    elevation: 4,
+    shadowColor: '#FF5722',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  smartSearchActionBtnText: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 0.3,
+  },
+  // 10s Sweep Canvas
+  smartSweepCanvas: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  smartRadarWrapper: {
+    width: 140,
+    height: 140,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  smartRadarPulseRing: {
+    position: 'absolute',
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: 'rgba(255, 87, 34, 0.15)',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 87, 34, 0.4)',
+  },
+  smartRadarPulseCore: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#FF5722',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 8,
+    shadowColor: '#FF5722',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+  },
+  smartSweepStoresRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    marginBottom: 16,
+    paddingHorizontal: 12,
+  },
+  smartSweepTermTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#0F172A',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  smartSweepPhaseBox: {
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 22,
+    width: '100%',
+    maxWidth: 360,
+  },
+  smartSweepPhaseTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+    textAlign: 'center',
+  },
+  smartSweepPhaseSubtitle: {
+    fontSize: 11,
+    color: '#64748B',
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 15,
+  },
+  smartSweepProgressBarBg: {
+    width: '100%',
+    maxWidth: 320,
+    height: 8,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 10,
+  },
+  smartSweepProgressBarFill: {
+    height: '100%',
+    backgroundColor: '#FF5722',
+    borderRadius: 4,
+  },
+  smartSweepTimerText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#94A3B8',
+  },
+  // Step 5: Results View
+  smartResultsTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  smartResultsQueryTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  smartResultsCountSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 1,
+  },
+  smartNewSearchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF7ED',
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 12,
+  },
+  smartNewSearchBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FF5722',
+  },
+  smartFilterChipsContainer: {
+    height: 52,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    justifyContent: 'center',
+  },
+  smartFilterChipsRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    alignItems: 'center',
+    gap: 8,
+  },
+  smartFilterChip: {
+    height: 36,
+    paddingHorizontal: 14,
+    borderRadius: 18,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  smartFilterChipActive: {
+    backgroundColor: '#0F172A',
+    borderColor: '#0F172A',
+  },
+  smartFilterChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  smartFilterChipTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
+  authTutorialCard: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    padding: 20,
+    elevation: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+  },
+  authTutorialHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  authBadgeIconBox: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#FFF7ED',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  authTutorialTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  authTutorialSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  authBenefitsBox: {
+    marginBottom: 16,
+    gap: 12,
+  },
+  authBenefitRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    padding: 12,
+  },
+  authBenefitIconBox: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  authBenefitTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  authBenefitDesc: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  authGoogleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0F172A',
+    borderRadius: 14,
+    height: 48,
+    marginBottom: 14,
+    elevation: 2,
+  },
+  authGoogleButtonText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  authNotifBanner: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 10,
+  },
+  authNotifBannerTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  authNotifBannerDesc: {
+    fontSize: 11,
+    color: '#64748B',
+    lineHeight: 16,
+    marginBottom: 10,
+  },
+  authEnableNotifBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FF5722',
+    borderRadius: 10,
+    paddingVertical: 9,
+  },
+  authEnableNotifBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  authNotifActiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#DCFCE7',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    alignSelf: 'flex-start',
+  },
+  authNotifActiveBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#16A34A',
+  },
+  notifDrawerContent: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '85%',
+    padding: 20,
+  },
+  notifDrawerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  notifDrawerTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  notifCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notifToggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+  },
+  notifToggleTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  notifToggleSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  notifListHeaderTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 10,
+  },
+  notifEmptyBox: {
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  notifEmptyText: {
+    marginTop: 8,
+    fontSize: 13,
+    color: '#64748B',
+  },
+  notifItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  notifItemTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0F172A',
+  },
+  notifItemPrice: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#16A34A',
+    marginTop: 2,
+  },
+
+  // Settings Modal
+  settingsModalContent: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '85%',
+    padding: 20,
+  },
+  settingsModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  settingsModalTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  settingsCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  settingsAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#FFF7ED',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  settingsAccountName: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  settingsAccountSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  settingsAuthBtnPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FF5722',
+    borderRadius: 10,
+    paddingVertical: 10,
+    marginTop: 14,
+  },
+  settingsAuthBtnTextPrimary: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  settingsAuthBtnOutline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#EF4444',
+    paddingVertical: 9,
+    marginTop: 14,
+  },
+  settingsAuthBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  settingsCardTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  settingsBenefitText: {
+    fontSize: 13,
+    color: '#334155',
+    fontWeight: '500',
+  },
+  settingsTestNotifBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#FFFFFF',
-    borderRadius: THEME.radius.sm,
-    paddingVertical: 12,
-    marginBottom: 4
-  },
-  btnGoogleModernText: { fontSize: 13, fontWeight: '700', color: '#08090D' },
-  subscriptionTimeBox: {
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    borderRadius: THEME.radius.sm,
-    padding: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    paddingVertical: 10,
     marginTop: 10,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
   },
-  subscriptionTimeText: { fontSize: 13, fontWeight: '800', color: THEME.primary },
-  expiringSoonAlert: {
+  settingsTestNotifBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FF5722',
+  },
+  settingsDeviceIdRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: THEME.warningBg,
-    padding: 8,
-    borderRadius: THEME.radius.xs,
-    marginTop: 8
-  },
-  expiringSoonText: { flex: 1, fontSize: 11, color: THEME.warning, fontWeight: '600', lineHeight: 15 },
-  trialInfoSub: { fontSize: 11, color: THEME.textSubtle, marginTop: 4 },
-  adminPerksBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.successBg,
-    padding: 10,
-    borderRadius: THEME.radius.sm,
-    marginTop: 10,
+    justifyContent: 'space-between',
+    backgroundColor: '#FFFFFF',
     borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)'
-  },
-  adminPerksText: { flex: 1, fontSize: 11, color: THEME.success, fontWeight: '700' },
-  btnUpgradeSaaS: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.primary,
-    borderRadius: THEME.radius.sm,
-    paddingVertical: 12,
-    marginBottom: 8
-  },
-  btnUpgradeSaaSText: { fontSize: 13, fontWeight: '900', color: '#08090D' },
-  btnTrialSaaS: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.cardBgElevated,
-    borderWidth: 1,
-    borderColor: THEME.primary,
-    borderRadius: THEME.radius.sm,
-    paddingVertical: 10
-  },
-  btnTrialSaaSText: { fontSize: 12, fontWeight: '800', color: THEME.primary },
-  deviceNoticeBox: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderRadius: THEME.radius.sm,
-    padding: 10,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
-  },
-  deviceNoticeText: { flex: 1, fontSize: 11, color: THEME.textMuted, lineHeight: 16 },
-  syncNoticeBox: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: THEME.successBg,
-    borderRadius: THEME.radius.sm,
-    padding: 10,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.25)'
-  },
-  syncNoticeText: { flex: 1, fontSize: 11, color: THEME.textSecondary, lineHeight: 16 },
-  settingsItemTitle: { fontSize: 14, fontWeight: '700', color: THEME.text },
-  settingsItemSub: { fontSize: 11, color: THEME.success, marginTop: 2, fontWeight: '600' },
-  infoNoticeBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.warningBg,
-    padding: 10,
-    borderRadius: THEME.radius.sm,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.3)'
-  },
-  infoNoticeText: { flex: 1, fontSize: 11, color: THEME.warning, lineHeight: 16 },
-  btnTestNotification: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    backgroundColor: THEME.cardBgElevated,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-    borderRadius: THEME.radius.sm,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    marginTop: 12
+    marginTop: 12,
   },
-  btnTestNotificationText: { fontSize: 12, fontWeight: '700', color: THEME.primary },
-  aboutMetaLabel: { fontSize: 12, color: THEME.textMuted },
-  aboutMetaValue: { fontSize: 12, fontWeight: '700', color: THEME.text },
-  aboutCopyrightText: { fontSize: 11, color: THEME.textSubtle, textAlign: 'center' },
-
-  // Modais
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  modalContent: {
-    backgroundColor: THEME.cardBg,
-    borderRadius: THEME.radius.lg,
-    width: '100%',
-    maxWidth: 400,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder,
-    padding: 18
+  settingsDeviceIdLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#94A3B8',
+    letterSpacing: 0.5,
   },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  modalTitle: { fontSize: 16, fontWeight: '800', color: THEME.text },
-  modalCloseBtn: { padding: 4 },
-  modalSearchBox: {
+  settingsDeviceIdValue: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#334155',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    marginTop: 1,
+  },
+  settingsCopyBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: THEME.cardBgElevated,
-    borderRadius: THEME.radius.sm,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: THEME.cardBorder
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginLeft: 8,
   },
-  modalSearchInput: { flex: 1, color: THEME.text, fontSize: 13, padding: 0 },
-  modalItem: {
+  settingsCopyBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  settingsTierBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  settingsTierBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  settingsTierDescText: {
+    fontSize: 12,
+    color: '#475569',
+    lineHeight: 17,
+  },
+  settingsTrialBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EA580C',
+    borderRadius: 10,
+    paddingVertical: 10,
+    marginBottom: 8,
+  },
+  settingsTrialBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 12.5,
+  },
+  settingsUpgradeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#7E22CE',
+    borderRadius: 10,
+    paddingVertical: 10,
+  },
+  settingsUpgradeBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 12.5,
+  },
+  settingsSwitchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+    marginBottom: 8,
+  },
+  settingsSwitchTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  settingsSwitchSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  settingsCardSub: {
+    fontSize: 12,
+    color: '#64748B',
+    lineHeight: 16,
+    marginTop: 2,
+    marginBottom: 10,
+  },
+  settingsCleanCacheBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    paddingVertical: 9,
+  },
+  settingsCleanCacheBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  aboutVersionText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#64748B',
+  },
+  aboutMottoText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+
+  // WIZARD CRIAR RADAR EM 3 ETAPAS
+  wizardHeader: {
+    paddingTop: Platform.OS === 'android' ? 44 : 52,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  wizardBackBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  wizardHeaderTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  wizardStepIndicator: {
+    fontSize: 11,
+    color: '#FF5722',
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  wizardProgressBarContainer: {
+    height: 3,
+    backgroundColor: '#F1F5F9',
+    width: '100%',
+  },
+  wizardProgressBar: {
+    height: 3,
+    backgroundColor: '#FF5722',
+  },
+  wizardStepContent: {
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 40,
+  },
+  wizardTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#0F172A',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  wizardSubtitle: {
+    fontSize: 13,
+    color: '#64748B',
+    lineHeight: 18,
+    marginBottom: 20,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+  },
+  wizardCirclesGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-start',
+    paddingBottom: 10,
+  },
+  wizardInputBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    height: 50,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+  },
+  wizardInputField: {
+    flex: 1,
+    fontSize: 15,
+    color: '#0F172A',
+    fontWeight: '600',
+  },
+  wizardSectionTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 3,
+  },
+  wizardSectionSub: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 12,
+  },
+  wizardStrategiesContainer: {
+    gap: 10,
+  },
+  wizardStrategyCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+  },
+  wizardStrategyCardActive: {
+    borderColor: '#FF5722',
+    backgroundColor: '#FFF7ED',
+  },
+  wizardRadio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#CBD5E1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  wizardRadioActive: {
+    borderColor: '#FF5722',
+  },
+  wizardRadioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FF5722',
+  },
+  wizardStrategyTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  wizardStrategyTitleActive: {
+    color: '#FF5722',
+    fontWeight: '800',
+  },
+  wizardStrategyDesc: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  wizardPriceTargetBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    height: 46,
+    borderWidth: 1.5,
+    borderColor: '#FF5722',
+    marginLeft: 32,
+    marginTop: 4,
+  },
+  wizardPriceTargetPrefix: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#FF5722',
+    marginRight: 8,
+  },
+  wizardPriceTargetInput: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  wizardToggleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 11,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.cardBorder
-  },
-  modalItemSelected: { backgroundColor: THEME.cardBgElevated, borderRadius: THEME.radius.sm },
-  modalItemText: { fontSize: 13, color: THEME.textSecondary },
-  modalItemTextSelected: { color: THEME.primary, fontWeight: '800' },
-  modalBodyText: { fontSize: 12, color: THEME.textMuted, textAlign: 'center', lineHeight: 18, marginTop: 4 },
-  btnSecondaryTextOnly: { alignItems: 'center', paddingVertical: 8 },
-  btnSecondaryTextOnlyLabel: { fontSize: 12, color: THEME.textMuted, fontWeight: '600' },
-
-  // Estados Vazios
-  emptyCard: { alignItems: 'center', padding: 25, marginTop: 4 },
-  emptyIconCircle: { width: 50, height: 50, borderRadius: 25, backgroundColor: THEME.primaryGlow, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
-  emptyCardTitle: { fontSize: 14, fontWeight: '800', color: THEME.text, marginBottom: 4 },
-  emptyCardSub: { fontSize: 12, color: THEME.textSubtle, textAlign: 'center', lineHeight: 17 },
-  emptyFullState: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30, marginTop: 60 },
-  emptyIconPulseCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: THEME.cardBgElevated,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    padding: 14,
+    marginTop: 16,
     borderWidth: 1,
-    borderColor: THEME.cardBorder,
+    borderColor: '#E2E8F0',
+  },
+  wizardToggleTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  wizardToggleDesc: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  wizardLocationBox: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    padding: 14,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  wizardLocationTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginBottom: 6,
+  },
+  wizardLocationInput: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 12,
+    height: 40,
+    fontSize: 13,
+    color: '#0F172A',
+  },
+  wizardFooterBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === 'android' ? 16 : 24,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  wizardFooterCountText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  wizardContinueBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF5722',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 14,
+  },
+  wizardContinueBtnText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  wizardBackTextBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  wizardBackTextBtnLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  wizardActivateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF5722',
+    paddingHorizontal: 22,
+    paddingVertical: 13,
+    borderRadius: 14,
+  },
+  wizardActivateBtnText: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+
+  // Navbar Inferior Vetorial (Estilo Pechinchou)
+  pechBottomTabBar: {
+    backgroundColor: '#FFFFFF',
+    borderTopColor: '#E2E8F0',
+    borderTopWidth: 1,
+    elevation: 8,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+  },
+  pechTabItemWrap: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16
+    height: 44,
+    width: 48,
   },
-  emptyStateTitle: { fontSize: 17, fontWeight: '800', color: THEME.text, marginBottom: 6, textAlign: 'center' },
-  emptyStateSub: { fontSize: 13, color: THEME.textMuted, textAlign: 'center', lineHeight: 19 },
+  pechTabActiveIndicator: {
+    position: 'absolute',
+    bottom: 2,
+    width: 22,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#FF5722',
+  },
 
-  // Barra de Navegação Inferior
-  bottomTabBar: {
-    backgroundColor: THEME.bgSecondary,
-    borderTopColor: THEME.cardBorder,
-    borderTopWidth: 1,
-    elevation: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -3 },
-    shadowOpacity: 0.35,
-    shadowRadius: 6,
+  // Dropdown e Filtros de Ordenação
+  dropdownFilterBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF5EB',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
   },
-  bottomTabLabel: { fontSize: 11, fontWeight: '700', marginTop: 3 },
-  tabIconWrap: { width: 36, height: 30, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
-  tabIconWrapFocused: { backgroundColor: THEME.primaryGlow },
-  tabBadgeStyle: {
-    backgroundColor: THEME.primary,
-    color: '#08090D',
+  dropdownFilterBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FF5722',
+  },
+  dropdownListBox: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 8,
+    marginBottom: 8,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  dropdownListHeaderTitle: {
     fontSize: 10,
-    fontWeight: '900',
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9
-  }
+    fontWeight: '800',
+    color: '#94A3B8',
+    letterSpacing: 0.5,
+    paddingHorizontal: 10,
+    paddingTop: 4,
+    paddingBottom: 6,
+  },
+  dropdownListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  dropdownListItemActive: {
+    backgroundColor: '#FFF7ED',
+  },
+  dropdownListItemText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  dropdownListItemTextActive: {
+    color: '#FF5722',
+    fontWeight: '800',
+  },
+  dealsCountRow: {
+    paddingHorizontal: 4,
+    marginBottom: 4,
+    marginTop: -2,
+  },
+  dealsCountText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#94A3B8',
+  },
 });

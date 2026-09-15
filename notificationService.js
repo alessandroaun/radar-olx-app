@@ -126,6 +126,8 @@ export async function testLocalNotification() {
   });
 }
 
+let lastHandledResponseId = null;
+
 export function subscribeNotificationEvents(onReceived, onResponse) {
   if (checkIsExpoGo() || !Notifications) {
     return () => {};
@@ -139,7 +141,26 @@ export function subscribeNotificationEvents(onReceived, onResponse) {
       sub1 = Notifications.addNotificationReceivedListener(onReceived);
     }
     if (onResponse && Notifications.addNotificationResponseReceivedListener) {
-      sub2 = Notifications.addNotificationResponseReceivedListener(onResponse);
+      sub2 = Notifications.addNotificationResponseReceivedListener((response) => {
+        const notifId = response?.notification?.request?.identifier;
+        if (notifId) lastHandledResponseId = notifId;
+        onResponse(response);
+      });
+    }
+
+    // Tratamento de toque em notificação quando o aplicativo é aberto a partir do estado fechado (cold start)
+    if (onResponse && Notifications.getLastNotificationResponseAsync) {
+      Notifications.getLastNotificationResponseAsync().then((response) => {
+        if (response && response.notification) {
+          const notifId = response.notification.request?.identifier;
+          if (notifId && notifId !== lastHandledResponseId) {
+            lastHandledResponseId = notifId;
+            onResponse(response);
+          }
+        }
+      }).catch((err) => {
+        console.log('[Radar] Erro ao obter última notificação recebida:', err);
+      });
     }
   } catch (e) {
     console.log('[Radar] Erro ao registrar listeners:', e);

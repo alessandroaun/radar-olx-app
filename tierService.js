@@ -19,28 +19,21 @@ const STORAGE_KEYS = {
   MODAL_EXPIRED_SHOWN: '@radar_modal_expired_shown'
 };
 
-// Limites e restrições por tier
+// Limites e restrições por tier (Equilíbrio total: todos com acesso pleno)
+const ALL_PLATFORMS = [
+  'MERCADO_LIVRE', 'SHOPEE', 'AMAZON', 'MAGALU', 'KABUM', 
+  'AMERICANAS', 'CASASBAHIA', 'FASTSHOP', 'CARREFOUR', 'SHEIN', 
+  'OLX', 'FACEBOOK'
+];
+const ALL_STRATEGIES = ['mais_recentes', 'menor_preco', 'por_preco', 'maior_desconto'];
+
 export const TIER_LIMITS = {
   [TIERS.FREE]: {
     name: 'Free',
     label: 'Plano Gratuito',
-    maxRadars: 1,
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON'],
-    allowedStrategies: ['mais_recentes', 'menor_preco', 'maior_desconto'], // padrão
-    canUseTargetPrice: false,
-    fixedIntervalMinutes: 180, // Travado em 3 horas (180 min)
-    sweepCooldownSeconds: 3600, // 60 minutos entre varreduras manuais
-    canOpenExternalLinks: false, // Abre no app com cadeado
-    canSyncMultiDevice: false, // Restrito apenas a este dispositivo
-    canViewTelemetry: false, // Cadeado na telemetria
-    canViewNextScanTime: false, // Cadeado na próxima busca
-  },
-  [TIERS.LITE]: {
-    name: 'Premium Lite',
-    label: 'Teste Grátis (2 Dias)',
-    maxRadars: 5,
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON', 'OUTROS'],
-    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'maior_desconto', 'noticia'],
+    maxRadars: 999,
+    allowedPlatforms: ALL_PLATFORMS,
+    allowedStrategies: ALL_STRATEGIES,
     canUseTargetPrice: true,
     fixedIntervalMinutes: null, // Livre
     sweepCooldownSeconds: 0,
@@ -48,16 +41,30 @@ export const TIER_LIMITS = {
     canSyncMultiDevice: true,
     canViewTelemetry: true,
     canViewNextScanTime: true,
-    trialDurationHours: 48 // 2 dias
+  },
+  [TIERS.LITE]: {
+    name: 'Premium Lite',
+    label: 'Teste Grátis',
+    maxRadars: 999,
+    allowedPlatforms: ALL_PLATFORMS,
+    allowedStrategies: ALL_STRATEGIES,
+    canUseTargetPrice: true,
+    fixedIntervalMinutes: null,
+    sweepCooldownSeconds: 0,
+    canOpenExternalLinks: true,
+    canSyncMultiDevice: true,
+    canViewTelemetry: true,
+    canViewNextScanTime: true,
+    trialDurationHours: 48
   },
   [TIERS.PREMIUM]: {
     name: 'Premium',
     label: 'Assinatura Premium',
-    maxRadars: 5,
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON', 'OUTROS'],
-    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'maior_desconto', 'noticia'],
+    maxRadars: 999,
+    allowedPlatforms: ALL_PLATFORMS,
+    allowedStrategies: ALL_STRATEGIES,
     canUseTargetPrice: true,
-    fixedIntervalMinutes: null, // Livre
+    fixedIntervalMinutes: null,
     sweepCooldownSeconds: 0,
     canOpenExternalLinks: true,
     canSyncMultiDevice: true,
@@ -69,9 +76,9 @@ export const TIER_LIMITS = {
   [TIERS.ADMIN]: {
     name: 'Admin',
     label: 'Administrador Master',
-    maxRadars: 9999, // Ilimitado
-    allowedPlatforms: ['OLX', 'FACEBOOK', 'ZOOM', 'SHOPEE', 'MERCADO_LIVRE', 'AMAZON', 'OUTROS'],
-    allowedStrategies: ['mais_recentes', 'menor_preco', 'por_preco', 'maior_desconto', 'noticia'],
+    maxRadars: 9999,
+    allowedPlatforms: ALL_PLATFORMS,
+    allowedStrategies: ALL_STRATEGIES,
     canUseTargetPrice: true,
     fixedIntervalMinutes: null,
     sweepCooldownSeconds: 0,
@@ -605,23 +612,10 @@ export class TierService {
   }
 
   /**
-   * Cooldown de 60 minutos do botão "Varrer" para usuários Free.
+   * Cooldown do botão "Varrer" (Equalizado: sem cooldown para todos os usuários).
    */
   static async getSweepCooldown(tier) {
-    if (tier !== TIERS.FREE) return 0; // Outros tiers não têm cooldown
-    try {
-      const lastSweepStr = await AsyncStorage.getItem(STORAGE_KEYS.LAST_SWEEP);
-      if (!lastSweepStr) return 0;
-
-      const lastSweepTime = parseInt(lastSweepStr, 10);
-      const now = Date.now();
-      const elapsedSeconds = Math.floor((now - lastSweepTime) / 1000);
-      const remainingSeconds = 3600 - elapsedSeconds;
-
-      return remainingSeconds > 0 ? remainingSeconds : 0;
-    } catch (e) {
-      return 0;
-    }
+    return 0;
   }
 
   /**
@@ -634,22 +628,12 @@ export class TierService {
   }
 
   /**
-   * Regra de auto-downgrade e ajuste de radares:
-   * Mantém apenas 1 radar ativo e pausa todos os demais quando o usuário volta para o Free.
+   * Regra de auto-downgrade e ajuste de radares (Equalizado: mantém todos os radares ativos).
    */
   static pruneExcessRadars(monitores, tier) {
-    if (tier !== TIERS.FREE || !monitores || monitores.length <= 1) {
-      return { monitoresToKeep: monitores, monitoresToPause: [] };
-    }
-
-    // Ordena pelo mais recente criado
-    const ordenados = [...monitores].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-    const principal = ordenados[0];
-    const excedentes = ordenados.slice(1).filter(m => m.ativo);
-
     return {
-      monitoresToKeep: [principal],
-      monitoresToPause: excedentes
+      monitoresToKeep: monitores || [],
+      monitoresToPause: []
     };
   }
 }

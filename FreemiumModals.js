@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, Text, TouchableOpacity, StyleSheet, Modal, ScrollView, 
-  Dimensions, Animated, Easing, ActivityIndicator 
+  Dimensions, Animated, Easing, ActivityIndicator, Linking 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { THEME } from './theme';
@@ -445,6 +445,14 @@ export const RenewalModal = ({ visible, remainingDays, onRenew, onDismiss }) => 
 
 export const AdDetailModal = ({ visible, item, onClose, onUnlock }) => {
   if (!item) return null;
+  const targetUrl = item.url || item.link;
+
+  const handleOpenLink = () => {
+    onClose();
+    if (targetUrl) {
+      Linking.openURL(targetUrl).catch(() => {});
+    }
+  };
 
   return (
     <Modal visible={visible} animationType="slide" transparent={true} onRequestClose={onClose}>
@@ -471,23 +479,20 @@ export const AdDetailModal = ({ visible, item, onClose, onUnlock }) => {
             </Text>
           </View>
 
-          {/* ÁREA BLOQUEADA DO LINK EXTERNO */}
+          {/* ÁREA DE ABERTURA DO LINK EXTERNO */}
           <Surface style={styles.adLockedLinkSurface}>
-            <View style={styles.lockIconSmall}>
-              <Ionicons name="lock-closed" size={18} color={THEME.primary} />
+            <View style={[styles.lockIconSmall, { backgroundColor: 'rgba(34, 197, 94, 0.15)' }]}>
+              <Ionicons name="open-outline" size={18} color={THEME.success} />
             </View>
-            <Text style={styles.adLockedHeading}>Link Direto Protegido</Text>
+            <Text style={styles.adLockedHeading}>Oferta Pronta para Acesso</Text>
             <Text style={styles.adLockedExplanation}>
-              No plano Free, a abertura de links diretos para a loja parceira é restrita. Faça upgrade para o plano Premium para abrir links de ofertas instantaneamente com 1 toque.
+              Toque no botão abaixo para abrir a página oficial do produto na loja parceira.
             </Text>
             
             <PrimaryButton 
-              title="Desbloquear Links com Premium"
-              icon="sparkles"
-              onPress={() => {
-                onClose();
-                if (onUnlock) onUnlock();
-              }}
+              title="Abrir Oferta na Loja"
+              icon="open-outline"
+              onPress={handleOpenLink}
               style={{ width: '100%', marginTop: 14 }}
             />
           </Surface>

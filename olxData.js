@@ -310,3 +310,314 @@ export function gerarUrlOlx(uf, regiaoSlug, termo) {
 
   return `${base}?${queryParams.join("&")}`;
 }
+
+// =====================================================================
+// DADOS DE REGIÕES E CIDADES DO FACEBOOK MARKETPLACE BRASIL
+// =====================================================================
+
+export const FACEBOOK_ESTADOS_CIDADES = {
+  BR: {
+    nome: "Brasil Inteiro (Todas as Regiões)",
+    cidades: [
+      { nome: "Todas as Cidades", slug: "brasil" }
+    ]
+  },
+  AC: {
+    nome: "Acre",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Rio Branco", slug: "riobranco" },
+      { nome: "Cruzeiro do Sul", slug: "cruzeirodosul" }
+    ]
+  },
+  AL: {
+    nome: "Alagoas",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Maceió e Região", slug: "maceio" },
+      { nome: "Arapiraca", slug: "arapiraca" }
+    ]
+  },
+  AP: {
+    nome: "Amapá",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Macapá", slug: "macapa" },
+      { nome: "Santana", slug: "santana" }
+    ]
+  },
+  AM: {
+    nome: "Amazonas",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Manaus e Região", slug: "manaus" },
+      { nome: "Parintins", slug: "parintins" }
+    ]
+  },
+  BA: {
+    nome: "Bahia",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Salvador e Região", slug: "salvador" },
+      { nome: "Feira de Santana", slug: "feiradesantana" },
+      { nome: "Vitória da Conquista", slug: "vitoriadaconquista" },
+      { nome: "Itabuna e Ilhéus", slug: "itabuna" }
+    ]
+  },
+  CE: {
+    nome: "Ceará",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Fortaleza e Região", slug: "fortaleza" },
+      { nome: "Juazeiro do Norte", slug: "juazeirodonorte" },
+      { nome: "Sobral", slug: "sobral" }
+    ]
+  },
+  DF: {
+    nome: "Distrito Federal",
+    cidades: [
+      { nome: "Todo o Distrito Federal", slug: "brasilia" },
+      { nome: "Brasília e Região", slug: "brasilia" }
+    ]
+  },
+  ES: {
+    nome: "Espírito Santo",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Vitória e Região", slug: "vitoria" },
+      { nome: "Vila Velha", slug: "vilavelha" },
+      { nome: "Serra", slug: "serra" },
+      { nome: "Cachoeiro de Itapemirim", slug: "cachoeirodeitapemirim" }
+    ]
+  },
+  GO: {
+    nome: "Goiás",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Goiânia e Região", slug: "goiania" },
+      { nome: "Aparecida de Goiânia", slug: "aparecidadegoiania" },
+      { nome: "Anápolis", slug: "anapolis" },
+      { nome: "Rio Verde", slug: "rioverde" }
+    ]
+  },
+  MA: {
+    nome: "Maranhão",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "São Luís e Região", slug: "saoluis" },
+      { nome: "Imperatriz", slug: "imperatriz" }
+    ]
+  },
+  MT: {
+    nome: "Mato Grosso",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Cuiabá e Região", slug: "cuiaba" },
+      { nome: "Várzea Grande", slug: "varzeagrande" },
+      { nome: "Rondonópolis", slug: "rondonopolis" }
+    ]
+  },
+  MS: {
+    nome: "Mato Grosso do Sul",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Campo Grande e Região", slug: "campogrande" },
+      { nome: "Dourados", slug: "dourados" },
+      { nome: "Três Lagoas", slug: "treslagoas" }
+    ]
+  },
+  MG: {
+    nome: "Minas Gerais",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Belo Horizonte e Região", slug: "belohorizonte" },
+      { nome: "Uberlândia", slug: "uberlandia" },
+      { nome: "Contagem", slug: "contagem" },
+      { nome: "Juiz de Fora", slug: "juizdefora" },
+      { nome: "Betim", slug: "betim" },
+      { nome: "Montes Claros", slug: "montesclaros" }
+    ]
+  },
+  PA: {
+    nome: "Pará",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Belém e Região", slug: "belem" },
+      { nome: "Ananindeua", slug: "ananindeua" },
+      { nome: "Santarém", slug: "santarem" }
+    ]
+  },
+  PB: {
+    nome: "Paraíba",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "João Pessoa e Região", slug: "joaopessoa" },
+      { nome: "Campina Grande", slug: "campinagrande" }
+    ]
+  },
+  PR: {
+    nome: "Paraná",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Curitiba e Região", slug: "curitiba" },
+      { nome: "Londrina", slug: "londrina" },
+      { nome: "Maringá", slug: "maringa" },
+      { nome: "Ponta Grossa", slug: "pontagrossa" },
+      { nome: "Cascavel", slug: "cascavel" },
+      { nome: "Foz do Iguaçu", slug: "fozdoiguacu" }
+    ]
+  },
+  PE: {
+    nome: "Pernambuco",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Recife e Região", slug: "recife" },
+      { nome: "Jaboatão dos Guararapes", slug: "jaboataodosguararapes" },
+      { nome: "Olinda", slug: "olinda" },
+      { nome: "Caruaru", slug: "caruaru" },
+      { nome: "Petrolina", slug: "petrolina" }
+    ]
+  },
+  PI: {
+    nome: "Piauí",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Teresina e Região", slug: "teresina" },
+      { nome: "Parnaíba", slug: "parnaiba" }
+    ]
+  },
+  RJ: {
+    nome: "Rio de Janeiro",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Rio de Janeiro e Região", slug: "riodejaneiro" },
+      { nome: "Niterói / São Gonçalo", slug: "niteroi" },
+      { nome: "Duque de Caxias / Baixada", slug: "duquedecaxias" },
+      { nome: "Nova Iguaçu", slug: "novaiguacu" },
+      { nome: "Campos dos Goytacazes", slug: "camposdosgoytacazes" },
+      { nome: "Petrópolis / Região Serrana", slug: "petropolis" }
+    ]
+  },
+  RN: {
+    nome: "Rio Grande do Norte",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Natal e Região", slug: "natal" },
+      { nome: "Mossoró", slug: "mossoro" }
+    ]
+  },
+  RS: {
+    nome: "Rio Grande do Sul",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Porto Alegre e Região", slug: "portoalegre" },
+      { nome: "Caxias do Sul", slug: "caxiasdosul" },
+      { nome: "Pelotas", slug: "pelotas" },
+      { nome: "Canoas", slug: "canoas" },
+      { nome: "Santa Maria", slug: "santamaria" }
+    ]
+  },
+  RO: {
+    nome: "Rondônia",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Porto Velho", slug: "portovelho" },
+      { nome: "Ji-Paraná", slug: "jiparana" }
+    ]
+  },
+  RR: {
+    nome: "Roraima",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Boa Vista", slug: "boavista" }
+    ]
+  },
+  SC: {
+    nome: "Santa Catarina",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Florianópolis e Região", slug: "florianopolis" },
+      { nome: "Joinville", slug: "joinville" },
+      { nome: "Blumenau", slug: "blumenau" },
+      { nome: "São José", slug: "saojose" },
+      { nome: "Chapecó", slug: "chapeco" },
+      { nome: "Itajaí / Balneário Camboriú", slug: "itajai" }
+    ]
+  },
+  SP: {
+    nome: "São Paulo",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "São Paulo e Região", slug: "saopaulo" },
+      { nome: "Campinas e Região", slug: "campinas" },
+      { nome: "Guarulhos", slug: "guarulhos" },
+      { nome: "São Bernardo do Campo", slug: "saobernardodocampo" },
+      { nome: "Santo André", slug: "santoandre" },
+      { nome: "Osasco", slug: "osasco" },
+      { nome: "São José dos Campos", slug: "saojosedoscampos" },
+      { nome: "Ribeirão Preto", slug: "ribeiraopreto" },
+      { nome: "Sorocaba", slug: "sorocaba" },
+      { nome: "Santos e Baixada Santista", slug: "santos" }
+    ]
+  },
+  SE: {
+    nome: "Sergipe",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Aracaju e Região", slug: "aracaju" },
+      { nome: "Nossa Senhora do Socorro", slug: "socorro" }
+    ]
+  },
+  TO: {
+    nome: "Tocantins",
+    cidades: [
+      { nome: "Todo o Estado", slug: "brasil" },
+      { nome: "Palmas", slug: "palmas" },
+      { nome: "Araguaína", slug: "araguaina" }
+    ]
+  }
+};
+
+export const LISTA_ESTADOS_FACEBOOK = [
+  { uf: "BR", nome: "Brasil Inteiro (Todas as Regiões)" },
+  ...Object.keys(FACEBOOK_ESTADOS_CIDADES)
+    .filter(uf => uf !== "BR")
+    .map(uf => ({
+      uf,
+      nome: FACEBOOK_ESTADOS_CIDADES[uf].nome
+    }))
+    .sort((a, b) => a.nome.localeCompare(b.nome))
+];
+
+export const FACEBOOK_REGIOES = [
+  { nome: "Brasil Inteiro (Todas as Regiões)", slug: "brasil" },
+  { nome: "São Paulo e Região, SP", slug: "saopaulo" },
+  { nome: "Rio de Janeiro e Região, RJ", slug: "riodejaneiro" },
+  { nome: "Belo Horizonte e Região, MG", slug: "belohorizonte" },
+  { nome: "Curitiba e Região, PR", slug: "curitiba" },
+  { nome: "Porto Alegre e Região, RS", slug: "portoalegre" },
+  { nome: "Salvador e Região, BA", slug: "salvador" },
+  { nome: "Fortaleza e Região, CE", slug: "fortaleza" },
+  { nome: "Brasília e Região, DF", slug: "brasilia" },
+  { nome: "Recife e Região, PE", slug: "recife" },
+  { nome: "Goiânia e Região, GO", slug: "goiania" },
+  { nome: "Manaus e Região, AM", slug: "manaus" },
+  { nome: "Belém e Região, PA", slug: "belem" },
+  { nome: "Campinas e Região, SP", slug: "campinas" },
+  { nome: "Florianópolis e Região, SC", slug: "florianopolis" },
+  { nome: "Vitória e Região, ES", slug: "vitoria" },
+  { nome: "Natal e Região, RN", slug: "natal" },
+  { nome: "Campo Grande e Região, MS", slug: "campogrande" },
+  { nome: "Cuiabá e Região, MT", slug: "cuiaba" },
+  { nome: "João Pessoa e Região, PB", slug: "joaopessoa" },
+  { nome: "Maceió e Região, AL", slug: "maceio" },
+  { nome: "Teresina e Região, PI", slug: "teresina" },
+  { nome: "Aracaju e Região, SE", slug: "aracaju" }
+];
+
+export function gerarUrlFacebook(cidadeSlug = "brasil", termo = "") {
+  const cSlug = (!cidadeSlug || cidadeSlug === "brasil") ? "" : `${cidadeSlug}/`;
+  const q = termo ? `?query=${encodeURIComponent(termo.trim().toLowerCase())}` : "";
+  return `https://www.facebook.com/marketplace/${cSlug}search/${q}`;
+}
+
