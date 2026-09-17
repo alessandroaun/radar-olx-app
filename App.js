@@ -43,6 +43,7 @@ import {
   TrialExpiredModal, RenewalModal, AdDetailModal 
 } from './FreemiumModals';
 import { CustomAlertModal } from './CustomAlertModal';
+import { PriceHistoryModal, normalizarNomeProdutoJS } from './PriceHistoryModal';
 import VideosScreen from './VideosScreen';
 import { VideoService } from './videoService';
 import { DEPARTAMENTOS_PESQUISA } from './categoryData';
@@ -224,6 +225,8 @@ function RadarProvider({ children }) {
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [couponsModalVisible, setCouponsModalVisible] = useState(false);
   const [authModalVisible, setAuthModalVisible] = useState(false);
+  const [priceHistoryModalVisible, setPriceHistoryModalVisible] = useState(false);
+  const [priceHistoryItem, setPriceHistoryItem] = useState(null);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const [userProfile, setUserProfile] = useState(null);
   const notifInitializedRef = useRef(false);
@@ -1108,6 +1111,17 @@ function RadarProvider({ children }) {
   const openFavoritesModal = useCallback(() => setFavoritesModalVisible(true), []);
   const closeFavoritesModal = useCallback(() => setFavoritesModalVisible(false), []);
 
+  const handleOpenPriceHistory = useCallback((item) => {
+    if (!item) return;
+    try {
+      Vibration.vibrate(25);
+    } catch (e) {}
+
+    // Abre o PriceHistoryModal diretamente para qualquer anúncio (com animação e escurecimento suave)
+    setPriceHistoryItem(item);
+    setPriceHistoryModalVisible(true);
+  }, []);
+
   return (
     <RadarContext.Provider value={{ 
       monitores, resultados, atividades, pushToken, setPushToken, deviceId, user, currentOwnerId,
@@ -1127,6 +1141,12 @@ function RadarProvider({ children }) {
       openNotif, closeNotif, openSettings, closeSettings,
       openCoupons, closeCoupons, couponsModalVisible,
       openAuthModal, closeAuthModal, authModalVisible,
+      // Histórico de Preços
+      openPriceHistory: handleOpenPriceHistory,
+      closePriceHistory: () => {
+        setPriceHistoryModalVisible(false);
+        setPriceHistoryItem(null);
+      },
       // Favoritos
       favoritos, favoritosCount: favoritos.length,
       isFavorito, toggleFavorito, removerFavorito,
@@ -1201,14 +1221,10 @@ function RadarProvider({ children }) {
         visible={settingsModalVisible}
         onClose={closeSettings}
       />
-      <Modal
+      <CouponsScreen
         visible={couponsModalVisible}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={closeCoupons}
-      >
-        <CouponsScreen onClose={closeCoupons} />
-      </Modal>
+        onClose={closeCoupons}
+      />
       <AuthTutorialModal
         visible={authModalVisible}
         onClose={closeAuthModal}
@@ -1216,6 +1232,19 @@ function RadarProvider({ children }) {
       <FavoritesModal
         visible={favoritesModalVisible}
         onClose={closeFavoritesModal}
+      />
+      <PriceHistoryModal
+        visible={priceHistoryModalVisible}
+        item={priceHistoryItem}
+        onClose={() => {
+          setPriceHistoryModalVisible(false);
+          setPriceHistoryItem(null);
+        }}
+        onOpenOfferUrl={(url) => {
+          setPriceHistoryModalVisible(false);
+          setPriceHistoryItem(null);
+          handleOpenAd({ url });
+        }}
       />
     </RadarContext.Provider>
   );
@@ -1590,7 +1619,8 @@ const CATEGORIAS_ANIMACAO_ONBOARDING = [
 function HomePromotionsScreen({ navigation }) {
   const { 
     user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, 
-    unreadNotifCount, userProfile, openAuthModal, isFavorito, toggleFavorito 
+    unreadNotifCount, userProfile, openAuthModal, isFavorito, toggleFavorito,
+    openPriceHistory
   } = useContext(RadarContext);
   const effectiveUserId = currentOwnerId || user?.id || deviceId;
   const [lojaAtiva, setLojaAtiva] = useState('TODOS');
@@ -1895,6 +1925,7 @@ function HomePromotionsScreen({ navigation }) {
             isFavorite={isFavorito(item)}
             onPress={() => handleDealClick(item)}
             onToggleFavorite={handleToggleFavorite}
+            onOpenPriceHistory={openPriceHistory}
           />
         )}
         contentContainerStyle={styles.feedScrollContent}
@@ -2008,7 +2039,8 @@ function HomePromotionsScreen({ navigation }) {
 function RecommendationsFeedScreen({ navigation }) {
   const { 
     user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, 
-    unreadNotifCount, userProfile, openAuthModal, isFavorito, toggleFavorito 
+    unreadNotifCount, userProfile, openAuthModal, isFavorito, toggleFavorito,
+    openPriceHistory
   } = useContext(RadarContext);
   const effectiveUserId = currentOwnerId || user?.id || deviceId;
   const [lojaAtiva, setLojaAtiva] = useState('TODOS');
@@ -2140,6 +2172,7 @@ function RecommendationsFeedScreen({ navigation }) {
             isFavorite={isFavorito(item)}
             onPress={() => handleDealClick(item)}
             onToggleFavorite={handleToggleFavorite}
+            onOpenPriceHistory={openPriceHistory}
           />
         )}
         contentContainerStyle={styles.feedScrollContent}
@@ -2778,22 +2811,174 @@ function RadarsScreen({ navigation }) {
 // =====================================================================
 // ABA 3: CUPONS (INSPIRAÇÃO PECHINCHOU SCREENSHOT 2)
 // =====================================================================
-function CouponsScreen({ onClose }) {
-  const { showAlert } = useContext(RadarContext);
+// =====================================================================
+// ABA 3: CUPONS (ACHÔAI - 100% SUPABASE, TELA INTEIRA BRANCA & COMPACTO)
+// =====================================================================
+function CouponsScreen({ visible, onClose }) {
+  const { showAlert, currentOwnerId, deviceId } = useContext(RadarContext);
+  const effectiveUserId = currentOwnerId || deviceId || 'guest_user';
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(insets.top, Platform.OS === 'android' ? (StatusBar.currentHeight || 24) : 44);
+
+  const { height: SCREEN_HEIGHT } = Dimensions.get('screen');
+  const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const [showModal, setShowModal] = useState(visible);
+  const isClosingRef = useRef(false);
+
+  const [cupons, setCupons] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [interacoes, setInteracoes] = useState({});
   const [lojaFiltro, setLojaFiltro] = useState('TODOS');
   const [cupomCopiadoId, setCupomCopiadoId] = useState(null);
   const [buscaCupom, setBuscaCupom] = useState('');
 
-  const cuponsFiltrados = useMemo(() => {
-    return CUPONS_DATABASE.filter(c => {
-      const matchLoja = lojaFiltro === 'TODOS' || c.loja.toLowerCase().includes(lojaFiltro.toLowerCase());
-      const matchBusca = !buscaCupom.trim() || 
-        c.loja.toLowerCase().includes(buscaCupom.toLowerCase()) || 
-        c.cupom.toLowerCase().includes(buscaCupom.toLowerCase()) ||
-        c.descricao.toLowerCase().includes(buscaCupom.toLowerCase());
-      return matchLoja && matchBusca;
+  // 1. Carregar cupons do Supabase (com cache local no AsyncStorage para performance instantânea)
+  const carregarCupons = useCallback(async () => {
+    try {
+      const cached = await AsyncStorage.getItem('@radar_cupons_cache');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setCupons(parsed);
+          }
+        } catch (eCache) {}
+      }
+
+      const { data, error } = await supabase
+        .from('cupons_desconto')
+        .select('*')
+        .eq('ativo', true)
+        .order('destaque', { ascending: false })
+        .order('created_at', { ascending: false });
+
+      if (!error && Array.isArray(data) && data.length > 0) {
+        setCupons(data);
+        await AsyncStorage.setItem('@radar_cupons_cache', JSON.stringify(data));
+      } else if (!cached && CUPONS_DATABASE && CUPONS_DATABASE.length > 0) {
+        setCupons(CUPONS_DATABASE);
+      }
+    } catch (e) {
+      console.log('Erro ao carregar cupons do Supabase:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // 2. Carregar interações do usuário (AsyncStorage + Supabase)
+  const carregarInteracoes = useCallback(async () => {
+    try {
+      const localStr = await AsyncStorage.getItem(`@radar_cupons_interacoes_${effectiveUserId}`);
+      let interacoesObj = localStr ? JSON.parse(localStr) : {};
+
+      try {
+        const { data, error } = await supabase
+          .from('cupons_usuario_interacoes')
+          .select('cupom_id, copiou, usou, copiado_em, usado_em')
+          .eq('user_id', effectiveUserId);
+
+        if (!error && Array.isArray(data)) {
+          data.forEach(item => {
+            interacoesObj[item.cupom_id] = {
+              ...(interacoesObj[item.cupom_id] || {}),
+              copiou: item.copiou || interacoesObj[item.cupom_id]?.copiou || false,
+              usou: item.usou || interacoesObj[item.cupom_id]?.usou || false,
+              copiado_em: item.copiado_em || interacoesObj[item.cupom_id]?.copiado_em,
+              usado_em: item.usado_em || interacoesObj[item.cupom_id]?.usado_em,
+            };
+          });
+        }
+      } catch (eSupabase) {}
+
+      setInteracoes(interacoesObj);
+    } catch (e) {}
+  }, [effectiveUserId]);
+
+  // Animação de Fechamento Suave a 60 FPS
+  const handleClose = useCallback(() => {
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
+    try { Vibration.vibrate(15); } catch (e) {}
+
+    slideAnim.stopAnimation();
+    Animated.timing(slideAnim, {
+      toValue: SCREEN_HEIGHT,
+      duration: 260,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true,
+    }).start(() => {
+      setShowModal(false);
+      isClosingRef.current = false;
+      if (onClose) onClose();
     });
-  }, [lojaFiltro, buscaCupom]);
+  }, [slideAnim, SCREEN_HEIGHT, onClose]);
+
+  // Controle de Abertura com Animação Fluida a 60 FPS (Glide de baixo para cima)
+  useEffect(() => {
+    slideAnim.stopAnimation();
+
+    if (visible) {
+      isClosingRef.current = false;
+      slideAnim.setValue(SCREEN_HEIGHT);
+      setShowModal(true);
+
+      carregarCupons();
+      carregarInteracoes();
+
+      Animated.timing(slideAnim, {
+        toValue: 0,
+        duration: 380,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    } else if (!isClosingRef.current && showModal) {
+      handleClose();
+    }
+  }, [visible, SCREEN_HEIGHT, carregarCupons, carregarInteracoes]);
+
+  // Interceptar botão voltar físico do Android
+  useEffect(() => {
+    if (!showModal) return;
+    const backAction = () => {
+      handleClose();
+      return true;
+    };
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
+    return () => backHandler.remove();
+  }, [showModal, handleClose]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await Promise.all([carregarCupons(), carregarInteracoes()]);
+    setRefreshing(false);
+  };
+
+  // Registrar ação do usuário (copiou código ou visitou loja)
+  const registrarAcaoCupom = async (cupomId, tipo) => {
+    const agora = new Date().toISOString();
+    const atual = interacoes[cupomId] || {};
+    const atualizado = {
+      ...atual,
+      ...(tipo === 'copiou' ? { copiou: true, copiado_em: agora } : { usou: true, usado_em: agora })
+    };
+
+    const novosMap = { ...interacoes, [cupomId]: atualizado };
+    setInteracoes(novosMap);
+
+    try {
+      await AsyncStorage.setItem(`@radar_cupons_interacoes_${effectiveUserId}`, JSON.stringify(novosMap));
+    } catch (e) {}
+
+    try {
+      await supabase.from('cupons_usuario_interacoes').upsert({
+        cupom_id: cupomId,
+        user_id: effectiveUserId,
+        ...(tipo === 'copiou' ? { copiou: true, copiado_em: agora } : { usou: true, usado_em: agora }),
+        updated_at: agora
+      }, { onConflict: 'cupom_id,user_id' });
+    } catch (e) {}
+  };
 
   const handleCopiar = async (item) => {
     try {
@@ -2801,9 +2986,11 @@ function CouponsScreen({ onClose }) {
       await Clipboard.setStringAsync(item.cupom);
       setCupomCopiadoId(item.id);
       setTimeout(() => setCupomCopiadoId(null), 3000);
+      await registrarAcaoCupom(item.id, 'copiou');
+
       showAlert({
         title: "Cupom Copiado!",
-        message: `O código "${item.cupom}" foi copiado para sua área de transferência. Cole no carrinho da ${item.loja} para garantir seu desconto!`,
+        message: `O código "${item.cupom}" foi copiado com sucesso. Cole no carrinho da loja ${item.loja} para garantir seu desconto!`,
         type: "success",
         icon: "checkmark-circle"
       });
@@ -2812,115 +2999,297 @@ function CouponsScreen({ onClose }) {
     }
   };
 
-  return (
-    <View style={styles.screen}>
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+  const handleIrParaLoja = async (item) => {
+    await registrarAcaoCupom(item.id, 'usou');
+    if (item.url) {
+      Linking.openURL(item.url);
+    }
+  };
 
-      {/* Header Estilo Pechinchou Screenshot 2 */}
-      <View style={styles.pechCuponsHeader}>
-        {onClose && (
+  // Contagem dinâmica por loja
+  const contagemPorLoja = useMemo(() => {
+    const counts = { TODOS: cupons.length };
+    LOJAS_FILTRO.filter(l => l !== 'TODOS').forEach(l => {
+      counts[l] = cupons.filter(c => (c.loja || '').toLowerCase().includes(l.toLowerCase())).length;
+    });
+    return counts;
+  }, [cupons]);
+
+  // Filtro de cupons por loja e busca
+  const cuponsFiltrados = useMemo(() => {
+    return cupons.filter(c => {
+      const matchLoja = lojaFiltro === 'TODOS' || (c.loja || '').toLowerCase().includes(lojaFiltro.toLowerCase());
+      const matchBusca = !buscaCupom.trim() || 
+        (c.loja || '').toLowerCase().includes(buscaCupom.toLowerCase()) || 
+        (c.cupom || '').toLowerCase().includes(buscaCupom.toLowerCase()) || 
+        (c.descricao || '').toLowerCase().includes(buscaCupom.toLowerCase());
+      return matchLoja && matchBusca;
+    });
+  }, [cupons, lojaFiltro, buscaCupom]);
+
+  if (!showModal) return null;
+
+  return (
+    <Modal
+      visible={showModal}
+      transparent={true}
+      animationType="none"
+      statusBarTranslucent={true}
+      onRequestClose={handleClose}
+    >
+      <Animated.View
+        style={[
+          styles.cuponsFullScreenContainer,
+          {
+            transform: [{ translateY: slideAnim }]
+          }
+        ]}
+      >
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+
+        {/* 1. Header Fundo Branco com Título Centralizado "Cupons AchôAI" e Ícone ao lado */}
+        <View style={[styles.pechCuponsHeader, { paddingTop: topInset + 6 }]}>
+          {/* Botão Fechar no Canto Superior Direito */}
           <TouchableOpacity 
-            onPress={onClose} 
-            style={{ position: 'absolute', top: Platform.OS === 'android' ? 44 : 52, right: 16, zIndex: 10, padding: 6 }}
+            onPress={handleClose} 
+            style={[styles.pechCuponsCloseBtn, { top: topInset + 4 }]}
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            activeOpacity={0.7}
           >
             <Ionicons name="close" size={24} color="#0F172A" />
           </TouchableOpacity>
-        )}
-        <View style={styles.row}>
-          <Ionicons name="ticket" size={18} color="#EF4444" style={{ marginRight: 6 }} />
-          <Text style={styles.pechCuponsPreTitle}>Cupons AchôAI</Text>
-        </View>
-        <Text style={styles.pechCuponsMainTitle}>
-          Cupons das <Text style={{ color: '#EF4444' }}>Melhores Lojas</Text>
-        </Text>
-        <Text style={styles.pechCuponsSub}>Encontre o cupom das melhores lojas do Brasil!</Text>
 
-        {/* Input de Busca de Lojas */}
-        <View style={styles.pechCuponsSearchBox}>
-          <TextInput
-            style={styles.pechCuponsSearchInput}
-            placeholder="Busque por lojas..."
-            placeholderTextColor="#94A3B8"
-            value={buscaCupom}
-            onChangeText={setBuscaCupom}
-          />
-          <Ionicons name="search" size={20} color="#EF4444" />
-        </View>
-      </View>
+          {/* Frase "Cupons AchôAI" centralizada, com ícone de ticket ao lado esquerdo acompanhando */}
+          <View style={styles.pechCuponsPreTitleRow}>
+            <View style={styles.pechCuponsPreTitleCenterBox}>
+              <Ionicons name="ticket" size={17} color="#FF5722" style={{ marginRight: 6 }} />
+              <Text style={styles.pechCuponsPreTitle}>Cupons AchôAI</Text>
+            </View>
+          </View>
 
-      {/* Grade de Lojas (2 Colunas - Inspiração Pechinchou Screenshot 2) */}
-      {!buscaCupom && lojaFiltro === 'TODOS' && (
-        <View style={{ height: 110, paddingHorizontal: 16, marginBottom: 8 }}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
-            {LOJAS_FILTRO.filter(l => l !== 'TODOS').map(l => (
-              <TouchableOpacity
-                key={l}
-                style={styles.pechStoreCardMini}
-                onPress={() => setLojaFiltro(l)}
-              >
-                <StoreLogoBadge storeKey={l} size={36} />
-                <Text style={styles.pechStoreCardMiniName} numberOfLines={1}>{l}</Text>
-                <Text style={styles.pechStoreCardMiniCount}>Cupons ativos</Text>
+          <Text style={styles.pechCuponsMainTitle}>
+            Cupons das <Text style={{ color: '#FF5722' }}>Melhores Lojas</Text>
+          </Text>
+          <Text style={styles.pechCuponsSub}>Códigos promocionais e descontos exclusivos atualizados!</Text>
+
+          {/* Barra de Busca */}
+          <View style={styles.pechCuponsSearchBox}>
+            <Ionicons name="search" size={18} color="#FF5722" style={{ marginRight: 8 }} />
+            <TextInput
+              style={styles.pechCuponsSearchInput}
+              placeholder="Busque por loja, cupom ou desconto..."
+              placeholderTextColor="#94A3B8"
+              value={buscaCupom}
+              onChangeText={setBuscaCupom}
+            />
+            {buscaCupom.length > 0 && (
+              <TouchableOpacity onPress={() => setBuscaCupom('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="close-circle" size={18} color="#94A3B8" />
               </TouchableOpacity>
-            ))}
-          </ScrollView>
+            )}
+          </View>
         </View>
-      )}
 
-      {/* Lista de Cupons */}
-      <ScrollView contentContainerStyle={styles.cuponsScrollContent} showsVerticalScrollIndicator={false}>
-        {cuponsFiltrados.map((c) => {
-          const isCopiado = cupomCopiadoId === c.id;
-          return (
-            <View key={c.id} style={styles.couponCard}>
-              <View style={styles.couponCardHeader}>
-                <View style={styles.row}>
-                  <StoreLogoBadge storeKey={c.loja} size={22} style={{ marginRight: 6 }} />
-                  <Text style={styles.couponStorePillText}>{c.loja}</Text>
-                </View>
-                <View style={styles.couponDiscountBadge}>
-                  <Text style={styles.couponDiscountBadgeText}>{c.desconto}</Text>
-                </View>
+        {/* 2. Carrossel de Lojas (Sempre visível começando com "Todas") */}
+        <View style={styles.pechStoresCarouselContainer}>
+          <ScrollView 
+            horizontal 
+            showsHorizontalScrollIndicator={false} 
+            contentContainerStyle={styles.pechStoresCarouselContent}
+          >
+            {/* Card "Todas" */}
+            <TouchableOpacity
+              style={[
+                styles.pechStoreCardMini,
+                lojaFiltro === 'TODOS' && styles.pechStoreCardMiniActive
+              ]}
+              onPress={() => setLojaFiltro('TODOS')}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.pechStoreAllIconCircle, lojaFiltro === 'TODOS' && styles.pechStoreAllIconCircleActive]}>
+                <Ionicons name="apps" size={18} color={lojaFiltro === 'TODOS' ? '#FFFFFF' : '#FF5722'} />
               </View>
+              <Text style={[styles.pechStoreCardMiniName, lojaFiltro === 'TODOS' && styles.pechStoreCardMiniNameActive]} numberOfLines={1}>
+                Todas
+              </Text>
+              <Text style={[styles.pechStoreCardMiniCount, lojaFiltro === 'TODOS' && styles.pechStoreCardMiniCountActive]}>
+                {cupons.length} {cupons.length === 1 ? 'cupom' : 'cupons'}
+              </Text>
+            </TouchableOpacity>
 
-              <Text style={styles.couponDescText}>{c.descricao}</Text>
-              <Text style={styles.couponRulesText}>• {c.regras}</Text>
-
-              {/* Caixa de Código de Cupom */}
-              <View style={styles.couponCodeBox}>
-                <View style={styles.couponCodeTextWrap}>
-                  <Text style={styles.couponCodeText}>{c.cupom}</Text>
-                </View>
+            {/* Cards de cada loja parceira */}
+            {LOJAS_FILTRO.filter(l => l !== 'TODOS').map(l => {
+              const isSelected = lojaFiltro === l;
+              const count = contagemPorLoja[l] || 0;
+              return (
                 <TouchableOpacity
-                  style={[styles.couponCopyBtn, isCopiado && styles.couponCopyBtnDone]}
-                  onPress={() => handleCopiar(c)}
-                  activeOpacity={0.8}
+                  key={l}
+                  style={[
+                    styles.pechStoreCardMini,
+                    isSelected && styles.pechStoreCardMiniActive
+                  ]}
+                  onPress={() => setLojaFiltro(isSelected ? 'TODOS' : l)}
+                  activeOpacity={0.7}
                 >
-                  <Ionicons 
-                    name={isCopiado ? "checkmark-outline" : "copy-outline"} 
-                    size={16} 
-                    color="#FFFFFF" 
-                    style={{ marginRight: 4 }} 
-                  />
-                  <Text style={styles.couponCopyBtnText}>
-                    {isCopiado ? 'COPIADO!' : 'COPIAR'}
+                  <StoreLogoBadge storeKey={l} size={28} />
+                  <Text style={[styles.pechStoreCardMiniName, isSelected && styles.pechStoreCardMiniNameActive]} numberOfLines={1}>
+                    {l}
+                  </Text>
+                  <Text style={[styles.pechStoreCardMiniCount, isSelected && styles.pechStoreCardMiniCountActive]}>
+                    {count} {count === 1 ? 'cupom' : 'cupons'}
                   </Text>
                 </TouchableOpacity>
-              </View>
+              );
+            })}
+          </ScrollView>
+        </View>
 
-              <TouchableOpacity
-                style={styles.couponStoreLinkBtn}
-                onPress={() => Linking.openURL(c.url)}
-              >
-                <Text style={styles.couponStoreLinkText}>Ir para {c.loja}</Text>
-                <Ionicons name="arrow-forward" size={14} color={THEME.primary} style={{ marginLeft: 4 }} />
-              </TouchableOpacity>
+        {/* Banner de Filtro Ativo */}
+        {lojaFiltro !== 'TODOS' && (
+          <View style={styles.pechFilterActiveBanner}>
+            <View style={styles.pechFilterActiveLeft}>
+              <Text style={styles.pechFilterActiveLabel}>Filtrando por:</Text>
+              <StoreLogoBadge storeKey={lojaFiltro} size={16} style={{ marginHorizontal: 6 }} />
+              <Text style={styles.pechFilterActiveStoreName}>{lojaFiltro}</Text>
+              <View style={styles.pechFilterBadge}>
+                <Text style={styles.pechFilterBadgeText}>{cuponsFiltrados.length}</Text>
+              </View>
             </View>
-          );
-        })}
-      </ScrollView>
-    </View>
+            <TouchableOpacity 
+              style={styles.pechFilterClearBtn} 
+              onPress={() => setLojaFiltro('TODOS')}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="close-circle" size={14} color="#FF5722" style={{ marginRight: 4 }} />
+              <Text style={styles.pechFilterClearBtnText}>Ver Todos</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* 3. Lista de Cupons com Pull-to-Refresh e Cards Compactos */}
+        <ScrollView 
+          contentContainerStyle={styles.cuponsScrollContent} 
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#FF5722']} tintColor="#FF5722" />
+          }
+        >
+          {loading && cupons.length === 0 ? (
+            <View style={styles.cuponsLoadingBox}>
+              <ActivityIndicator size="large" color="#FF5722" />
+              <Text style={styles.cuponsLoadingText}>Carregando cupons disponíveis...</Text>
+            </View>
+          ) : cuponsFiltrados.length === 0 ? (
+            <View style={styles.emptyCuponsBox}>
+              <Ionicons name="pricetags-outline" size={44} color="#CBD5E1" style={{ marginBottom: 12 }} />
+              <Text style={styles.emptyCuponsTitle}>Nenhum cupom encontrado</Text>
+              <Text style={styles.emptyCuponsSub}>Tente alterar o termo de busca ou selecionar outra loja parceira.</Text>
+              {lojaFiltro !== 'TODOS' && (
+                <TouchableOpacity style={styles.emptyCuponsResetBtn} onPress={() => setLojaFiltro('TODOS')}>
+                  <Text style={styles.emptyCuponsResetBtnText}>Ver todos os cupons</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          ) : (
+            cuponsFiltrados.map((c) => {
+              const isCopiadoAgora = cupomCopiadoId === c.id;
+              const userAction = interacoes[c.id] || {};
+              const jaUsou = userAction.usou;
+              const jaCopiou = userAction.copiou;
+
+              return (
+                <View key={c.id} style={styles.compactCouponCard}>
+                  {/* Borda lateral decorativa laranja */}
+                  <View style={styles.compactCouponAccentBar} />
+
+                  <View style={styles.compactCouponInner}>
+                    {/* Topo do Card: Loja + Selo de Interação + Tag de Desconto */}
+                    <View style={styles.compactCouponHeader}>
+                      <View style={styles.compactCouponStoreInfo}>
+                        <StoreLogoBadge storeKey={c.loja} size={22} style={{ marginRight: 6 }} />
+                        <Text style={styles.compactCouponStoreName} numberOfLines={1}>{c.loja}</Text>
+                        {c.categoria && c.categoria !== 'Geral' && (
+                          <View style={styles.compactCategoryBadge}>
+                            <Text style={styles.compactCategoryBadgeText} numberOfLines={1}>{c.categoria}</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      <View style={styles.compactHeaderRight}>
+                        {jaUsou ? (
+                          <View style={styles.compactUserBadgeUsed}>
+                            <Ionicons name="checkmark-done" size={11} color="#16A34A" style={{ marginRight: 2 }} />
+                            <Text style={styles.compactUserBadgeUsedText}>Já Acessado</Text>
+                          </View>
+                        ) : jaCopiou ? (
+                          <View style={styles.compactUserBadgeCopied}>
+                            <Ionicons name="copy" size={10} color="#2563EB" style={{ marginRight: 2 }} />
+                            <Text style={styles.compactUserBadgeCopiedText}>Já Copiado</Text>
+                          </View>
+                        ) : null}
+
+                        <View style={styles.compactDiscountBadge}>
+                          <Text style={styles.compactDiscountBadgeText}>{c.desconto}</Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* Descrição e Regras do Cupom */}
+                    <Text style={styles.compactCouponDesc} numberOfLines={2}>{c.descricao}</Text>
+                    {c.regras ? (
+                      <Text style={styles.compactCouponRules} numberOfLines={1}>• {c.regras}</Text>
+                    ) : null}
+
+                    {/* Linha de Ações: Código Tracejado + Botão Copiar + Botão Ir à Loja */}
+                    <View style={styles.compactCouponActionRow}>
+                      <View style={styles.compactCodeBox}>
+                        <Ionicons name="pricetag" size={11} color="#FF5722" style={{ marginRight: 4 }} />
+                        <Text style={styles.compactCodeText} numberOfLines={1} selectable>{c.cupom}</Text>
+                      </View>
+
+                      <View style={styles.compactActionButtons}>
+                        <TouchableOpacity
+                          style={[
+                            styles.compactCopyBtn,
+                            isCopiadoAgora && styles.compactCopyBtnDone,
+                            (!isCopiadoAgora && jaCopiou) && styles.compactCopyBtnAlreadyCopied
+                          ]}
+                          onPress={() => handleCopiar(c)}
+                          activeOpacity={0.75}
+                        >
+                          <Ionicons 
+                            name={isCopiadoAgora ? "checkmark" : (jaCopiou ? "copy" : "copy-outline")} 
+                            size={12} 
+                            color={(!isCopiadoAgora && jaCopiou) ? "#FF5722" : "#FFFFFF"} 
+                            style={{ marginRight: 3 }} 
+                          />
+                          <Text style={[
+                            styles.compactCopyBtnText,
+                            (!isCopiadoAgora && jaCopiou) && styles.compactCopyBtnTextAlreadyCopied
+                          ]}>
+                            {isCopiadoAgora ? 'COPIADO!' : (jaCopiou ? 'COPIAR DE NOVO' : 'COPIAR')}
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.compactStoreLinkBtn}
+                          onPress={() => handleIrParaLoja(c)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <Text style={styles.compactStoreLinkText}>Loja</Text>
+                          <Ionicons name="open-outline" size={12} color="#0F172A" style={{ marginLeft: 3 }} />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </ScrollView>
+      </Animated.View>
+    </Modal>
   );
 }
 
@@ -2931,7 +3300,8 @@ function SearchScreen() {
   const { 
     resultados, handleOpenAd, user, currentOwnerId, 
     openNotif, openSettings, unreadNotifCount, userProfile, 
-    openAuthModal, showAlert, isFavorito, toggleFavorito 
+    openAuthModal, showAlert, isFavorito, toggleFavorito,
+    openPriceHistory
   } = useContext(RadarContext);
 
   // Etapas: 'busca' | 'varrendo' (animação 10s) | 'resultados'
@@ -3743,6 +4113,7 @@ function SearchScreen() {
                 isFavorite={isFavorito(item)}
                 onPress={() => handleResultClick(item)}
                 onToggleFavorite={() => toggleFavorito(item)}
+                onOpenPriceHistory={openPriceHistory}
               />
             )}
             initialNumToRender={8}
@@ -3847,53 +4218,72 @@ function NotificationsModal({ visible, onClose, onClearAll }) {
 
     if (visible) {
       isClosingRef.current = false;
+      fadeAnim.setValue(0);
+      slideAnim.setValue(SCREEN_HEIGHT);
       setShowModal(true);
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 260,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.timing(slideAnim, {
-          toValue: 0,
-          duration: 280,
-          easing: Easing.bezier(0.16, 1, 0.3, 1),
-          useNativeDriver: true,
-        }),
-      ]).start();
-    } else {
-      isClosingRef.current = true;
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 0,
-          duration: 180,
-          easing: Easing.in(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.timing(slideAnim, {
-          toValue: SCREEN_HEIGHT,
-          duration: 220,
-          easing: Easing.in(Easing.cubic),
-          useNativeDriver: true,
-        }),
-      ]).start(({ finished }) => {
-        if (finished && isClosingRef.current) {
-          setShowModal(false);
-          isClosingRef.current = false;
-        }
-      });
+
+      // Aguarda frame de montagem nativa do Android para garantir fade-in 100% gradual e suave
+      const timer = setTimeout(() => {
+        requestAnimationFrame(() => {
+          Animated.parallel([
+            Animated.timing(fadeAnim, {
+              toValue: 1,
+              duration: 320,
+              easing: Easing.out(Easing.quad),
+              useNativeDriver: true,
+            }),
+            Animated.timing(slideAnim, {
+              toValue: 0,
+              duration: 320,
+              easing: Easing.bezier(0.16, 1, 0.3, 1),
+              useNativeDriver: true,
+            }),
+          ]).start();
+        });
+      }, 20);
+
+      return () => clearTimeout(timer);
+    } else if (!isClosingRef.current && showModal) {
+      handleClose();
     }
   }, [visible, SCREEN_HEIGHT]);
 
   const handleClose = () => {
-    onClose();
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
+    slideAnim.stopAnimation();
+    fadeAnim.stopAnimation();
+
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 0,
+        duration: 220,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(slideAnim, {
+        toValue: SCREEN_HEIGHT,
+        duration: 240,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setShowModal(false);
+      isClosingRef.current = false;
+      onClose();
+    });
   };
 
   if (!showModal) return null;
 
   return (
-    <Modal visible={showModal} animationType="none" transparent onRequestClose={handleClose}>
+    <Modal 
+      visible={showModal} 
+      animationType="none" 
+      transparent 
+      statusBarTranslucent={true} 
+      onRequestClose={handleClose}
+    >
       <View style={{ flex: 1, justifyContent: 'flex-end' }}>
         {/* Backdrop estático escuro que esmaece suavemente (sem subir da tela!) */}
         <Animated.View style={[styles.modalOverlayStaticBackdrop, { opacity: fadeAnim }]}>
@@ -4207,7 +4597,13 @@ function SettingsDrawerModal({ visible, onClose }) {
   if (!showModal) return null;
 
   return (
-    <Modal visible={showModal} transparent onRequestClose={handleClose} animationType="none">
+    <Modal 
+      visible={showModal} 
+      transparent 
+      statusBarTranslucent={true} 
+      onRequestClose={handleClose} 
+      animationType="none"
+    >
       <View style={{ flex: 1 }}>
         {/* Backdrop escurecido */}
         <Animated.View style={[styles.drawerBackdrop, { opacity: fadeAnim }]}>
@@ -4616,7 +5012,7 @@ function SettingsDrawerModal({ visible, onClose }) {
 // MODAL: MEUS FAVORITOS (OFERTAS SALVAS PELO USUÁRIO)
 // =====================================================================
 function FavoritesModal({ visible, onClose }) {
-  const { favoritos, removerFavorito, currentOwnerId, deviceId, showAlert } = useContext(RadarContext);
+  const { favoritos, removerFavorito, currentOwnerId, deviceId, showAlert, openPriceHistory } = useContext(RadarContext);
   const insets = useSafeAreaInsets();
   const effectiveUserId = currentOwnerId || deviceId;
 
@@ -4699,6 +5095,7 @@ function FavoritesModal({ visible, onClose }) {
                 isFavorite={true}
                 onPress={() => handleDealClick(item)}
                 onToggleFavorite={() => removerFavorito(item)}
+                onOpenPriceHistory={openPriceHistory}
               />
             )}
             contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 40 }}
@@ -5150,8 +5547,6 @@ function CreateMonitorScreen({ navigation, route }) {
     return false;
   });
 
-  const [freteGratis, setFreteGratis] = useState(true);
-
   // Localização contextual para OLX e Facebook
   const [olxUf, setOlxUf] = useState('SP');
   const [olxRegiao, setOlxRegiao] = useState('');
@@ -5282,7 +5677,7 @@ function CreateMonitorScreen({ navigation, route }) {
     const t = encodeURIComponent(termo.trim());
     switch(platKey) {
       case 'MERCADO_LIVRE':
-        return `https://lista.mercadolivre.com.br/${termo.trim().replace(/\s+/g, '-')}${freteGratis ? '_CustoFrete_Gratis' : ''}`;
+        return `https://lista.mercadolivre.com.br/${termo.trim().replace(/\s+/g, '-')}`;
       case 'SHOPEE':
         return `https://shopee.com.br/search?keyword=${t}`;
       case 'AMAZON':
@@ -5332,9 +5727,6 @@ function CreateMonitorScreen({ navigation, route }) {
       let palavrasFinal = produto.trim();
       if (estrategia === 'preco_alvo' && precoAlvoNum > 0) {
         palavrasFinal += ` preco_alvo:${precoAlvoNum}`;
-      }
-      if (freteGratis) {
-        palavrasFinal += ` frete_gratis:true`;
       }
       if (notificarPorLoja && selectedPlatforms.length > 1) {
         palavrasFinal += ` notificar_por_loja:true`;
@@ -5628,24 +6020,6 @@ function CreateMonitorScreen({ navigation, route }) {
                 />
               </TouchableOpacity>
             )}
-
-            {/* Filtro Frete Grátis */}
-            <TouchableOpacity 
-              style={[styles.wizardToggleRow, { marginTop: selectedPlatforms.length > 1 ? 8 : 16 }]}
-              onPress={() => setFreteGratis(!freteGratis)}
-              activeOpacity={0.85}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={styles.wizardToggleTitle}>Apenas com Frete Grátis</Text>
-                <Text style={styles.wizardToggleDesc}>Filtra produtos elegíveis a envio gratuito nas lojas.</Text>
-              </View>
-              <Switch
-                value={freteGratis}
-                onValueChange={setFreteGratis}
-                trackColor={{ false: '#CBD5E1', true: THEME.primary }}
-                thumbColor="#FFFFFF"
-              />
-            </TouchableOpacity>
 
             {/* Localização para OLX / Facebook caso selecionados */}
             {selectedPlatforms.includes('OLX') && (
@@ -6877,168 +7251,406 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
 
-  // Pechinchou Cupons Header (Screenshot 2)
+  // AchôAI Cupons - 100% Solid White Full-Screen & Compact Cards
+  cuponsFullScreenContainer: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    width: '100%',
+    height: '100%',
+  },
   pechCuponsHeader: {
     backgroundColor: '#FFFFFF',
-    paddingTop: Platform.OS === 'android' ? 44 : 52,
-    paddingHorizontal: 20,
-    paddingBottom: 14,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
     alignItems: 'center',
     borderBottomWidth: 1,
     borderBottomColor: '#F1F5F9',
   },
+  pechCuponsCloseBtn: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 10,
+    padding: 6,
+  },
+  pechCuponsPreTitleRow: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  pechCuponsPreTitleCenterBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   pechCuponsPreTitle: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 13,
+    fontWeight: '800',
     color: '#0F172A',
+    letterSpacing: 0.2,
   },
   pechCuponsMainTitle: {
-    fontSize: 22,
+    fontSize: 21,
     fontWeight: '900',
     color: '#0F172A',
-    marginTop: 4,
+    marginTop: 2,
     textAlign: 'center',
   },
   pechCuponsSub: {
     fontSize: 12,
     color: '#64748B',
-    marginTop: 4,
-    marginBottom: 14,
+    marginTop: 3,
+    marginBottom: 12,
     textAlign: 'center',
   },
   pechCuponsSearchBox: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#F8FAFC',
-    borderRadius: 24,
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: '#E2E8F0',
-    paddingHorizontal: 16,
-    height: 44,
+    paddingHorizontal: 14,
+    height: 42,
     width: '100%',
   },
   pechCuponsSearchInput: {
     flex: 1,
-    fontSize: 13,
+    fontSize: 12.5,
     color: '#0F172A',
     padding: 0,
   },
+  pechStoresCarouselContainer: {
+    height: 94,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  pechStoresCarouselContent: {
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    gap: 8,
+    alignItems: 'center',
+  },
   pechStoreCardMini: {
-    width: 90,
-    height: 90,
-    borderRadius: 14,
+    width: 82,
+    height: 74,
+    borderRadius: 12,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: '#E2E8F0',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 6,
+    padding: 4,
+  },
+  pechStoreCardMiniActive: {
+    borderColor: '#FF5722',
+    backgroundColor: '#FFF7ED',
+    borderWidth: 1.5,
   },
   pechStoreCardMiniName: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: '800',
     color: '#0F172A',
-    marginTop: 4,
+    marginTop: 3,
+  },
+  pechStoreCardMiniNameActive: {
+    color: '#C2410C',
   },
   pechStoreCardMiniCount: {
-    fontSize: 9,
+    fontSize: 8.5,
     color: '#64748B',
     marginTop: 1,
   },
-  cuponsScrollContent: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 80,
+  pechStoreCardMiniCountActive: {
+    color: '#EA580C',
+    fontWeight: '700',
   },
-  couponCard: {
+  pechStoreAllIconCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#FFF7ED',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pechStoreAllIconCircleActive: {
+    backgroundColor: '#FF5722',
+  },
+  pechFilterActiveBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFF7ED',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: '#FED7AA',
+  },
+  pechFilterActiveLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  pechFilterActiveLabel: {
+    fontSize: 11.5,
+    color: '#9A3412',
+    fontWeight: '500',
+  },
+  pechFilterActiveStoreName: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#C2410C',
+  },
+  pechFilterBadge: {
+    backgroundColor: '#FED7AA',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 10,
+    marginLeft: 6,
+  },
+  pechFilterBadgeText: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    color: '#9A3412',
+  },
+  pechFilterClearBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
+    paddingHorizontal: 8,
+    paddingVertical: 3.5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+  },
+  pechFilterClearBtnText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#FF5722',
+  },
+  cuponsScrollContent: {
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 60,
+  },
+  cuponsLoadingBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
+  cuponsLoadingText: {
+    fontSize: 13,
+    color: '#64748B',
+    marginTop: 10,
+    fontWeight: '600',
+  },
+  emptyCuponsBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  emptyCuponsTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#1E293B',
+    marginBottom: 4,
+  },
+  emptyCuponsSub: {
+    fontSize: 12.5,
+    color: '#64748B',
+    textAlign: 'center',
     marginBottom: 14,
+  },
+  emptyCuponsResetBtn: {
+    backgroundColor: '#FFF7ED',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+  },
+  emptyCuponsResetBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#EA580C',
+  },
+  compactCouponCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    marginBottom: 9,
     borderWidth: 1,
     borderColor: '#E2E8F0',
-    elevation: 1,
+    flexDirection: 'row',
+    overflow: 'hidden',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1.5,
   },
-  couponCardHeader: {
+  compactCouponAccentBar: {
+    width: 4,
+    backgroundColor: '#FF5722',
+  },
+  compactCouponInner: {
+    flex: 1,
+    paddingVertical: 9,
+    paddingHorizontal: 11,
+  },
+  compactCouponHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 5,
   },
-  couponStorePillText: {
-    fontSize: 13,
+  compactCouponStoreInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  compactCouponStoreName: {
+    fontSize: 12.5,
     fontWeight: '800',
     color: '#0F172A',
   },
-  couponDiscountBadge: {
-    backgroundColor: '#DCFCE7',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
+  compactCategoryBadge: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+    marginLeft: 5,
   },
-  couponDiscountBadgeText: {
-    fontSize: 13,
-    fontWeight: '900',
+  compactCategoryBadgeText: {
+    fontSize: 9.5,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  compactHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  compactUserBadgeUsed: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  compactUserBadgeUsedText: {
+    fontSize: 9.5,
+    fontWeight: '700',
     color: '#16A34A',
   },
-  couponDescText: {
-    fontSize: 14,
+  compactUserBadgeCopied: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  compactUserBadgeCopiedText: {
+    fontSize: 9.5,
     fontWeight: '700',
-    color: '#0F172A',
-    marginBottom: 4,
+    color: '#2563EB',
   },
-  couponRulesText: {
+  compactDiscountBadge: {
+    backgroundColor: '#FFF7ED',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+  },
+  compactDiscountBadgeText: {
+    fontSize: 11.5,
+    fontWeight: '900',
+    color: '#EA580C',
+  },
+  compactCouponDesc: {
     fontSize: 12,
-    color: '#64748B',
-    marginBottom: 12,
+    fontWeight: '600',
+    color: '#1E293B',
+    lineHeight: 16.5,
+    marginBottom: 2,
   },
-  couponCodeBox: {
+  compactCouponRules: {
+    fontSize: 10,
+    color: '#64748B',
+    marginBottom: 7,
+  },
+  compactCouponActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 2,
+  },
+  compactCodeBox: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#FFF7ED',
-    borderRadius: 10,
-    borderWidth: 1.5,
+    paddingHorizontal: 7,
+    paddingVertical: 4.5,
+    borderRadius: 6,
+    borderWidth: 1,
     borderStyle: 'dashed',
     borderColor: '#FF5722',
-    padding: 6,
+    maxWidth: '46%',
   },
-  couponCodeTextWrap: {
-    flex: 1,
-    paddingHorizontal: 12,
+  compactCodeText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#C2410C',
+    letterSpacing: 0.5,
   },
-  couponCodeText: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: '#FF5722',
-    letterSpacing: 1.5,
+  compactActionButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
   },
-  couponCopyBtn: {
+  compactCopyBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#FF5722',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 5.5,
+    borderRadius: 6,
   },
-  couponCopyBtnDone: {
+  compactCopyBtnDone: {
     backgroundColor: '#16A34A',
   },
-  couponCopyBtnText: {
-    fontSize: 12,
+  compactCopyBtnAlreadyCopied: {
+    backgroundColor: '#FFF7ED',
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+  },
+  compactCopyBtnText: {
+    fontSize: 10.5,
     fontWeight: '800',
     color: '#FFFFFF',
   },
-  couponStoreLinkBtn: {
+  compactCopyBtnTextAlreadyCopied: {
+    color: '#FF5722',
+  },
+  compactStoreLinkBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 12,
-    paddingVertical: 4,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 7,
+    paddingVertical: 5.5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
-  couponStoreLinkText: {
-    fontSize: 12,
+  compactStoreLinkText: {
+    fontSize: 10.5,
     fontWeight: '700',
-    color: '#FF5722',
+    color: '#0F172A',
   },
 
   searchBarContainerFull: {

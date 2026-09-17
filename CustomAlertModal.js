@@ -220,6 +220,7 @@ export const CustomAlertModal = ({
     <Modal
       visible={showModal}
       transparent={true}
+      statusBarTranslucent={true}
       animationType="none"
       onRequestClose={handleCancelPress}
     >

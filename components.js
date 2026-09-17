@@ -1140,6 +1140,7 @@ export const ProductDealCard = React.memo(({
   onPress, 
   onToggleFavorite,
   isFavorite: isFavoriteProp,
+  onOpenPriceHistory,
   style 
 }) => {
   const [imgError, setImgError] = useState(false);
@@ -1356,12 +1357,19 @@ export const ProductDealCard = React.memo(({
       onPress={onPress}
       activeOpacity={0.9}
     >
-      {/* Topo do Card: Logo Loja + Nome + Verificado (100% Horizontal) */}
+      {/* Topo do Card: Logo Loja + Nome + Verificado + Preço Abaixou (100% Horizontal) */}
       <View style={styles.pechCardTopRow}>
         <View style={styles.pechCardStoreBox}>
           <StoreLogoBadge storeKey={lojaNome} size={20} style={{ marginRight: 6 }} />
           <Text style={styles.pechCardStoreName}>{lojaNome}</Text>
-          <Ionicons name="checkmark-circle" size={14} color="#0F172A" style={{ marginLeft: 5 }} />
+          <Ionicons name="checkmark-circle" size={14} color="#0F172A" style={{ marginLeft: 4 }} />
+
+          {Boolean(item?.preco_abaixou) && (
+            <View style={styles.pechCardPrecoBaixouTopBadge}>
+              <Ionicons name="trending-down" size={10} color="#059669" style={{ marginRight: 2 }} />
+              <Text style={styles.pechCardPrecoBaixouTopText}>Preço abaixou</Text>
+            </View>
+          )}
         </View>
 
         {ribbonConfig && !item?.is_recomendacao && (
@@ -1494,12 +1502,29 @@ export const ProductDealCard = React.memo(({
             />
           </TouchableOpacity>
 
-          {Boolean(item?.preco_abaixou) && (
-            <View style={styles.pechCardPrecoBaixouBadge}>
-              <Ionicons name="trending-down" size={11} color="#059669" style={{ marginRight: 3 }} />
-              <Text style={styles.pechCardPrecoBaixouText}> Preço abaixou ainda mais</Text>
-            </View>
-          )}
+          <TouchableOpacity 
+            style={styles.pechCardHistoryBtn}
+            onPress={(e) => {
+              e.stopPropagation();
+              try { Vibration.vibrate(20); } catch(err) {}
+              if (onOpenPriceHistory) onOpenPriceHistory(item);
+            }}
+            hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+            activeOpacity={0.75}
+          >
+            <Ionicons 
+              name="stats-chart" 
+              size={11.5} 
+              color={item?.is_recomendacao ? "#E11D48" : "#FF5722"} 
+              style={{ marginRight: 4 }} 
+            />
+            <Text style={[
+              styles.pechCardHistoryBtnText,
+              item?.is_recomendacao && { color: '#BE123C' }
+            ]}>
+              Histórico
+            </Text>
+          </TouchableOpacity>
         </View>
 
         <TouchableOpacity 
@@ -2891,21 +2916,38 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexShrink: 1,
   },
-  pechCardPrecoBaixouBadge: {
+  pechCardPrecoBaixouTopBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#ECFDF5',
-    borderColor: '#6EE7B7',
+    borderColor: '#A7F3D0',
     borderWidth: 1,
-    paddingHorizontal: 7,
-    paddingVertical: 2.5,
+    paddingHorizontal: 5,
+    paddingVertical: 1.5,
+    borderRadius: 6,
+    marginLeft: 6,
+  },
+  pechCardPrecoBaixouTopText: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    color: '#059669',
+    letterSpacing: -0.2,
+  },
+  pechCardHistoryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E2E8F0',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     borderRadius: 12,
     marginLeft: 6,
   },
-  pechCardPrecoBaixouText: {
-    fontSize: 10.5,
-    fontWeight: '800',
-    color: '#047857',
+  pechCardHistoryBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#334155',
     letterSpacing: -0.2,
   },
   pechCardFavBtn: {

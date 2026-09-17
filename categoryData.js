@@ -19,7 +19,7 @@ export const DEPARTAMENTOS_PESQUISA = [
       { key: 'xbox', label: 'Xbox Series S / X', query: 'Xbox Series', image: require('./assets/categories/sub_xbox.jpg') },
       { key: 'switch', label: 'Nintendo Switch', query: 'Nintendo Switch', image: require('./assets/categories/sub_switch.jpg') },
       { key: 'controle', label: 'Controle Sem Fio', query: 'Joystick de Console', image: require('./assets/categories/sub_controle_gamer.jpg') },
-      { key: 'jogos', label: 'Jogos em Mídia Física', query: 'Game Mídia Física', image: require('./assets/categories/sub_jogos.jpg') },
+      { key: 'jogos', label: 'Jogos em Mídia Física', query: 'Jogo Mídia Física', image: require('./assets/categories/sub_jogos.jpg') },
       { key: 'cadeira', label: 'Cadeira Gamer', query: 'Cadeira Gamer', image: require('./assets/categories/sub_cadeira_gamer.jpg') },
     ]
   },
