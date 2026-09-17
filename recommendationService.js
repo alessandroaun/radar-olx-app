@@ -7,15 +7,46 @@ import { supabase } from "./supabase";
 // =====================================================================
 
 const STORAGE_KEYS = {
-  USER_INTERESTS: "@achoai_device_user_interests_v9",
-  STORE_INTERESTS: "@achoai_device_store_interests_v9",
-  CACHED_RECS: "@achoai_cached_recommendations_v9",
-  LAST_UPDATE: "@achoai_last_rec_update_timestamp_v9",
-  FIRST_RUN_DONE: "@achoai_first_recommendation_sweep_done_v9",
-  CACHED_PROMOS: "@achoai_home_promotions_v9",
-  LAST_PROMO_UPDATE: "@achoai_home_promotions_timestamp_v9",
-  FIRST_HOME_SWEEP: "@achoai_first_home_sweep_done_v9"
+  USER_INTERESTS: "@achoai_device_user_interests_v10",
+  STORE_INTERESTS: "@achoai_device_store_interests_v10",
+  CACHED_RECS: "@achoai_cached_recommendations_v10",
+  LAST_UPDATE: "@achoai_last_rec_update_timestamp_v10",
+  FIRST_RUN_DONE: "@achoai_first_recommendation_sweep_done_v10",
+  CACHED_PROMOS: "@achoai_home_promotions_v10",
+  LAST_PROMO_UPDATE: "@achoai_home_promotions_timestamp_v10",
+  FIRST_HOME_SWEEP: "@achoai_first_home_sweep_done_v10"
 };
+
+// Limpeza automática não-bloqueante de chaves legadas volumosas para desocupar o SQLite no Android
+(async () => {
+  try {
+    await AsyncStorage.multiRemove([
+      "@achoai_cached_recommendations_v9",
+      "@achoai_home_promotions_v9",
+      "@achoai_home_promotions_v8",
+      "@achoai_cached_recommendations_v8",
+      "@achoai_cached_videos_feed_v10"
+    ]);
+  } catch (_) {}
+})();
+
+/**
+ * Salva apenas uma fatia leve (máx 60 itens ~ 40KB) em cache local.
+ * Isola o processo em try/catch para garantir que falhas de armazenamento (como disco cheio ou limite do SQLite)
+ * NUNCA interrompam a entrega da lista completa de produtos à interface.
+ */
+async function salvarCacheSeguro(chave, lista, maxItens = 60) {
+  if (!Array.isArray(lista) || lista.length === 0) return;
+  try {
+    const fatiaLeve = lista.slice(0, maxItens);
+    await AsyncStorage.setItem(chave, JSON.stringify(fatiaLeve));
+  } catch (err) {
+    console.warn(`[RecEngine] Falha não-bloqueante ao salvar cache (${chave}):`, err);
+    try {
+      await AsyncStorage.removeItem(chave);
+    } catch (_) {}
+  }
+}
 
 // Intervalo de renovação horária para promoções da Home (1 hora)
 const CICLO_PROMOCOES_MS = 60 * 60 * 1000;
@@ -108,7 +139,7 @@ export class RecommendationEngine {
    * - Clique em Oferta = +3 (curiosidade de navegação)
    * Também rastreia a loja interagida para dar peso à loja sem excluir as demais lojas.
    */
-  static async registrarInteracao(termo, peso = 3, origem = 'clique', usuarioId = null, loja = null) {
+  static async registrarInteracao(termo, peso = 10, origem = 'clique_oferta', usuarioId = null, loja = null) {
     if (!termo || typeof termo !== "string") return;
     const clean = termo.trim().toLowerCase();
     if (clean.length < 3) return;
@@ -131,22 +162,41 @@ export class RecommendationEngine {
         await this.registrarAfinidadeLoja(loja, peso);
       }
 
-      // Sincronização não-bloqueante com a tabela usuario_interesses no Supabase
+      // Sincronização com a tabela usuario_interesses no Supabase
       const uId = usuarioId || (await AsyncStorage.getItem('@radar_device_id'));
       if (uId) {
         try {
+          const agora = new Date().toISOString();
           await supabase.from("usuario_interesses").upsert({
             usuario_id: uId,
             termo: clean.slice(0, 60),
             peso: peso,
             origem: origem,
-            updated_at: new Date().toISOString()
+            updated_at: agora
           }, { onConflict: 'usuario_id,termo' });
           
+          // Regra Estrita de Reciclagem FIFO: Limite de no máximo 20 linhas por usuário
+          // Quando ultrapassar 20 linhas, as linhas mais antigas são descartadas em prol das novas
+          const { data: userInteresses } = await supabase
+            .from("usuario_interesses")
+            .select("id")
+            .eq("usuario_id", uId)
+            .order("updated_at", { ascending: false });
+
+          if (userInteresses && userInteresses.length > 20) {
+            const idsExcedentes = userInteresses.slice(20).map(r => r.id);
+            if (idsExcedentes.length > 0) {
+              await supabase
+                .from("usuario_interesses")
+                .delete()
+                .in("id", idsExcedentes);
+            }
+          }
+
           // Dispara ignição não-bloqueante no backend para o robô de recomendações
           this.solicitarVarreduraRecomendacoes(clean, uId).catch(() => {});
         } catch (eSupabase) {
-          // Captura silenciosa caso a tabela ainda não tenha sido criada no Supabase
+          // Captura silenciosa caso ocorra erro de conexão transitório
         }
       }
     } catch (e) {
@@ -177,25 +227,43 @@ export class RecommendationEngine {
     }
   }
 
-  // Atalhos semânticos calibrados por prioridade
+  // Atalhos semânticos calibrados por prioridade multi-sinal:
+  // - Radar Criado = 20 (máxima intenção de compra)
+  // - Pesquisa Inteligente = 15 (forte intenção de busca ativa)
+  // - Favorito Marcado = 10 (forte afinidade de interesse)
+  // - Clique em Oferta = 10 (forte afinidade igualada ao favorito)
+  // - Vídeo Curtido = 4 (engajamento com conteúdo)
   static async registrarRadar(termo, usuarioId = null, loja = null) {
     return this.registrarInteracao(termo, 20, 'radar', usuarioId, loja);
   }
 
+  static async registrarPesquisa(termo, usuarioId = null, loja = null) {
+    return this.registrarInteracao(termo, 15, 'busca', usuarioId, loja);
+  }
+
+  static async registrarBusca(termo, usuarioId = null, loja = null) {
+    return this.registrarInteracao(termo, 15, 'busca', usuarioId, loja);
+  }
+
+  // Mantido para compatibilidade reversa
   static async registrarPesquisaOuRadar(termo, usuarioId = null, loja = null) {
-    return this.registrarInteracao(termo, 20, 'radar', usuarioId, loja);
+    return this.registrarPesquisa(termo, usuarioId, loja);
   }
 
   static async registrarFavorito(termo, usuarioId = null, loja = null) {
     return this.registrarInteracao(termo, 10, 'favorito', usuarioId, loja);
   }
 
-  static async registrarBusca(termo, usuarioId = null, loja = null) {
-    return this.registrarInteracao(termo, 6, 'busca', usuarioId, loja);
+  static async registrarVideoLike(termo, usuarioId = null, loja = null) {
+    return this.registrarInteracao(termo, 4, 'video_like', usuarioId, loja);
   }
 
   static async registrarClique(termo, usuarioId = null, loja = null) {
-    return this.registrarInteracao(termo, 3, 'clique', usuarioId, loja);
+    return this.registrarInteracao(termo, 10, 'clique_oferta', usuarioId, loja);
+  }
+
+  static async registrarCliqueOferta(termo, usuarioId = null, loja = null) {
+    return this.registrarInteracao(termo, 10, 'clique_oferta', usuarioId, loja);
   }
 
   /**
@@ -252,13 +320,17 @@ export class RecommendationEngine {
   }
 
   static extrairDescontoPct(item) {
-    if (item.desconto_pct) return Number(item.desconto_pct);
+    if (item.desconto_pct) {
+      const d = Number(item.desconto_pct);
+      if (d > 0 && d < 90) return d;
+    }
     const str = `${item.title || ""} ${item.desconto || ""}`;
     const match = str.match(/(\d+)\s*%\s*(?:off|desconto)/i) || str.match(/-\s*(\d+)\s*%/);
-    if (match) return parseInt(match[1], 10);
-    const seed = String(item.id || item.title || "");
-    const hash = seed.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
-    return 15 + (hash % 26);
+    if (match) {
+      const parsed = parseInt(match[1], 10);
+      if (parsed > 0 && parsed < 90) return parsed;
+    }
+    return 0;
   }
 
   static gerarUrlBuscaLoja(loja = "", termo = "") {
@@ -451,9 +523,25 @@ export class RecommendationEngine {
 
         const lowerTitle = title.toLowerCase();
         const loja = item.loja || this.identificarLojaPorUrl(item.url);
-        const descontoPct = this.extrairDescontoPct(item);
         const precoFloat = parseFloat(item.price);
-        const precoOriginalFloat = parseFloat((precoFloat * (1 + descontoPct / 100)).toFixed(2));
+        let precoOriginalFloat = item.preco_original ? parseFloat(item.preco_original) : null;
+        let descontoPct = this.extrairDescontoPct(item);
+
+        // Se veio com preco_original do banco e for maior que o preço atual
+        if (precoOriginalFloat && precoOriginalFloat > precoFloat) {
+          const calcDesc = Math.round(((precoOriginalFloat - precoFloat) / precoOriginalFloat) * 100);
+          if (calcDesc > 0 && calcDesc < 90) {
+            descontoPct = calcDesc;
+          } else {
+            precoOriginalFloat = null;
+            descontoPct = 0;
+          }
+        } else if (descontoPct > 0 && descontoPct < 90) {
+          precoOriginalFloat = parseFloat((precoFloat * (1 + descontoPct / 100)).toFixed(2));
+        } else {
+          precoOriginalFloat = null;
+          descontoPct = 0;
+        }
 
         const isPadrao = Boolean(item.is_padrao || !temRecomendacoesPersonalizadas);
 
@@ -461,34 +549,47 @@ export class RecommendationEngine {
         let motivoRecomendacao = null;
 
         if (!isPadrao) {
-          // 1. Verifica correspondência com os termos dos RADARES ATIVOS do usuário (+80)
-          let casouRadar = false;
-          for (const kw of radarKeywords) {
-            if (lowerTitle.includes(kw)) {
-              casouRadar = true;
-              break;
+          // 1. Se já veio do banco (recomendacao_resultados) com a etiqueta de origem precisa definida pelo worker
+          if (item.destaque_label && (
+            item.destaque_label.includes("pesquisou") || 
+            item.destaque_label.includes("favoritou") || 
+            item.destaque_label.includes("Achôdinhos") || 
+            item.destaque_label.includes("curtiu") || 
+            item.destaque_label.includes("similares") ||
+            item.destaque_label.includes("rastreou")
+          )) {
+            matchScore += 80;
+            motivoRecomendacao = item.destaque_label;
+          } else {
+            // 2. Se casou com os termos dos RADARES ATIVOS do usuário (+80)
+            let casouRadar = false;
+            for (const kw of radarKeywords) {
+              if (lowerTitle.includes(kw)) {
+                casouRadar = true;
+                break;
+              }
+            }
+            if (casouRadar) {
+              matchScore += 80;
+              motivoRecomendacao = "Indicado para você porque você rastreou por isso";
             }
           }
-          if (casouRadar || (item.destaque_label && item.destaque_label.includes("rastreou"))) {
-            matchScore += 80;
-            motivoRecomendacao = "Indicado para você porque você rastreou por isso";
-          }
 
-          // 2. Se já veio do scraper com tag personalizada de monitoramento
-          if (!motivoRecomendacao && item.destaque_label && (item.destaque_label.startsWith("Porque você") || item.destaque_label.startsWith("Indicado para você"))) {
-            matchScore += 60;
-            motivoRecomendacao = item.destaque_label;
-          }
-
-          // 3. Verifica correspondência com buscas recentes (+50) ou favoritos (+40)
+          // 3. Se ainda não tem etiqueta, verifica o mapa multi-sinal de interesses
           if (!motivoRecomendacao && temInteresses) {
             for (const [termo, peso] of Object.entries(interessesMap)) {
               if (lowerTitle.includes(termo)) {
-                matchScore += peso * 8;
-                if (peso >= 10) {
-                  motivoRecomendacao = "Indicado para você porque você curtiu itens desse tipo";
-                } else {
+                matchScore += peso * 6;
+                if (peso >= 18) {
+                  motivoRecomendacao = "Indicado para você porque você rastreou por isso";
+                } else if (peso >= 12) {
                   motivoRecomendacao = "Indicado para você porque você pesquisou por isso";
+                } else if (peso >= 8) {
+                  motivoRecomendacao = "Indicado porque você favoritou";
+                } else if (peso >= 4) {
+                  motivoRecomendacao = "Indicado porque você curtiu no Achôdinhos";
+                } else {
+                  motivoRecomendacao = "Indicado pelo seu interesse em ofertas similares";
                 }
                 break;
               }
@@ -530,6 +631,7 @@ export class RecommendationEngine {
           is_recomendacao: true,
           is_top5: false,
           is_destaque_top5: false,
+          preco_abaixou: Boolean(item.preco_abaixou),
           created_at: item.created_at
         });
       }
@@ -590,7 +692,7 @@ export class RecommendationEngine {
             try { Image.prefetch(prod.imagem_url).catch(() => {}); } catch (e) {}
           }
         }
-        await AsyncStorage.setItem(STORAGE_KEYS.CACHED_RECS, JSON.stringify(listaFinal));
+        await salvarCacheSeguro(STORAGE_KEYS.CACHED_RECS, listaFinal, 60);
       }
 
       return listaFinal;
@@ -627,24 +729,33 @@ export class RecommendationEngine {
   static async carregarPromocoesHome(forceRefresh = false) {
     try {
       const now = Date.now();
-      const lastUpdateRaw = await AsyncStorage.getItem(STORAGE_KEYS.LAST_PROMO_UPDATE);
-      const lastUpdate = lastUpdateRaw ? parseInt(lastUpdateRaw, 10) : 0;
-      const deveRenovar1h = (now - lastUpdate) >= CICLO_PROMOCOES_MS;
+      let deveRenovar1h = true;
+      try {
+        const lastUpdateRaw = await AsyncStorage.getItem(STORAGE_KEYS.LAST_PROMO_UPDATE);
+        const lastUpdate = lastUpdateRaw ? parseInt(lastUpdateRaw, 10) : 0;
+        deveRenovar1h = (now - lastUpdate) >= CICLO_PROMOCOES_MS;
+      } catch (_) {
+        deveRenovar1h = true;
+      }
 
       if (deveRenovar1h) {
         this.solicitarVarreduraPromocoes();
-        await AsyncStorage.setItem(STORAGE_KEYS.LAST_PROMO_UPDATE, String(now));
+        try {
+          await AsyncStorage.setItem(STORAGE_KEYS.LAST_PROMO_UPDATE, String(now));
+        } catch (_) {}
       }
 
       // 1. Tenta carregar do cache local para resposta instantânea (0ms)
       if (!forceRefresh && !deveRenovar1h) {
-        const cached = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_PROMOS);
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            return parsed;
+        try {
+          const cached = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_PROMOS);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              return parsed;
+            }
           }
-        }
+        } catch (_) {}
       }
 
       // 2. Consulta monitor de promoções e ofertas no Supabase
@@ -656,7 +767,10 @@ export class RecommendationEngine {
 
       const monitorIdFiltro = (monitorPromo && monitorPromo.length > 0) ? monitorPromo[0].id : null;
 
-      // Busca sem qualquer teto artificial, paginando de 1000 em 1000 até trazer 100% das ofertas
+      // Limite estrito de 12 horas: descarta ofertas com mais de 12h
+      const limite12h = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+
+      // Busca sem qualquer teto artificial, paginando de 1000 em 1000 até trazer 100% das ofertas válidas das últimas 12h
       let resultados = [];
       let fromIdx = 0;
       const pageSize = 1000;
@@ -664,7 +778,8 @@ export class RecommendationEngine {
         let query = supabase
           .from("resultados")
           .select("*")
-          .not("imagem_url", "is", null);
+          .not("imagem_url", "is", null)
+          .gte("created_at", limite12h);
 
         if (monitorIdFiltro) {
           query = query.eq("monitor_id", monitorIdFiltro);
@@ -681,15 +796,30 @@ export class RecommendationEngine {
       }
 
       let promocoes = [];
+      const urlsVistas = new Set();
+      const titulosVistos = new Set();
+
       if (resultados.length > 0) {
         for (const item of resultados) {
-          const url = (item.url || "").toLowerCase();
-          if (url.includes("olx.com") || url.includes("facebook.com")) continue;
+          const rawUrl = (item.url || "").trim();
+          const urlLower = rawUrl.toLowerCase();
+          if (urlLower.includes("olx.com") || urlLower.includes("facebook.com")) continue;
+
+          // 🛡️ Deduplicação Estrita no Cliente (Blindagem Dupla)
+          const urlBase = urlLower.split("?")[0].replace(/\/+$/, "");
+          if (urlBase && urlsVistas.has(urlBase)) continue;
 
           const title = (item.title || "").trim();
           const loja = item.loja || this.identificarLojaPorUrl(item.url);
+          const titLimpo = title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 40);
+          const titChave = `${loja.toLowerCase()}_${titLimpo}`;
+          if (titChave && titulosVistos.has(titChave)) continue;
+
           const precoFloat = item.price ? parseFloat(item.price) : 0;
           if (precoFloat <= 0) continue;
+
+          if (urlBase) urlsVistas.add(urlBase);
+          if (titChave) titulosVistos.add(titChave);
 
           let precoOrig = item.preco_original ? parseFloat(item.preco_original) : 0;
           let descPct = 0;
@@ -733,6 +863,7 @@ export class RecommendationEngine {
             restam_unidades: item.restam_unidades || null,
             is_hot: descPct >= 25,
             is_top5: false,
+            preco_abaixou: Boolean(item.preco_abaixou),
             created_at: item.created_at
           });
         }
@@ -775,14 +906,14 @@ export class RecommendationEngine {
         listaFinal = todosProdutos;
       }
 
-      // Salva em cache local e pré-carrega as imagens do topo
+      // Salva em cache local de forma leve e segura (máx 60 itens) e pré-carrega as imagens do topo
       if (listaFinal.length > 0) {
         for (const prod of listaFinal.slice(0, 25)) {
           if (prod.imagem_url) {
             try { Image.prefetch(prod.imagem_url).catch(() => {}); } catch(e) {}
           }
         }
-        await AsyncStorage.setItem(STORAGE_KEYS.CACHED_PROMOS, JSON.stringify(listaFinal));
+        await salvarCacheSeguro(STORAGE_KEYS.CACHED_PROMOS, listaFinal, 60);
       }
 
       return listaFinal;

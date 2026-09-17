@@ -2,11 +2,11 @@ import React, { useState, useEffect, createContext, useContext, useCallback, use
 import { 
   View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, 
   Alert, Platform, StatusBar, ActivityIndicator, Switch, Dimensions, 
-  Linking, RefreshControl, Modal, FlatList, Image, Vibration, 
-  Animated, Easing, KeyboardAvoidingView 
+  Linking, RefreshControl, Modal, FlatList, Image, ImageBackground, Vibration, 
+  Animated, Easing, KeyboardAvoidingView, Keyboard, BackHandler 
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme, useIsFocused } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
@@ -43,32 +43,17 @@ import {
   TrialExpiredModal, RenewalModal, AdDetailModal 
 } from './FreemiumModals';
 import { CustomAlertModal } from './CustomAlertModal';
-
+import VideosScreen from './VideosScreen';
+import { VideoService } from './videoService';
+import { DEPARTAMENTOS_PESQUISA } from './categoryData';
 
 WebBrowser.maybeCompleteAuthSession();
 
 // =====================================================================
-// AFILIADOS MERCADO LIVRE (CONFIGURAÇÃO OFICIAL)
+// AFILIADOS MERCADO LIVRE (IMPORTADO DO MÓDULO NEUTRO DESACOPLADO)
 // =====================================================================
-export const ML_AFFILIATE_CONFIG = {
-  tool: '58245087',
-  word: 'alessandrouchoadonascimento'
-};
-
-export function formatarUrlAfiliado(url) {
-  if (!url) return '';
-  const urlStr = String(url).trim();
-  const lower = urlStr.toLowerCase();
-  if (lower.includes('mercadolivre.com') || lower.includes('meli.la')) {
-    if (lower.includes('matt_tool=')) return urlStr;
-    const hasFrag = urlStr.includes('#');
-    const [base, frag] = hasFrag ? urlStr.split('#') : [urlStr, ''];
-    const sep = base.includes('?') ? '&' : '?';
-    const finalBase = `${base}${sep}matt_tool=${ML_AFFILIATE_CONFIG.tool}&matt_word=${ML_AFFILIATE_CONFIG.word}&forceInApp=true`;
-    return hasFrag ? `${finalBase}#${frag}` : finalBase;
-  }
-  return urlStr;
-}
+import { ML_AFFILIATE_CONFIG, formatarUrlAfiliado } from './affiliateUtils';
+export { ML_AFFILIATE_CONFIG, formatarUrlAfiliado };
 
 // =====================================================================
 // 1. API SERVICE (SUPABASE) - CONTRATOS 100% PRESERVADOS
@@ -186,9 +171,11 @@ class RadarAPI {
   static async getAllResults(limit = 40, monitorIds = []) {
     try {
       if (!monitorIds || monitorIds.length === 0) return [];
+      const limite12h = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
       const { data, error } = await supabase.from('resultados')
         .select('*')
         .in('monitor_id', monitorIds)
+        .gte('created_at', limite12h)
         .order('created_at', { ascending: false })
         .limit(limit);
       if (error) return [];
@@ -212,6 +199,7 @@ function RadarProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [notificacoesAtivas, setNotificacoesAtivas] = useState(true);
+  const [lastCreatedRadarId, setLastCreatedRadarId] = useState(null);
 
   // Freemium States
   const [tierState, setTierState] = useState({
@@ -234,6 +222,7 @@ function RadarProvider({ children }) {
   const [varrendoMonitorId, setVarrendoMonitorId] = useState(null);
   const [notifModalVisible, setNotifModalVisible] = useState(false);
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
+  const [couponsModalVisible, setCouponsModalVisible] = useState(false);
   const [authModalVisible, setAuthModalVisible] = useState(false);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const [userProfile, setUserProfile] = useState(null);
@@ -248,6 +237,20 @@ function RadarProvider({ children }) {
         } catch (e) {}
       }
     });
+  }, []);
+
+  // Pré-carregamento automático dos 10 primeiros vídeos e thumbnails do feed
+  useEffect(() => {
+    VideoService.carregarVideos(false).then((vids) => {
+      if (Array.isArray(vids) && vids.length > 0) {
+        vids.slice(0, 10).forEach((item) => {
+          const img = item.thumb_url || item.produto_imagem;
+          if (img) {
+            Image.prefetch(img).catch(() => {});
+          }
+        });
+      }
+    }).catch(() => {});
   }, []);
 
   const [alertConfig, setAlertConfig] = useState({
@@ -326,14 +329,32 @@ function RadarProvider({ children }) {
         RadarAPI.getLogs(8, monitorIds)
       ]);
 
-      if (!notifInitializedRef.current && dadosResultados && dadosResultados.length > 0) {
-        setUnreadNotifCount(dadosResultados.length);
+      let lastSeenTime = 0;
+      try {
+        const storedLastSeen = await AsyncStorage.getItem('@radar_last_seen_notif_time');
+        if (storedLastSeen) {
+          lastSeenTime = parseInt(storedLastSeen, 10) || 0;
+        }
+      } catch (e) {}
+
+      const novosNaoLidos = (dadosResultados || []).filter(r => {
+        if (!r.created_at) return false;
+        const itemTime = new Date(r.created_at).getTime();
+        return itemTime > lastSeenTime;
+      });
+
+      if (!notifInitializedRef.current) {
+        setUnreadNotifCount(novosNaoLidos.length);
         notifInitializedRef.current = true;
       } else if (dadosResultados && dadosResultados.length > lastResultsCountRef.current && hasLoadedRef.current) {
-        setUnreadNotifCount(prev => prev + (dadosResultados.length - lastResultsCountRef.current));
-        try {
-          Vibration.vibrate(Platform.OS === 'android' ? [0, 80, 50, 100] : 100);
-        } catch (e) {}
+        setUnreadNotifCount(novosNaoLidos.length);
+        if (novosNaoLidos.length > 0) {
+          try {
+            Vibration.vibrate(Platform.OS === 'android' ? [0, 80, 50, 100] : 100);
+          } catch (e) {}
+        }
+      } else {
+        setUnreadNotifCount(novosNaoLidos.length);
       }
       lastResultsCountRef.current = (dadosResultados || []).length;
 
@@ -761,6 +782,16 @@ function RadarProvider({ children }) {
       }
 
       fetchData(null);
+
+      // Pré-aquecimento massivo dos vídeos e thumbnails do feed Achôdinhos logo na inicialização
+      VideoService.carregarVideos(false).then((lista) => {
+        if (Array.isArray(lista) && lista.length > 0) {
+          lista.slice(0, 25).forEach((v) => {
+            const img = v.thumb_url || v.produto_imagem;
+            if (img) Image.prefetch(img).catch(() => {});
+          });
+        }
+      }).catch(() => {});
     }
 
     init();
@@ -971,6 +1002,7 @@ function RadarProvider({ children }) {
   const openNotif = useCallback(() => {
     setNotifModalVisible(true);
     setUnreadNotifCount(0);
+    AsyncStorage.setItem('@radar_last_seen_notif_time', String(Date.now())).catch(() => {});
   }, []);
 
   const closeNotif = useCallback(() => {
@@ -985,6 +1017,14 @@ function RadarProvider({ children }) {
     setSettingsModalVisible(false);
   }, []);
 
+  const openCoupons = useCallback(() => {
+    setCouponsModalVisible(true);
+  }, []);
+
+  const closeCoupons = useCallback(() => {
+    setCouponsModalVisible(false);
+  }, []);
+
   const openAuthModal = useCallback(() => {
     setAuthModalVisible(true);
   }, []);
@@ -996,6 +1036,7 @@ function RadarProvider({ children }) {
   const limparNotificacoes = useCallback(async () => {
     setResultados([]);
     setUnreadNotifCount(0);
+    AsyncStorage.setItem('@radar_last_seen_notif_time', String(Date.now())).catch(() => {});
     showAlert({
       title: "Notificações Limpas",
       message: "Todas as notificações foram limpas com sucesso.",
@@ -1003,6 +1044,69 @@ function RadarProvider({ children }) {
       icon: "checkmark-circle"
     });
   }, [showAlert]);
+
+  // Sistema de Favoritos & Modal de Favoritos
+  const [favoritos, setFavoritos] = useState([]);
+  const [favoritesModalVisible, setFavoritesModalVisible] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem('@achoai_favoritos_produtos').then(cached => {
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed)) {
+            // Filtra e auto-limpa registros inconsistentes ou apagados
+            const limpos = parsed.filter(item => item && (item.titulo || item.title || item.nome) && (item.url || item.id));
+            setFavoritos(limpos);
+          }
+        } catch (e) {}
+      }
+    });
+  }, []);
+
+  const salvarFavoritosStorage = useCallback(async (novaLista) => {
+    try {
+      await AsyncStorage.setItem('@achoai_favoritos_produtos', JSON.stringify(novaLista.slice(0, 150)));
+    } catch (e) {
+      console.warn('[Favorites] Erro ao salvar favoritos no storage:', e);
+    }
+  }, []);
+
+  const isFavorito = useCallback((itemOrId) => {
+    if (!itemOrId) return false;
+    const target = typeof itemOrId === 'string' 
+      ? itemOrId 
+      : (itemOrId.id || itemOrId.url || `${itemOrId.loja}_${itemOrId.titulo || itemOrId.title}`);
+    return favoritos.some(f => (f.id && f.id === target) || (f.url && f.url === target) || (`${f.loja}_${f.titulo || f.title}` === target));
+  }, [favoritos]);
+
+  const toggleFavorito = useCallback((deal) => {
+    if (!deal) return;
+    const dealKey = deal.id || deal.url || `${deal.loja}_${deal.titulo || deal.title}`;
+    const jaExiste = favoritos.some(f => (f.id && f.id === dealKey) || (f.url && f.url === dealKey) || (`${f.loja}_${f.titulo || f.title}` === dealKey));
+
+    let novaLista;
+    if (jaExiste) {
+      novaLista = favoritos.filter(f => !((f.id && f.id === dealKey) || (f.url && f.url === dealKey) || (`${f.loja}_${f.titulo || f.title}` === dealKey)));
+    } else {
+      novaLista = [deal, ...favoritos].slice(0, 150);
+      // Registra sinal de interesse multi-sinal (peso 4)
+      RecommendationEngine.registrarFavorito(deal.titulo || deal.title, currentOwnerId || deviceIdRef.current, deal.loja);
+    }
+    setFavoritos(novaLista);
+    salvarFavoritosStorage(novaLista);
+  }, [favoritos, currentOwnerId, salvarFavoritosStorage]);
+
+  const removerFavorito = useCallback((deal) => {
+    if (!deal) return;
+    const dealKey = deal.id || deal.url || `${deal.loja}_${deal.titulo || deal.title}`;
+    const novaLista = favoritos.filter(f => !((f.id && f.id === dealKey) || (f.url && f.url === dealKey) || (`${f.loja}_${f.titulo || f.title}` === dealKey)));
+    setFavoritos(novaLista);
+    salvarFavoritosStorage(novaLista);
+  }, [favoritos, salvarFavoritosStorage]);
+
+  const openFavoritesModal = useCallback(() => setFavoritesModalVisible(true), []);
+  const closeFavoritesModal = useCallback(() => setFavoritesModalVisible(false), []);
 
   return (
     <RadarContext.Provider value={{ 
@@ -1021,9 +1125,15 @@ function RadarProvider({ children }) {
       showAlert, hideAlert,
       // Header and Modals controls
       openNotif, closeNotif, openSettings, closeSettings,
+      openCoupons, closeCoupons, couponsModalVisible,
       openAuthModal, closeAuthModal, authModalVisible,
+      // Favoritos
+      favoritos, favoritosCount: favoritos.length,
+      isFavorito, toggleFavorito, removerFavorito,
+      openFavoritesModal, closeFavoritesModal, favoritesModalVisible,
       unreadNotifCount, limparNotificacoes,
-      userProfile, setUserProfile
+      userProfile, setUserProfile,
+      lastCreatedRadarId, setLastCreatedRadarId
     }}>
       {children}
       <FreemiumModal 
@@ -1091,9 +1201,21 @@ function RadarProvider({ children }) {
         visible={settingsModalVisible}
         onClose={closeSettings}
       />
+      <Modal
+        visible={couponsModalVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={closeCoupons}
+      >
+        <CouponsScreen onClose={closeCoupons} />
+      </Modal>
       <AuthTutorialModal
         visible={authModalVisible}
         onClose={closeAuthModal}
+      />
+      <FavoritesModal
+        visible={favoritesModalVisible}
+        onClose={closeFavoritesModal}
       />
     </RadarContext.Provider>
   );
@@ -1443,6 +1565,17 @@ const CUPONS_DATABASE = [
 ];
 
 // =====================================================================
+// COMPONENTE DE TRANSIÇÃO FLUIDA ENTRE TELAS (EFEITO PREMIUM 60FPS)
+// =====================================================================
+function ScreenTransition({ children, style }) {
+  return (
+    <View style={[{ flex: 1 }, style]}>
+      {children}
+    </View>
+  );
+}
+
+// =====================================================================
 // ABA 1: HOME - HUB DE PROMOÇÕES EM TEMPO REAL (OFERTAS DO DIA & RELÂMPAGO)
 // =====================================================================
 const CATEGORIAS_ANIMACAO_ONBOARDING = [
@@ -1455,7 +1588,10 @@ const CATEGORIAS_ANIMACAO_ONBOARDING = [
 ];
 
 function HomePromotionsScreen({ navigation }) {
-  const { user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, unreadNotifCount, userProfile, openAuthModal } = useContext(RadarContext);
+  const { 
+    user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, 
+    unreadNotifCount, userProfile, openAuthModal, isFavorito, toggleFavorito 
+  } = useContext(RadarContext);
   const effectiveUserId = currentOwnerId || user?.id || deviceId;
   const [lojaAtiva, setLojaAtiva] = useState('TODOS');
   const [deals, setDeals] = useState([]);
@@ -1473,7 +1609,7 @@ function HomePromotionsScreen({ navigation }) {
   const [dropdownAberto, setDropdownAberto] = useState(false);
 
   const FILTRO_OPCOES = [
-    { key: 'todos', label: 'Padrão (Top 5 + Lojas)', icon: 'sparkles' },
+    { key: 'todos', label: 'Padrão (Mais Relevantes)', icon: 'sparkles' },
     { key: 'maior_desconto', label: 'Maiores Descontos (% OFF)', icon: 'flash' },
     { key: 'frete_gratis', label: 'Apenas Frete Grátis', icon: 'car' },
     { key: 'menor_preco', label: 'Menor Preço (R$)', icon: 'trending-down' }
@@ -1623,7 +1759,7 @@ function HomePromotionsScreen({ navigation }) {
 
   const handleDealClick = (deal) => {
     if (!deal) return;
-    RecommendationEngine.registrarClique(deal.titulo || deal.title, effectiveUserId, deal.loja);
+    RecommendationEngine.registrarCliqueOferta(deal.titulo || deal.title, effectiveUserId, deal.loja);
 
     let targetUrl = deal.url;
     if (!targetUrl || /^https?:\/\/(www\.)?(shopee|mercadolivre|amazon|magazineluiza|kabum|casasbahia|fastshop|americanas|carrefour|shein)\.com(\.br)?\/?$/i.test(targetUrl)) {
@@ -1640,13 +1776,13 @@ function HomePromotionsScreen({ navigation }) {
   };
 
   const handleToggleFavorite = (item) => {
-    RecommendationEngine.registrarFavorito(item?.titulo || item?.title, effectiveUserId, item?.loja);
+    toggleFavorito(item);
   };
 
   const catAtual = CATEGORIAS_ANIMACAO_ONBOARDING[catIndex] || CATEGORIAS_ANIMACAO_ONBOARDING[0];
 
   return (
-    <View style={styles.screen}>
+    <ScreenTransition style={styles.screen}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
       {/* TELA DE CARREGAMENTO ENQUANTO O ONBOARDING RODA */}
@@ -1718,16 +1854,6 @@ function HomePromotionsScreen({ navigation }) {
         </View>
       </Modal>
 
-      {/* HEADER COMPARTILHADO E ENCAPSULADO (AchôAI Top Bar) */}
-      <AppTopHeader 
-        user={user} 
-        userProfile={userProfile}
-        onPressProfile={() => user ? openSettings() : openAuthModal()}
-        onOpenNotif={openNotif} 
-        onOpenSettings={openSettings} 
-        unreadCount={unreadNotifCount} 
-      />
-
       {/* FILTRO DE PLATAFORMAS HORIZONTAL (COMPACTO) */}
       <View style={{ height: 36, marginBottom: 2 }}>
         <ScrollView 
@@ -1766,6 +1892,7 @@ function HomePromotionsScreen({ navigation }) {
         renderItem={({ item }) => (
           <ProductDealCard
             item={item}
+            isFavorite={isFavorito(item)}
             onPress={() => handleDealClick(item)}
             onToggleFavorite={handleToggleFavorite}
           />
@@ -1871,7 +1998,7 @@ function HomePromotionsScreen({ navigation }) {
           </View>
         }
       />
-    </View>
+    </ScreenTransition>
   );
 }
 
@@ -1879,7 +2006,10 @@ function HomePromotionsScreen({ navigation }) {
 // ABA 4: RECOMENDADOS PARA VOCÊ (AFINIDADE & PESOS PERSONALIZADOS)
 // =====================================================================
 function RecommendationsFeedScreen({ navigation }) {
-  const { user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, unreadNotifCount, userProfile, openAuthModal } = useContext(RadarContext);
+  const { 
+    user, currentOwnerId, deviceId, showAlert, openNotif, openSettings, 
+    unreadNotifCount, userProfile, openAuthModal, isFavorito, toggleFavorito 
+  } = useContext(RadarContext);
   const effectiveUserId = currentOwnerId || user?.id || deviceId;
   const [lojaAtiva, setLojaAtiva] = useState('TODOS');
   const [deals, setDeals] = useState([]);
@@ -1945,7 +2075,7 @@ function RecommendationsFeedScreen({ navigation }) {
 
   const handleDealClick = (deal) => {
     if (!deal) return;
-    RecommendationEngine.registrarClique(deal.titulo || deal.title, effectiveUserId, deal.loja);
+    RecommendationEngine.registrarCliqueOferta(deal.titulo || deal.title, effectiveUserId, deal.loja);
 
     let targetUrl = deal.url;
     if (!targetUrl || /^https?:\/\/(www\.)?(shopee|mercadolivre|amazon|magazineluiza|kabum|casasbahia|fastshop|americanas|carrefour|shein)\.com(\.br)?\/?$/i.test(targetUrl)) {
@@ -1962,22 +2092,12 @@ function RecommendationsFeedScreen({ navigation }) {
   };
 
   const handleToggleFavorite = (item) => {
-    RecommendationEngine.registrarFavorito(item?.titulo || item?.title, effectiveUserId, item?.loja);
+    toggleFavorito(item);
   };
 
   return (
-    <View style={styles.screen}>
+    <ScreenTransition style={styles.screen}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-
-      {/* Header com Saudação 100% Idêntico ao Home (sem subtítulo no topo) */}
-      <AppTopHeader 
-        user={user} 
-        userProfile={userProfile}
-        onPressProfile={() => user ? openSettings() : openAuthModal()}
-        onOpenNotif={openNotif} 
-        onOpenSettings={openSettings} 
-        unreadCount={unreadNotifCount} 
-      />
 
       {/* Filtro de Lojas Horizontal com tom Avermelhado */}
       <View style={{ height: 42, marginBottom: 4 }}>
@@ -2017,6 +2137,7 @@ function RecommendationsFeedScreen({ navigation }) {
         renderItem={({ item }) => (
           <ProductDealCard
             item={{ ...item, is_recomendacao: true, is_top5: false, is_destaque_top5: false }}
+            isFavorite={isFavorito(item)}
             onPress={() => handleDealClick(item)}
             onToggleFavorite={handleToggleFavorite}
           />
@@ -2127,7 +2248,90 @@ function RecommendationsFeedScreen({ navigation }) {
           </View>
         }
       />
-    </View>
+    </ScreenTransition>
+  );
+}
+
+// =====================================================================
+// COMPONENTE DE CARD DE RADAR COM ANIMAÇÕES FLUIDAS (CRIAÇÃO & EXCLUSÃO)
+// =====================================================================
+function AnimatedRadarCard({ 
+  monitor, 
+  isNew, 
+  onClearNew, 
+  isDeleting, 
+  onDeleteComplete, 
+  children 
+}) {
+  const animTranslateX = useRef(new Animated.Value(isNew ? -120 : 0)).current;
+  const animOpacity = useRef(new Animated.Value(isNew ? 0 : 1)).current;
+  const animScale = useRef(new Animated.Value(1)).current;
+
+  // Entrada suave da esquerda para a direita (apenas uma vez ao ser criado)
+  useEffect(() => {
+    if (isNew) {
+      Animated.parallel([
+        Animated.spring(animTranslateX, {
+          toValue: 0,
+          friction: 7,
+          tension: 40,
+          useNativeDriver: true,
+        }),
+        Animated.timing(animOpacity, {
+          toValue: 1,
+          duration: 320,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        })
+      ]).start(() => {
+        if (onClearNew) onClearNew();
+      });
+    }
+  }, [isNew]);
+
+  // Efeito de encolher/amassar e descartar (crumple & slide out) na confirmação de exclusão
+  useEffect(() => {
+    if (isDeleting) {
+      try { Vibration.vibrate(30); } catch(e) {}
+      Animated.parallel([
+        Animated.timing(animScale, {
+          toValue: 0.05,
+          duration: 260,
+          easing: Easing.in(Easing.back(1.6)),
+          useNativeDriver: true,
+        }),
+        Animated.timing(animTranslateX, {
+          toValue: 260,
+          duration: 260,
+          easing: Easing.in(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(animOpacity, {
+          toValue: 0,
+          duration: 240,
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        if (onDeleteComplete) onDeleteComplete(monitor.id);
+      });
+    }
+  }, [isDeleting]);
+
+  return (
+    <Animated.View
+      style={[
+        styles.radarCard,
+        {
+          opacity: animOpacity,
+          transform: [
+            { translateX: animTranslateX },
+            { scale: animScale },
+          ],
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
   );
 }
 
@@ -2135,10 +2339,15 @@ function RecommendationsFeedScreen({ navigation }) {
 // ABA 2: RADARES INTELIGENTES (GESTÃO & ONBOARDING)
 // =====================================================================
 function RadarsScreen({ navigation }) {
-  const { monitores, resultados, loading, refreshing, onRefresh, showAlert, user, openNotif, openSettings, unreadNotifCount, userProfile, openAuthModal, tier, tierState } = useContext(RadarContext);
+  const { 
+    monitores, resultados, loading, refreshing, onRefresh, showAlert, 
+    user, openNotif, openSettings, unreadNotifCount, userProfile, 
+    openAuthModal, tier, tierState, lastCreatedRadarId, setLastCreatedRadarId 
+  } = useContext(RadarContext);
   const [expandedRadarId, setExpandedRadarId] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [testingRadarId, setTestingRadarId] = useState(null);
+  const [deletingRadarId, setDeletingRadarId] = useState(null);
 
   const isAdmin = Boolean(
     tier === 'admin' || 
@@ -2180,21 +2389,28 @@ function RadarsScreen({ navigation }) {
   const handleDeleteRadar = (monitor) => {
     showAlert({
       title: "Excluir Radar",
-      message: `Deseja realmente remover o radar "${monitor.nome || 'Radar'}"?`,
+      message: `Deseja realmente remover o radar "${monitor.nome || monitor.produto || 'Radar'}"?`,
       type: "confirm_danger",
       icon: "trash-outline",
       confirmText: "Excluir",
       cancelText: "Cancelar",
       showCancel: true,
-      onConfirm: async () => {
-        try {
-          await RadarAPI.deleteMonitor(monitor.id);
-          if (onRefresh) onRefresh();
-        } catch(e) {
-          showAlert({ title: "Erro", message: "Não foi possível excluir o radar.", type: "error" });
-        }
+      onConfirm: () => {
+        // Dispara animação crumple/slide out antes de remover do banco
+        setDeletingRadarId(monitor.id);
       }
     });
+  };
+
+  const handleFinishDelete = async (monitorId) => {
+    try {
+      await RadarAPI.deleteMonitor(monitorId);
+      if (onRefresh) await onRefresh();
+    } catch(e) {
+      showAlert({ title: "Erro", message: "Não foi possível excluir o radar.", type: "error" });
+    } finally {
+      setDeletingRadarId(null);
+    }
   };
 
   const handleToggleAtivo = async (monitor, val) => {
@@ -2207,97 +2423,107 @@ function RadarsScreen({ navigation }) {
     }
   };
 
+  const isFocused = useIsFocused();
+
+  // Animação ascendente suave (de baixo para cima) do estado vazio / onboarding (roda a cada foco da aba)
+  const emptyTranslateY = useRef(new Animated.Value(60)).current;
+  const emptyOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (isFocused && !loading && monitores.length === 0) {
+      emptyTranslateY.setValue(60);
+      emptyOpacity.setValue(0);
+      Animated.parallel([
+        Animated.timing(emptyTranslateY, {
+          toValue: 0,
+          duration: 350,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(emptyOpacity, {
+          toValue: 1,
+          duration: 320,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [isFocused, loading, monitores.length]);
+
   // Se não tem radares: Onboarding Elegante em Tela Limpa
   if (!loading && monitores.length === 0) {
     return (
-      <View style={styles.screen}>
+      <ScreenTransition style={styles.screen}>
         <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-        <AppTopHeader 
-          user={user} 
-          userProfile={userProfile}
-          onPressProfile={() => user ? openSettings() : openAuthModal()}
-          onOpenNotif={openNotif} 
-          onOpenSettings={openSettings} 
-          unreadCount={unreadNotifCount} 
-        />
         <View style={[styles.brandHeaderClean, { paddingTop: 6 }]}>
           <Text style={styles.brandTitleText}>Radares Inteligentes</Text>
         </View>
 
-        <ScrollView contentContainerStyle={styles.onboardingContainer} showsVerticalScrollIndicator={false}>
-          <View style={styles.onboardingHeroIcon}>
-            <Ionicons name="radio" size={38} color="#FF5722" />
-          </View>
+        <Animated.View style={{ flex: 1, opacity: emptyOpacity, transform: [{ translateY: emptyTranslateY }] }}>
+          <ScrollView contentContainerStyle={styles.onboardingContainer} showsVerticalScrollIndicator={false}>
+            <View style={styles.onboardingHeroIcon}>
+              <Ionicons name="radio" size={38} color="#FF5722" />
+            </View>
 
-          <Text style={styles.onboardingTitle}>Crie seu radar inteligente em poucos cliques</Text>
-          <Text style={styles.onboardingSubtitle}>
-            Acompanhe preços dos maiores e-commerces em tempo real e receba notificações imediatas assim que uma oferta for achada.
-          </Text>
+            <Text style={styles.onboardingTitle}>Crie seu radar inteligente em poucos cliques</Text>
+            <Text style={styles.onboardingSubtitle}>
+              Acompanhe preços dos maiores e-commerces em tempo real e receba notificações imediatas assim que uma oferta for achada.
+            </Text>
 
-          <View style={styles.onboardingCardsWrap}>
-            <View style={styles.onboardingCard}>
-              <View style={[styles.onboardingCardIcon, { backgroundColor: '#EFF6FF' }]}>
-                <Ionicons name="flash-outline" size={22} color="#3B82F6" />
+            <View style={styles.onboardingCardsWrap}>
+              <View style={styles.onboardingCard}>
+                <View style={[styles.onboardingCardIcon, { backgroundColor: '#EFF6FF' }]}>
+                  <Ionicons name="flash-outline" size={22} color="#3B82F6" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 14 }}>
+                  <Text style={styles.onboardingCardTitle}>Rastreamento 24h na Nuvem</Text>
+                  <Text style={styles.onboardingCardDesc}>
+                    Nosso motor verifica as lojas automaticamente no intervalo que você escolher.
+                  </Text>
+                </View>
               </View>
-              <View style={{ flex: 1, marginLeft: 14 }}>
-                <Text style={styles.onboardingCardTitle}>Rastreamento 24h na Nuvem</Text>
-                <Text style={styles.onboardingCardDesc}>
-                  Nosso motor verifica as lojas automaticamente no intervalo que você escolher.
-                </Text>
+
+              <View style={styles.onboardingCard}>
+                <View style={[styles.onboardingCardIcon, { backgroundColor: '#FEF2F2' }]}>
+                  <Ionicons name="pricetag-outline" size={22} color="#FF5722" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 14 }}>
+                  <Text style={styles.onboardingCardTitle}>Preço Alvo Personalizado</Text>
+                  <Text style={styles.onboardingCardDesc}>
+                    Defina o valor máximo que deseja pagar e seja notificado quando o preço cair.
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.onboardingCard}>
+                <View style={[styles.onboardingCardIcon, { backgroundColor: '#ECFDF5' }]}>
+                  <Ionicons name="notifications-outline" size={22} color="#10B981" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 14 }}>
+                  <Text style={styles.onboardingCardTitle}>Alertas Limpos e Diretos</Text>
+                  <Text style={styles.onboardingCardDesc}>
+                    Notificações com fotos, preços e links diretos para a loja oficial, sem spam.
+                  </Text>
+                </View>
               </View>
             </View>
 
-            <View style={styles.onboardingCard}>
-              <View style={[styles.onboardingCardIcon, { backgroundColor: '#FEF2F2' }]}>
-                <Ionicons name="pricetag-outline" size={22} color="#FF5722" />
-              </View>
-              <View style={{ flex: 1, marginLeft: 14 }}>
-                <Text style={styles.onboardingCardTitle}>Preço Alvo Personalizado</Text>
-                <Text style={styles.onboardingCardDesc}>
-                  Defina o valor máximo que deseja pagar e seja notificado quando o preço cair.
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.onboardingCard}>
-              <View style={[styles.onboardingCardIcon, { backgroundColor: '#ECFDF5' }]}>
-                <Ionicons name="notifications-outline" size={22} color="#10B981" />
-              </View>
-              <View style={{ flex: 1, marginLeft: 14 }}>
-                <Text style={styles.onboardingCardTitle}>Alertas Limpos e Diretos</Text>
-                <Text style={styles.onboardingCardDesc}>
-                  Notificações com fotos, preços e links diretos para a loja oficial, sem spam.
-                </Text>
-              </View>
-            </View>
-          </View>
-
-          <TouchableOpacity
-            style={styles.onboardingCtaBtn}
-            onPress={() => navigation.navigate('Criar')}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="add-circle-outline" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
-            <Text style={styles.onboardingCtaBtnText}>Criar Primeiro Radar</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
+            <TouchableOpacity
+              style={styles.onboardingCtaBtn}
+              onPress={() => navigation.navigate('Criar')}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="add-circle-outline" size={22} color="#FFFFFF" style={{ marginRight: 8 }} />
+              <Text style={styles.onboardingCtaBtnText}>Criar Primeiro Radar</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </Animated.View>
+      </ScreenTransition>
     );
   }
 
   return (
-    <View style={styles.screen}>
+    <ScreenTransition style={styles.screen}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-
-      {/* Header Padronizado */}
-      <AppTopHeader 
-        user={user} 
-        userProfile={userProfile}
-        onPressProfile={() => user ? openSettings() : openAuthModal()}
-        onOpenNotif={openNotif} 
-        onOpenSettings={openSettings} 
-        unreadCount={unreadNotifCount} 
-      />
 
       {/* Título da Seção Meus Radares */}
       <View style={[styles.brandHeaderClean, { paddingTop: 6 }]}>
@@ -2346,9 +2572,13 @@ function RadarsScreen({ navigation }) {
           );
 
           return (
-            <View 
+            <AnimatedRadarCard 
               key={monitor.id}
-              style={styles.radarCard}
+              monitor={monitor}
+              isNew={monitor.id === lastCreatedRadarId}
+              onClearNew={() => setLastCreatedRadarId(null)}
+              isDeleting={deletingRadarId === monitor.id}
+              onDeleteComplete={handleFinishDelete}
             >
               {Boolean(monitor.ativo) && <View style={styles.radarCardActiveIndicator} />}
               {/* Cabeçalho do Card */}
@@ -2528,7 +2758,7 @@ function RadarsScreen({ navigation }) {
                   <Text style={[styles.radarActionBtnText, { color: '#EF4444' }]}>Excluir</Text>
                 </TouchableOpacity>
               </View>
-            </View>
+            </AnimatedRadarCard>
           );
         })}
       </ScrollView>
@@ -2541,14 +2771,14 @@ function RadarsScreen({ navigation }) {
       >
         <Ionicons name="add" size={28} color="#FFFFFF" />
       </TouchableOpacity>
-    </View>
+    </ScreenTransition>
   );
 }
 
 // =====================================================================
 // ABA 3: CUPONS (INSPIRAÇÃO PECHINCHOU SCREENSHOT 2)
 // =====================================================================
-function CouponsScreen() {
+function CouponsScreen({ onClose }) {
   const { showAlert } = useContext(RadarContext);
   const [lojaFiltro, setLojaFiltro] = useState('TODOS');
   const [cupomCopiadoId, setCupomCopiadoId] = useState(null);
@@ -2588,6 +2818,15 @@ function CouponsScreen() {
 
       {/* Header Estilo Pechinchou Screenshot 2 */}
       <View style={styles.pechCuponsHeader}>
+        {onClose && (
+          <TouchableOpacity 
+            onPress={onClose} 
+            style={{ position: 'absolute', top: Platform.OS === 'android' ? 44 : 52, right: 16, zIndex: 10, padding: 6 }}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Ionicons name="close" size={24} color="#0F172A" />
+          </TouchableOpacity>
+        )}
         <View style={styles.row}>
           <Ionicons name="ticket" size={18} color="#EF4444" style={{ marginRight: 6 }} />
           <Text style={styles.pechCuponsPreTitle}>Cupons AchôAI</Text>
@@ -2692,7 +2931,7 @@ function SearchScreen() {
   const { 
     resultados, handleOpenAd, user, currentOwnerId, 
     openNotif, openSettings, unreadNotifCount, userProfile, 
-    openAuthModal, showAlert 
+    openAuthModal, showAlert, isFavorito, toggleFavorito 
   } = useContext(RadarContext);
 
   // Etapas: 'busca' | 'varrendo' (animação 10s) | 'resultados'
@@ -2743,19 +2982,22 @@ function SearchScreen() {
   const ringOpacity = useRef(new Animated.Value(0.7)).current;
   const varreduraTimerRef = useRef(null);
 
-  // 10 Categorias Oficiais com consultas representativas para clique direto (termos limpos e assertivos)
-  const CATEGORIAS_PESQUISA = [
-    { key: 'eletroportateis', label: 'Eletroportáteis', icon: 'cafe', bg: '#DCFCE7', query: 'Air Fryer' },
-    { key: 'ar_ventilacao', label: 'Ar e Ventilação', icon: 'snow', bg: '#FCE7F3', query: 'Ventilador' },
-    { key: 'telefonia', label: 'Telefonia', icon: 'phone-portrait', bg: '#FEF9C3', query: 'Smartphone' },
-    { key: 'moda_beleza', label: 'Moda e Beleza', icon: 'color-palette', bg: '#E0F2FE', query: 'Perfume' },
-    { key: 'games', label: 'Games & Consoles', icon: 'game-controller', bg: '#F3E8FF', query: 'PlayStation 5' },
-    { key: 'informatica', label: 'Informática', icon: 'laptop', bg: '#EDE9FE', query: 'Notebook' },
-    { key: 'eletrodomesticos', label: 'Eletrodomésticos', icon: 'cube', bg: '#FCE7F3', query: 'Geladeira' },
-    { key: 'televisao', label: 'Televisão & Áudio', icon: 'tv', bg: '#EDE9FE', query: 'Smart TV' },
-    { key: 'cama_mesa_banho', label: 'Cama, Mesa e Banho', icon: 'bed', bg: '#FFF7ED', query: 'Jogo de Cama' },
-    { key: 'esporte_lazer', label: 'Esporte & Lazer', icon: 'fitness', bg: '#FEF3C7', query: 'Bicicleta' }
-  ];
+  const [departamentoAtivo, setDepartamentoAtivo] = useState(null);
+  const searchScrollRef = useRef(null);
+  const subSectionYRef = useRef(0);
+
+  const handleSelectDepartamento = (cat) => {
+    if (departamentoAtivo?.key === cat.key) {
+      setDepartamentoAtivo(null);
+      return;
+    }
+    setDepartamentoAtivo(cat);
+    setTimeout(() => {
+      if (subSectionYRef.current > 0) {
+        searchScrollRef.current?.scrollTo({ y: Math.max(0, subSectionYRef.current - 15), animated: true });
+      }
+    }, 100);
+  };
 
   const FASES_VARREDURA = [
     {
@@ -2766,7 +3008,7 @@ function SearchScreen() {
     },
     {
       titulo: "Varrendo ofertas em lojas oficiais de varejo...",
-      sub: "Consultando Shopee, Mercado Livre, Amazon, Magalu, Casas Bahia, KaBuM! e SHEIN",
+      sub: "Consultando Shopee, Mercado Livre, Amazon entre outras",
       icon: "storefront-outline",
       progresso: 55
     },
@@ -2778,7 +3020,7 @@ function SearchScreen() {
     },
     {
       titulo: "Organizando e comparando menores preços...",
-      sub: "Eliminando fraudes e ordenando os melhores negócios encontrados",
+      sub: "Eliminando fraudes e ordenando os melhores negócios",
       icon: "checkmark-done-circle-outline",
       progresso: 100
     }
@@ -2798,7 +3040,7 @@ function SearchScreen() {
     }
 
     setTermo(termoFinal);
-    RecommendationEngine.registrarPesquisaOuRadar(termoFinal, currentOwnerId);
+    RecommendationEngine.registrarPesquisa(termoFinal, currentOwnerId);
 
     // Monta lista de URLs oficiais das 10 maiores varejistas e classificados
     const termoEnc = encodeURIComponent(termoFinal);
@@ -2876,8 +3118,7 @@ function SearchScreen() {
       await Promise.allSettled([
         supabase.from('pesquisas').delete().eq('usuario_id', owner),
         supabase.from('pesquisa_resultados').delete().eq('usuario_id', owner),
-        supabase.from('resultados').delete().eq('usuario_id', owner).eq('destaque_label', 'pesquisa_inteligente'),
-        supabase.from('usuario_interesses').delete().eq('usuario_id', owner).in('origem', ['pesquisa_pendente', 'pesquisa_processando', 'pesquisa_concluida'])
+        supabase.from('resultados').delete().eq('usuario_id', owner).eq('destaque_label', 'pesquisa_inteligente')
       ]);
     } catch (e_clean) {}
 
@@ -2893,16 +3134,6 @@ function SearchScreen() {
         activePesquisaId = pesqData.id;
       }
     } catch (e_p) {}
-
-    try {
-      await supabase.from('usuario_interesses').upsert({
-        usuario_id: owner,
-        termo: termoFinal,
-        peso: incluirSeminovos ? 1 : 0,
-        origem: 'pesquisa_pendente',
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'usuario_id, termo' });
-    } catch (e_fila) {}
 
     let buscaFinalizada = false;
 
@@ -2949,11 +3180,13 @@ function SearchScreen() {
       // 2. Se não encontrou na tabela dedicada, busca de resultados com destaque_label='pesquisa_inteligente'
       if (itensColetados.length === 0) {
         try {
+          const limite12h = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
           const { data: resDb } = await supabase
             .from('resultados')
             .select('*')
             .eq('usuario_id', owner)
             .eq('destaque_label', 'pesquisa_inteligente')
+            .gte('created_at', limite12h)
             .order('price', { ascending: true })
             .limit(100);
 
@@ -3015,13 +3248,12 @@ function SearchScreen() {
         supabase.from('pesquisas').delete().eq('usuario_id', owner).then();
         supabase.from('pesquisa_resultados').delete().eq('usuario_id', owner).then();
         supabase.from('resultados').delete().eq('usuario_id', owner).eq('destaque_label', 'pesquisa_inteligente').then();
-        supabase.from('usuario_interesses').delete().eq('usuario_id', owner).in('origem', ['pesquisa_pendente', 'pesquisa_processando', 'pesquisa_concluida']).then();
       } catch (e) {}
     };
   }, [currentOwnerId]);
 
   const handleResultClick = (item) => {
-    RecommendationEngine.registrarClique(item.titulo || item.title, currentOwnerId, item.loja);
+    RecommendationEngine.registrarCliqueOferta(item.titulo || item.title, currentOwnerId, item.loja);
     if (handleOpenAd) {
       handleOpenAd(item);
     } else if (item.url) {
@@ -3035,11 +3267,11 @@ function SearchScreen() {
       supabase.from('pesquisas').delete().eq('usuario_id', owner).then();
       supabase.from('pesquisa_resultados').delete().eq('usuario_id', owner).then();
       supabase.from('resultados').delete().eq('usuario_id', owner).eq('destaque_label', 'pesquisa_inteligente').then();
-      supabase.from('usuario_interesses').delete().eq('usuario_id', owner).in('origem', ['pesquisa_pendente', 'pesquisa_processando', 'pesquisa_concluida']).then();
     } catch (e) {}
     setEtapaBusca('busca');
     setTermo('');
     setFiltroChip('MAIOR_DESCONTO');
+    setDepartamentoAtivo(null);
     setResultadosInteligentes([]);
   };
 
@@ -3066,24 +3298,15 @@ function SearchScreen() {
   }, [resultadosInteligentes, filtroChip]);
 
   return (
-    <View style={styles.screen}>
+    <ScreenTransition style={styles.screen}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-
-      {/* Header Padronizado com Saudação, Sino e Engrenagem */}
-      <AppTopHeader 
-        user={user} 
-        userProfile={userProfile}
-        onPressProfile={() => user ? openSettings() : openAuthModal()}
-        onOpenNotif={openNotif} 
-        onOpenSettings={openSettings} 
-        unreadCount={unreadNotifCount} 
-      />
 
       {/* ================================================================= */}
       {/* TELA DE BUSCA: CARD FIXO NO TOPO + 10 SEGMENTOS ABAIXO            */}
       {/* ================================================================= */}
       {etapaBusca === 'busca' && (
         <ScrollView 
+          ref={searchScrollRef}
           contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 90 }} 
           showsVerticalScrollIndicator={false}
         >
@@ -3098,7 +3321,7 @@ function SearchScreen() {
 
             {/* Texto Criativo de Instrução */}
             <Text style={styles.smartSearchInstructionText}>
-              Digite abaixo o produto desejado ou escolha um dos segmentos abaixo para comparar preços em tempo real:
+              Digite abaixo o produto desejado ou escolha um dos segmentos abaixo para pesquisar preços em tempo real:
             </Text>
 
             {/* Campo de Entrada de Texto */}
@@ -3250,44 +3473,124 @@ function SearchScreen() {
             </Text>
           </View>
           <Text style={styles.smartSearchSectionSubtitle}>
-            Toque em um departamento para comparar os produtos mais populares em tempo real:
+            Toque em um departamento para pesquisar os produtos mais populares em tempo real:
           </Text>
 
-          {/* Grid dos 10 Segmentos Oficiais */}
+          {/* Grid dos 10 Segmentos Oficiais com Fotos em Alta Resolução */}
           <View style={styles.smartCategoriesGrid}>
-            {CATEGORIAS_PESQUISA.map(cat => {
+            {DEPARTAMENTOS_PESQUISA.map(cat => {
+              const isAtivo = departamentoAtivo?.key === cat.key;
               return (
                 <TouchableOpacity
                   key={cat.key}
                   style={[
-                    styles.smartCategoryCard, 
-                    { backgroundColor: cat.bg }
+                    styles.smartCategoryCard,
+                    isAtivo && styles.smartCategoryCardActive
                   ]}
-                  onPress={() => {
-                    handleIniciarPesquisaInteligente(cat.query);
-                  }}
-                  activeOpacity={0.82}
+                  onPress={() => handleSelectDepartamento(cat)}
+                  activeOpacity={0.85}
                 >
-                  <View style={styles.smartCategoryIconBox}>
-                    <Ionicons 
-                      name={cat.icon} 
-                      size={22} 
-                      color="#0F172A" 
-                    />
-                  </View>
-                  <Text 
-                    style={styles.smartCategoryLabel} 
-                    numberOfLines={1}
+                  <ImageBackground
+                    source={cat.image}
+                    style={styles.smartCategoryCardBg}
+                    imageStyle={styles.smartCategoryCardBgImg}
+                    resizeMode="cover"
                   >
-                    {cat.label}
-                  </Text>
-                  <Text style={styles.smartCategoryActionHint}>
-                    Comparar ofertas
-                  </Text>
+                    {/* Overlay escuro com pill central para garantir 100% de legibilidade */}
+                    <View style={[
+                      styles.smartCategoryOverlay,
+                      isAtivo && styles.smartCategoryOverlayActive
+                    ]}>
+                      <View style={styles.smartCategoryPill}>
+                        <Ionicons 
+                          name={cat.icon} 
+                          size={22} 
+                          color="#FFFFFF" 
+                          style={{ marginBottom: 4 }} 
+                        />
+                        <Text 
+                          style={styles.smartCategoryTitleCenter} 
+                          numberOfLines={2}
+                        >
+                          {cat.label}
+                        </Text>
+                      </View>
+                      {isAtivo && (
+                        <View style={styles.smartCategoryActiveIndicatorPill}>
+                          <Text style={styles.smartCategoryActiveIndicatorText}>
+                            Selecionado
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </ImageBackground>
                 </TouchableOpacity>
               );
             })}
           </View>
+
+          {/* PAINEL DE SUBPRODUTOS ESPECÍFICOS DO DEPARTAMENTO SELECIONADO */}
+          {departamentoAtivo && (
+            <View 
+              key={departamentoAtivo.key}
+              style={styles.smartSubSection}
+              onLayout={(e) => {
+                const y = e.nativeEvent.layout.y;
+                subSectionYRef.current = y;
+                searchScrollRef.current?.scrollTo({ y: Math.max(0, y - 15), animated: true });
+              }}
+            >
+              <View style={styles.smartSubHeader}>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.row}>
+                    <View style={[styles.smartSubBadgeDot, { backgroundColor: departamentoAtivo.tagColor || '#FF5722' }]} />
+                    <Text style={styles.smartSubTitle}>
+                      {departamentoAtivo.label}
+                    </Text>
+                  </View>
+                  <Text style={styles.smartSubSubtitle}>
+                    {departamentoAtivo.descricao}
+                  </Text>
+                </View>
+                <TouchableOpacity 
+                  style={styles.smartSubCloseBtn}
+                  onPress={() => setDepartamentoAtivo(null)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="close" size={18} color="#64748B" />
+                </TouchableOpacity>
+              </View>
+
+              {/* Grid dos Subprodutos com Fotos Dedicadas */}
+              <View style={styles.smartSubGrid}>
+                {departamentoAtivo.subcategorias.map(sub => (
+                  <TouchableOpacity
+                    key={sub.key}
+                    style={styles.smartSubCard}
+                    onPress={() => handleIniciarPesquisaInteligente(sub.query)}
+                    activeOpacity={0.85}
+                  >
+                    <Image 
+                      source={sub.image} 
+                      style={styles.smartSubCardImg} 
+                      resizeMode="cover" 
+                    />
+                    <View style={styles.smartSubCardBody}>
+                      <Text style={styles.smartSubCardTitle} numberOfLines={2}>
+                        {sub.label}
+                      </Text>
+                      <View style={styles.smartSubCardAction}>
+                        <Ionicons name="sparkles" size={11} color="#FF5722" style={{ marginRight: 3 }} />
+                        <Text style={styles.smartSubCardActionText}>
+                          Pesquisar
+                        </Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
         </ScrollView>
       )}
 
@@ -3372,7 +3675,7 @@ function SearchScreen() {
             />
           </View>
           <Text style={styles.smartSweepTimerText}>
-            Varredura inteligente em andamento (~20s)
+            Varredura inteligente em andamento
           </Text>
         </View>
       )}
@@ -3437,8 +3740,9 @@ function SearchScreen() {
             renderItem={({ item }) => (
               <ProductDealCard
                 item={item}
+                isFavorite={isFavorito(item)}
                 onPress={() => handleResultClick(item)}
-                onToggleFavorite={(deal) => RecommendationEngine.registrarFavorito(deal?.titulo || deal?.title || item.titulo, currentOwnerId, deal?.loja || item.loja)}
+                onToggleFavorite={() => toggleFavorito(item)}
               />
             )}
             initialNumToRender={8}
@@ -3519,8 +3823,7 @@ function SearchScreen() {
         }}
         onClose={() => setModalFbCidadeVisible(false)}
       />
-
-    </View>
+    </ScreenTransition>
   );
 }
 // =====================================================================
@@ -3681,12 +3984,20 @@ function NotificationsModal({ visible, onClose, onClearAll }) {
 
           <ScrollView style={styles.notifScrollList} showsVerticalScrollIndicator={false}>
             {(!resultados || resultados.length === 0) ? (
-              <View style={styles.notifEmptyState}>
-                <Ionicons name="notifications-off-outline" size={36} color="#94A3B8" />
-                <Text style={styles.notifEmptyStateTitle}>Nenhum alerta recente</Text>
-                <Text style={styles.notifEmptyStateSub}>
-                  Assim que encontrarmos produtos no preço que você monitora, eles aparecerão aqui.
+              <View style={styles.notifEmptyCard}>
+                <View style={styles.notifEmptyIconOuter}>
+                  <View style={styles.notifEmptyIconInner}>
+                    <Ionicons name="notifications-outline" size={26} color="#64748B" />
+                  </View>
+                </View>
+                <Text style={styles.notifEmptyTitle}>Nenhum alerta recente</Text>
+                <Text style={styles.notifEmptySub}>
+                  Assim que nosso motor de busca encontrar ofertas com desconto nos produtos que você monitora, elas aparecerão aqui.
                 </Text>
+                <View style={styles.notifEmptyActiveBadge}>
+                  <View style={styles.notifEmptyActiveDot} />
+                  <Text style={styles.notifEmptyActiveText}>Monitoramento ativo 24h na nuvem</Text>
+                </View>
               </View>
             ) : (
               resultados.slice(0, 30).map((r, idx) => (
@@ -3733,19 +4044,25 @@ function SettingsDrawerModal({ visible, onClose }) {
     user, deviceId, pushToken, tier, tierState, trialEligibility, 
     activatingTrial, subscribing, handleActivateTrial, handleSubscribePremium, 
     logoutUser, linkAccount, notificacoesAtivas, alternarNotificacoes, 
-    testLocalNotification, showAlert, onRefresh, openAuthModal 
+    testLocalNotification, showAlert, onRefresh, openAuthModal, openCoupons, openNotif,
+    userProfile, resultados, unreadNotifCount, openFavoritesModal, favoritosCount
   } = useContext(RadarContext);
 
   const [authLoading, setAuthLoading] = useState(false);
   const [cleaningCache, setCleaningCache] = useState(false);
+  const [showConfigDetails, setShowConfigDetails] = useState(false);
 
   const { width: SCREEN_WIDTH } = Dimensions.get('window');
-  const DRAWER_WIDTH = Math.round(Math.min(SCREEN_WIDTH * 0.82, 380));
+  const DRAWER_WIDTH = Math.round(SCREEN_WIDTH * 0.90);
 
   const slideAnim = useRef(new Animated.Value(DRAWER_WIDTH)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const [showModal, setShowModal] = useState(visible);
   const isClosingRef = useRef(false);
+
+  const userPhoto = userProfile?.picture || userProfile?.photoUrl || user?.user_metadata?.avatar_url || user?.user_metadata?.picture || null;
+  const userName = userProfile?.name || user?.user_metadata?.full_name || user?.user_metadata?.name || (user?.email ? user.email.split('@')[0] : 'Visitante');
+  const userEmail = user?.email || 'Toque para conectar conta Google';
 
   useEffect(() => {
     slideAnim.stopAnimation();
@@ -3858,6 +4175,11 @@ function SettingsDrawerModal({ visible, onClose }) {
     try {
       setCleaningCache(true);
       await AsyncStorage.multiRemove([
+        '@achoai_cached_recommendations_v10',
+        '@achoai_home_promotions_v10',
+        '@achoai_last_rec_update_timestamp_v10',
+        '@achoai_home_promotions_timestamp_v10',
+        '@achoai_cached_videos_feed_v10',
         '@achoai_cached_recommendations_v9',
         '@achoai_home_promotions_v9',
         '@achoai_last_rec_update_timestamp_v9',
@@ -3887,7 +4209,7 @@ function SettingsDrawerModal({ visible, onClose }) {
   return (
     <Modal visible={showModal} transparent onRequestClose={handleClose} animationType="none">
       <View style={{ flex: 1 }}>
-        {/* Backdrop escurecido estático que fadeia suavemente */}
+        {/* Backdrop escurecido */}
         <Animated.View style={[styles.drawerBackdrop, { opacity: fadeAnim }]}>
           <TouchableOpacity 
             style={StyleSheet.absoluteFill} 
@@ -3896,7 +4218,7 @@ function SettingsDrawerModal({ visible, onClose }) {
           />
         </Animated.View>
 
-        {/* Gaveta lateral deslizando a 60fps com aceleração por hardware */}
+        {/* Gaveta lateral cobrindo 90% da tela */}
         <Animated.View 
           renderToHardwareTextureAndroid={true}
           style={[
@@ -3904,14 +4226,14 @@ function SettingsDrawerModal({ visible, onClose }) {
             { width: DRAWER_WIDTH, transform: [{ translateX: slideAnim }] }
           ]}
         >
-          {/* Header da Gaveta */}
+          {/* Header Superior da Gaveta */}
           <View style={styles.sideDrawerHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Ionicons name="settings" size={20} color={THEME.primary} style={{ marginRight: 8 }} />
-              <Text style={styles.sideDrawerTitle}>Configurações</Text>
+              <Ionicons name="grid-outline" size={20} color={THEME.primary} style={{ marginRight: 8 }} />
+              <Text style={styles.sideDrawerTitle}>Menu & Opções</Text>
             </View>
             <TouchableOpacity onPress={handleClose} style={styles.notifCloseBtn}>
-              <Ionicons name="close" size={20} color="#0F172A" />
+              <Ionicons name="close" size={22} color="#0F172A" />
             </TouchableOpacity>
           </View>
 
@@ -3920,174 +4242,366 @@ function SettingsDrawerModal({ visible, onClose }) {
             contentContainerStyle={styles.sideDrawerScrollContent}
             showsVerticalScrollIndicator={false}
           >
-            {/* Conta do Usuário / Login Google */}
-            <View style={styles.settingsCard}>
-              <View style={styles.row}>
-                <View style={styles.settingsAvatar}>
-                  <Ionicons name={user ? "person" : "phone-portrait-outline"} size={22} color={THEME.primary} />
-                </View>
-                <View style={{ flex: 1, marginLeft: 12 }}>
-                  <Text style={styles.settingsAccountName}>
-                    {user?.email || 'Modo Visitante (Aparelho)'}
-                  </Text>
-                  <Text style={styles.settingsAccountSub}>
-                    {user ? 'Conta sincronizada em nuvem via Google' : 'Uso anônimo livre no seu aparelho'}
-                  </Text>
-                </View>
+            {/* Card de Usuário / Perfil (Estilo E-commerce) */}
+            <TouchableOpacity 
+              style={styles.drawerUserCard}
+              activeOpacity={0.85}
+              onPress={() => {
+                handleClose();
+                setTimeout(() => openAuthModal(), 200);
+              }}
+            >
+              <View style={styles.drawerAvatarCircle}>
+                {userPhoto ? (
+                  <Image source={{ uri: userPhoto }} style={styles.drawerAvatarImg} />
+                ) : (
+                  <Ionicons name={user ? "person" : "person-outline"} size={24} color={THEME.primary} />
+                )}
               </View>
 
-              {user ? (
-                <TouchableOpacity style={styles.settingsAuthBtnOutline} onPress={logoutUser}>
-                  <Ionicons name="log-out-outline" size={16} color="#EF4444" style={{ marginRight: 6 }} />
-                  <Text style={[styles.settingsAuthBtnText, { color: '#EF4444' }]}>Desconectar Conta Google</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity 
-                  style={styles.settingsAuthBtnPrimary} 
-                  onPress={() => {
-                    handleClose();
-                    openAuthModal();
-                  }}
-                >
-                  <Ionicons name="logo-google" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-                  <Text style={styles.settingsAuthBtnTextPrimary}>Entrar ou Criar Conta</Text>
-                </TouchableOpacity>
-              )}
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={styles.drawerUserName} numberOfLines={1}>
+                  {userName}
+                </Text>
+                <Text style={styles.drawerUserSub} numberOfLines={1}>
+                  {userEmail}
+                </Text>
+              </View>
 
-              {/* ID Único do Aparelho com Botão de Copiar */}
-              <View style={styles.settingsDeviceIdRow}>
+              <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
+            </TouchableOpacity>
+
+            {/* SEÇÃO: ATALHOS PRINCIPAIS */}
+            <Text style={styles.drawerSectionTitle}>Recursos Principais</Text>
+            <View style={styles.drawerGroupCard}>
+              {/* Botão Meus Favoritos */}
+              <TouchableOpacity 
+                style={styles.drawerMenuItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  handleClose();
+                  setTimeout(() => openFavoritesModal(), 200);
+                }}
+              >
+                <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#FFE4E6' }]}>
+                  <Ionicons name="heart" size={19} color="#E11D48" />
+                </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.settingsDeviceIdLabel}>ID DO DISPOSITIVO</Text>
-                  <Text style={styles.settingsDeviceIdValue} numberOfLines={1}>
-                    {deviceId || 'Detectando aparelho...'}
+                  <Text style={styles.drawerMenuLabel}>Meus Favoritos</Text>
+                  <Text style={styles.drawerMenuSub}>Ofertas e produtos salvos por você</Text>
+                </View>
+                <View style={[styles.drawerMenuBadge, { backgroundColor: favoritosCount > 0 ? '#FFE4E6' : '#F1F5F9' }]}>
+                  <Text style={[styles.drawerMenuBadgeText, { color: favoritosCount > 0 ? '#E11D48' : '#94A3B8' }]}>
+                    {favoritosCount > 0 ? favoritosCount : '0'}
                   </Text>
                 </View>
-                <TouchableOpacity style={styles.settingsCopyBtn} onPress={handleCopyDeviceId}>
-                  <Ionicons name="copy-outline" size={14} color="#64748B" style={{ marginRight: 4 }} />
-                  <Text style={styles.settingsCopyBtnText}>Copiar</Text>
-                </TouchableOpacity>
-              </View>
+                <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+              </TouchableOpacity>
+
+              <View style={styles.drawerDivider} />
+
+              {/* Botão de Cupons */}
+              <TouchableOpacity 
+                style={styles.drawerMenuItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  handleClose();
+                  setTimeout(() => openCoupons(), 200);
+                }}
+              >
+                <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#FEE2E2' }]}>
+                  <Ionicons name="ticket-outline" size={19} color="#EF4444" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.drawerMenuLabel}>Cupons de Desconto</Text>
+                  <Text style={styles.drawerMenuSub}>Shopee, Mercado Livre, Amazon e mais</Text>
+                </View>
+                <View style={[styles.drawerMenuBadge, { backgroundColor: '#FEF2F2' }]}>
+                  <Text style={[styles.drawerMenuBadgeText, { color: '#EF4444' }]}>NOVO</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+              </TouchableOpacity>
+
+              <View style={styles.drawerDivider} />
+
+              {/* Botão Minhas Atividades / Histórico de Notificações */}
+              <TouchableOpacity 
+                style={styles.drawerMenuItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  handleClose();
+                  setTimeout(() => openNotif(), 200);
+                }}
+              >
+                <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#EFF6FF' }]}>
+                  <Ionicons name="time-outline" size={19} color="#3B82F6" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.drawerMenuLabel}>Minhas Atividades</Text>
+                  <Text style={styles.drawerMenuSub}>Alertas recebidos e histórico recente</Text>
+                </View>
+                {unreadNotifCount > 0 && (
+                  <View style={[styles.drawerMenuBadge, { backgroundColor: '#FFEDD5' }]}>
+                    <Text style={[styles.drawerMenuBadgeText, { color: '#EA580C' }]}>
+                      {unreadNotifCount > 9 ? '9+' : unreadNotifCount}
+                    </Text>
+                  </View>
+                )}
+                <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+              </TouchableOpacity>
             </View>
 
-            {/* Plano & Benefícios (Free, Premium, Premium Light, Admin) */}
-            <View style={styles.settingsCard}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <Text style={styles.settingsCardTitle}>Seu Plano Atual</Text>
-                <View style={[styles.settingsTierBadge, { backgroundColor: tierBadgeInfo.bg, borderColor: tierBadgeInfo.border }]}>
-                  <Ionicons name={tierBadgeInfo.icon} size={12} color={tierBadgeInfo.text} style={{ marginRight: 4 }} />
-                  <Text style={[styles.settingsTierBadgeText, { color: tierBadgeInfo.text }]}>
-                    {tierBadgeInfo.label}
-                  </Text>
+            {/* SEÇÃO: CONFIGURAÇÕES DO APLICATIVO */}
+            <Text style={styles.drawerSectionTitle}>Preferências & Conta</Text>
+            <View style={styles.drawerGroupCard}>
+              {/* Toggle de Abertura das Configurações Avançadas */}
+              <TouchableOpacity 
+                style={styles.drawerMenuItem}
+                activeOpacity={0.7}
+                onPress={() => setShowConfigDetails(!showConfigDetails)}
+              >
+                <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#FFF7ED' }]}>
+                  <Ionicons name="settings-outline" size={19} color="#EA580C" />
                 </View>
-              </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.drawerMenuLabel}>Configurações</Text>
+                  <Text style={styles.drawerMenuSub}>Alertas, notificações push e dispositivo</Text>
+                </View>
+                <Ionicons 
+                  name={showConfigDetails ? "chevron-up" : "chevron-down"} 
+                  size={18} 
+                  color="#94A3B8" 
+                />
+              </TouchableOpacity>
 
-              <Text style={styles.settingsTierDescText}>
-                {tierBadgeInfo.desc}
-              </Text>
+              {/* Bloco Expansível de Configurações */}
+              {showConfigDetails && (
+                <View style={{ paddingHorizontal: 14, paddingBottom: 14, backgroundColor: '#F8FAFC' }}>
+                  {/* Plano & Benefícios */}
+                  <View style={[styles.settingsCard, { marginTop: 10 }]}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <Text style={styles.settingsCardTitle}>Seu Plano Atual</Text>
+                      <View style={[styles.settingsTierBadge, { backgroundColor: tierBadgeInfo.bg, borderColor: tierBadgeInfo.border }]}>
+                        <Ionicons name={tierBadgeInfo.icon} size={12} color={tierBadgeInfo.text} style={{ marginRight: 4 }} />
+                        <Text style={[styles.settingsTierBadgeText, { color: tierBadgeInfo.text }]}>
+                          {tierBadgeInfo.label}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.settingsTierDescText}>{tierBadgeInfo.desc}</Text>
 
-              {/* Ações de Upgrade e Teste Grátis de 2 Dias para Plano Free */}
-              {isFree && (
-                <View style={{ marginTop: 12 }}>
-                  {trialEligibility?.canActivate && (
-                    <TouchableOpacity 
-                      style={styles.settingsTrialBtn}
-                      onPress={() => {
-                        handleClose();
-                        handleActivateTrial(deviceId, user, pushToken);
+                    {isFree && (
+                      <View style={{ marginTop: 12 }}>
+                        {trialEligibility?.canActivate && (
+                          <TouchableOpacity 
+                            style={styles.settingsTrialBtn}
+                            onPress={() => {
+                              handleClose();
+                              handleActivateTrial(deviceId, user, pushToken);
+                            }}
+                            disabled={activatingTrial}
+                          >
+                            {activatingTrial ? (
+                              <ActivityIndicator size="small" color="#FFFFFF" />
+                            ) : (
+                              <>
+                                <Ionicons name="sparkles" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                <Text style={styles.settingsTrialBtnText}>Ativar Teste Grátis de 2 Dias</Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        )}
+
+                        <TouchableOpacity 
+                          style={styles.settingsUpgradeBtn}
+                          onPress={() => {
+                            handleClose();
+                            handleSubscribePremium();
+                          }}
+                          disabled={subscribing}
+                        >
+                          {subscribing ? (
+                            <ActivityIndicator size="small" color="#FFFFFF" />
+                          ) : (
+                            <>
+                              <Ionicons name="star" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                              <Text style={styles.settingsUpgradeBtnText}>Assinar Premium (R$ 39,90/mês)</Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+
+                  {/* Alertas & Notificações Push */}
+                  <View style={styles.settingsCard}>
+                    <Text style={styles.settingsCardTitle}>Alertas & Notificações</Text>
+                    <View style={styles.settingsSwitchRow}>
+                      <View style={{ flex: 1, paddingRight: 10 }}>
+                        <Text style={styles.settingsSwitchTitle}>Notificações em Tempo Real</Text>
+                        <Text style={styles.settingsSwitchSub}>
+                          {notificacoesAtivas ? 'Ativado: avisos de ofertas imediatos' : 'Pausado: modo silencioso'}
+                        </Text>
+                      </View>
+                      <Switch
+                        value={Boolean(notificacoesAtivas)}
+                        onValueChange={alternarNotificacoes}
+                        thumbColor="#FFFFFF"
+                        trackColor={{ false: '#CBD5E1', true: THEME.primary }}
+                      />
+                    </View>
+
+                    <TouchableOpacity
+                      style={styles.settingsTestNotifBtn}
+                      onPress={async () => {
+                        try {
+                          await testLocalNotification();
+                          showAlert({ title: "Teste Enviado!", message: "Verifique sua barra de notificações.", type: "success" });
+                        } catch(e) {
+                          showAlert({ title: "Aviso", message: "Não foi possível disparar o teste.", type: "warning" });
+                        }
                       }}
-                      disabled={activatingTrial}
                     >
-                      {activatingTrial ? (
-                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      <Ionicons name="notifications-outline" size={16} color={THEME.primary} style={{ marginRight: 6 }} />
+                      <Text style={styles.settingsTestNotifBtnText}>Testar Notificação Push</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* ID Único do Aparelho */}
+                  <View style={styles.settingsDeviceIdRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.settingsDeviceIdLabel}>ID DO DISPOSITIVO</Text>
+                      <Text style={styles.settingsDeviceIdValue} numberOfLines={1}>
+                        {deviceId || 'Detectando aparelho...'}
+                      </Text>
+                    </View>
+                    <TouchableOpacity style={styles.settingsCopyBtn} onPress={handleCopyDeviceId}>
+                      <Ionicons name="copy-outline" size={14} color="#64748B" style={{ marginRight: 4 }} />
+                      <Text style={styles.settingsCopyBtnText}>Copiar</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Armazenamento & Limpeza de Cache */}
+                  <View style={[styles.settingsCard, { marginTop: 12 }]}>
+                    <Text style={styles.settingsCardTitle}>Armazenamento Local</Text>
+                    <Text style={styles.settingsCardSub}>
+                      Renove o catálogo de ofertas e imagens salvas em cache local.
+                    </Text>
+                    <TouchableOpacity 
+                      style={styles.settingsCleanCacheBtn}
+                      onPress={handleLimparCache}
+                      disabled={cleaningCache}
+                    >
+                      {cleaningCache ? (
+                        <ActivityIndicator size="small" color="#64748B" />
                       ) : (
                         <>
-                          <Ionicons name="sparkles" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-                          <Text style={styles.settingsTrialBtnText}>Ativar Teste Grátis de 2 Dias (Premium Light)</Text>
+                          <Ionicons name="refresh-outline" size={16} color="#0F172A" style={{ marginRight: 6 }} />
+                          <Text style={styles.settingsCleanCacheBtnText}>Limpar Cache e Sincronizar</Text>
                         </>
                       )}
                     </TouchableOpacity>
-                  )}
-
-                  <TouchableOpacity 
-                    style={styles.settingsUpgradeBtn}
-                    onPress={() => {
-                      handleClose();
-                      handleSubscribePremium();
-                    }}
-                    disabled={subscribing}
-                  >
-                    {subscribing ? (
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    ) : (
-                      <>
-                        <Ionicons name="star" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-                        <Text style={styles.settingsUpgradeBtnText}>Assinar Premium (R$ 39,90/mês)</Text>
-                      </>
-                    )}
-                  </TouchableOpacity>
+                  </View>
                 </View>
               )}
             </View>
 
-            {/* Alertas & Notificações Push */}
-            <View style={styles.settingsCard}>
-              <Text style={styles.settingsCardTitle}>Alertas & Notificações</Text>
-              
-              <View style={styles.settingsSwitchRow}>
-                <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={styles.settingsSwitchTitle}>Notificações Push em Tempo Real</Text>
-                  <Text style={styles.settingsSwitchSub}>
-                    {notificacoesAtivas ? 'Ativado: você recebe avisos imediatos de novos preços' : 'Pausado: notificações silenciosas'}
-                  </Text>
-                </View>
-                <Switch
-                  value={Boolean(notificacoesAtivas)}
-                  onValueChange={alternarNotificacoes}
-                  thumbColor="#FFFFFF"
-                  trackColor={{ false: '#CBD5E1', true: THEME.primary }}
-                />
-              </View>
-
-              <TouchableOpacity
-                style={styles.settingsTestNotifBtn}
-                onPress={async () => {
-                  try {
-                    await testLocalNotification();
-                    showAlert({ title: "Teste Enviado!", message: "Verifique sua barra de notificações do Android.", type: "success" });
-                  } catch(e) {
-                    showAlert({ title: "Aviso", message: "Não foi possível disparar o teste.", type: "warning" });
-                  }
-                }}
-              >
-                <Ionicons name="notifications-outline" size={16} color={THEME.primary} style={{ marginRight: 6 }} />
-                <Text style={styles.settingsTestNotifBtnText}>Testar Notificação Push</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Limpeza de Cache & Manutenção */}
-            <View style={styles.settingsCard}>
-              <Text style={styles.settingsCardTitle}>Armazenamento & Cache</Text>
-              <Text style={styles.settingsCardSub}>
-                Renove o catálogo de ofertas em cache. Como medida de privacidade, sua sessão será reiniciada.
-              </Text>
+            {/* SEÇÃO: INSTITUCIONAL & SUPORTE */}
+            <Text style={styles.drawerSectionTitle}>Sobre o Aplicativo</Text>
+            <View style={styles.drawerGroupCard}>
               <TouchableOpacity 
-                style={styles.settingsCleanCacheBtn}
-                onPress={handleLimparCache}
-                disabled={cleaningCache}
+                style={styles.drawerMenuItem}
+                activeOpacity={0.7}
+                onPress={() => showAlert({ title: "Privacidade", message: "Seus dados estão protegidos com criptografia. Não compartilhamos informações pessoais com terceiros.", type: "info" })}
               >
-                {cleaningCache ? (
-                  <ActivityIndicator size="small" color="#64748B" />
-                ) : (
-                  <>
-                    <Ionicons name="refresh-outline" size={16} color="#0F172A" style={{ marginRight: 6 }} />
-                    <Text style={styles.settingsCleanCacheBtnText}>Limpar Cache e Sincronizar</Text>
-                  </>
-                )}
+                <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#F1F5F9' }]}>
+                  <Ionicons name="shield-checkmark-outline" size={19} color="#475569" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.drawerMenuLabel}>Política de Privacidade</Text>
+                  <Text style={styles.drawerMenuSub}>Proteção e tratamento de dados</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
               </TouchableOpacity>
+
+              <View style={styles.drawerDivider} />
+
+              <TouchableOpacity 
+                style={styles.drawerMenuItem}
+                activeOpacity={0.7}
+                onPress={() => showAlert({ title: "Termos de Uso", message: "O AchôAI monitora anúncios públicos na internet. O valor e estoque final são sempre de responsabilidade da loja anunciante.", type: "info" })}
+              >
+                <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#F1F5F9' }]}>
+                  <Ionicons name="document-text-outline" size={19} color="#475569" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.drawerMenuLabel}>Termos de Uso</Text>
+                  <Text style={styles.drawerMenuSub}>Condições gerais de serviço</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+              </TouchableOpacity>
+
+              <View style={styles.drawerDivider} />
+
+              <TouchableOpacity 
+                style={styles.drawerMenuItem}
+                activeOpacity={0.7}
+                onPress={() => showAlert({ title: "Avaliar App", message: "Obrigado por usar o AchôAI! Deixe sua avaliação de 5 estrelas na Google Play Store.", type: "success" })}
+              >
+                <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#FEF9C3' }]}>
+                  <Ionicons name="star-outline" size={19} color="#CA8A04" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.drawerMenuLabel}>Avaliar Aplicativo</Text>
+                  <Text style={styles.drawerMenuSub}>Nos ajude com sua opinião na Play Store</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+              </TouchableOpacity>
+
+              {user ? (
+                <>
+                  <View style={styles.drawerDivider} />
+                  <TouchableOpacity 
+                    style={styles.drawerMenuItem}
+                    activeOpacity={0.7}
+                    onPress={logoutUser}
+                  >
+                    <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#FEE2E2' }]}>
+                      <Ionicons name="log-out-outline" size={19} color="#EF4444" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.drawerMenuLabel, { color: '#EF4444' }]}>Sair da Conta</Text>
+                      <Text style={styles.drawerMenuSub}>Desconectar conta Google atual</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color="#FCA5A5" />
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <View style={styles.drawerDivider} />
+                  <TouchableOpacity 
+                    style={styles.drawerMenuItem}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      handleClose();
+                      openAuthModal();
+                    }}
+                  >
+                    <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#FFF7ED' }]}>
+                      <Ionicons name="log-in-outline" size={19} color="#FF5722" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.drawerMenuLabel, { color: '#FF5722' }]}>Entrar ou Criar Conta</Text>
+                      <Text style={styles.drawerMenuSub}>Sincronize seus radares na nuvem</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color="#FED7AA" />
+                  </TouchableOpacity>
+                </>
+              )}
             </View>
 
-            {/* Sobre o Motor */}
-            <View style={{ alignItems: 'center', marginVertical: 20 }}>
+            {/* Versão e Rodapé */}
+            <View style={{ alignItems: 'center', marginTop: 14, marginBottom: 28 }}>
               <Text style={styles.aboutVersionText}>AchôAI v2.1 • Edição 2026</Text>
               <Text style={styles.aboutMottoText}>O radar inteligente que encontra as melhores ofertas.</Text>
             </View>
@@ -4099,10 +4613,109 @@ function SettingsDrawerModal({ visible, onClose }) {
 }
 
 // =====================================================================
+// MODAL: MEUS FAVORITOS (OFERTAS SALVAS PELO USUÁRIO)
+// =====================================================================
+function FavoritesModal({ visible, onClose }) {
+  const { favoritos, removerFavorito, currentOwnerId, deviceId, showAlert } = useContext(RadarContext);
+  const insets = useSafeAreaInsets();
+  const effectiveUserId = currentOwnerId || deviceId;
+
+  const handleDealClick = (deal) => {
+    if (!deal) return;
+    RecommendationEngine.registrarCliqueOferta(deal.titulo || deal.title, effectiveUserId, deal.loja);
+
+    let targetUrl = deal.url;
+    if (!targetUrl || /^https?:\/\/(www\.)?(shopee|mercadolivre|amazon|magazineluiza|kabum|casasbahia|fastshop|americanas|carrefour|shein)\.com(\.br)?\/?$/i.test(targetUrl)) {
+      targetUrl = RecommendationEngine.gerarUrlBuscaLoja(deal.loja, deal.titulo || deal.title);
+    }
+    const finalUrl = formatarUrlAfiliado(targetUrl);
+    Linking.openURL(finalUrl).catch(() => {
+      showAlert({
+        title: "Aviso",
+        message: "Não foi possível abrir o link da oferta.",
+        type: "error"
+      });
+    });
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={onClose}
+    >
+      <View style={[styles.favModalContainer, { paddingTop: insets.top + 8 }]}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+
+        {/* Header do Modal */}
+        <View style={styles.favModalHeader}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={styles.favModalIconCircle}>
+              <Ionicons name="heart" size={20} color="#E11D48" />
+            </View>
+            <View style={{ marginLeft: 10 }}>
+              <Text style={styles.favModalTitle}>Meus Favoritos</Text>
+              <Text style={styles.favModalSubtitle}>
+                {favoritos.length === 1 ? '1 oferta salva' : `${favoritos.length} ofertas salvas`}
+              </Text>
+            </View>
+          </View>
+
+          <TouchableOpacity 
+            onPress={onClose} 
+            style={styles.favModalCloseBtn}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="close" size={22} color="#0F172A" />
+          </TouchableOpacity>
+        </View>
+
+        {favoritos.length === 0 ? (
+          <View style={styles.favEmptyStateContainer}>
+            <View style={styles.favEmptyIconBox}>
+              <Ionicons name="heart-outline" size={56} color="#FDA4AF" />
+            </View>
+            <Text style={styles.favEmptyTitle}>Nenhum favorito salvo</Text>
+            <Text style={styles.favEmptyDesc}>
+              Toque no ícone de coração nos produtos da Home, Recomendações ou Busca para salvá-los aqui e acompanhá-los com facilidade.
+            </Text>
+            <TouchableOpacity 
+              style={styles.favEmptyCtaBtn} 
+              onPress={onClose}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="compass-outline" size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+              <Text style={styles.favEmptyCtaBtnText}>Explorar Ofertas</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <FlatList
+            data={favoritos}
+            keyExtractor={(item, idx) => String(item.id || item.url || idx)}
+            renderItem={({ item }) => (
+              <ProductDealCard
+                item={item}
+                isFavorite={true}
+                onPress={() => handleDealClick(item)}
+                onToggleFavorite={() => removerFavorito(item)}
+              />
+            )}
+            contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 40 }}
+            showsVerticalScrollIndicator={false}
+          />
+        )}
+      </View>
+    </Modal>
+  );
+}
+
+// =====================================================================
 // MODAL: CONVITE DE LOGIN & TUTORIAL DE SINCRONIZAÇÃO EM NUVEM (COMPACTO)
 // =====================================================================
 function AuthTutorialModal({ visible, onClose }) {
   const { 
+    user, userProfile, logoutUser,
     linkAccount, showAlert,
     notificacoesAtivas, alternarNotificacoes 
   } = useContext(RadarContext);
@@ -4281,61 +4894,123 @@ function AuthTutorialModal({ visible, onClose }) {
             </TouchableOpacity>
           </View>
 
-          {/* 3 Benefícios Compactos */}
-          <View style={styles.authBenefitsBox}>
-            <View style={styles.authBenefitRow}>
-              <View style={[styles.authBenefitIconBox, { backgroundColor: '#EFF6FF' }]}>
-                <Ionicons name="cloud-done-outline" size={14} color="#3B82F6" />
+          {user ? (
+            <View style={styles.authConnectedProfileBox}>
+              <View style={styles.authConnectedAvatarCircle}>
+                {userProfile?.picture || user?.user_metadata?.avatar_url || user?.user_metadata?.picture ? (
+                  <Image 
+                    source={{ uri: userProfile?.picture || user?.user_metadata?.avatar_url || user?.user_metadata?.picture }} 
+                    style={styles.authConnectedAvatarImg} 
+                  />
+                ) : (
+                  <Ionicons name="person" size={26} color="#00A650" />
+                )}
               </View>
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text style={styles.authBenefitTitle}>Sincronização em Múltiplos Aparelhos</Text>
-                <Text style={styles.authBenefitDesc}>
-                  Acompanhe seus radares no celular, tablet ou outro dispositivo.
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.authBenefitRow}>
-              <View style={[styles.authBenefitIconBox, { backgroundColor: '#ECFDF5' }]}>
-                <Ionicons name="shield-checkmark-outline" size={14} color="#10B981" />
-              </View>
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text style={styles.authBenefitTitle}>Privacidade e Armazenamento Local</Text>
-                <Text style={styles.authBenefitDesc}>
-                  Seu nome e foto ficam exclusivamente na memória deste aparelho.
-                </Text>
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <Text style={styles.authConnectedName} numberOfLines={1}>
+                    {userProfile?.name || user?.user_metadata?.full_name || user?.user_metadata?.name || 'Usuário Conectado'}
+                  </Text>
+                  <Ionicons name="checkmark-circle" size={16} color="#00A650" style={{ marginLeft: 4 }} />
+                </View>
+                <Text style={styles.authConnectedEmail} numberOfLines={1}>{user.email}</Text>
+                <Text style={styles.authConnectedStatus}>Conta Google vinculada aos seus radares</Text>
               </View>
             </View>
-
-            <View style={styles.authBenefitRow}>
-              <View style={[styles.authBenefitIconBox, { backgroundColor: '#FFF7ED' }]}>
-                <Ionicons name="infinite-outline" size={14} color="#FF5722" />
+          ) : (
+            /* 3 Benefícios Compactos */
+            <View style={styles.authBenefitsBox}>
+              <View style={styles.authBenefitRow}>
+                <View style={[styles.authBenefitIconBox, { backgroundColor: '#EFF6FF' }]}>
+                  <Ionicons name="cloud-done-outline" size={14} color="#3B82F6" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Text style={styles.authBenefitTitle}>Sincronização em Múltiplos Aparelhos</Text>
+                  <Text style={styles.authBenefitDesc}>
+                    Acompanhe seus radares no celular, tablet ou outro dispositivo.
+                  </Text>
+                </View>
               </View>
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text style={styles.authBenefitTitle}>Uso Livre e Flexível</Text>
-                <Text style={styles.authBenefitDesc}>
-                  Crie radares normalmente; sua conta protege seus dados e alertas.
-                </Text>
+
+              <View style={styles.authBenefitRow}>
+                <View style={[styles.authBenefitIconBox, { backgroundColor: '#ECFDF5' }]}>
+                  <Ionicons name="shield-checkmark-outline" size={14} color="#10B981" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Text style={styles.authBenefitTitle}>Privacidade e Armazenamento Local</Text>
+                  <Text style={styles.authBenefitDesc}>
+                    Seu nome e foto ficam exclusivamente na memória deste aparelho.
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.authBenefitRow}>
+                <View style={[styles.authBenefitIconBox, { backgroundColor: '#FFF7ED' }]}>
+                  <Ionicons name="infinite-outline" size={14} color="#FF5722" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Text style={styles.authBenefitTitle}>Uso Livre e Flexível</Text>
+                  <Text style={styles.authBenefitDesc}>
+                    Crie radares normalmente; sua conta protege seus dados e alertas.
+                  </Text>
+                </View>
               </View>
             </View>
-          </View>
+          )}
 
-          {/* Botão Principal: Conectar com o Google */}
-          <TouchableOpacity 
-            style={styles.authGoogleButton}
-            onPress={handleLoginGoogle}
-            disabled={authLoading}
-            activeOpacity={0.85}
-          >
-            {authLoading ? (
-              <ActivityIndicator size="small" color="#FFFFFF" />
-            ) : (
-              <>
-                <Ionicons name="logo-google" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
-                <Text style={styles.authGoogleButtonText}>Continuar com o Google</Text>
-              </>
-            )}
-          </TouchableOpacity>
+          {/* Botões de Ação do Google */}
+          {user ? (
+            <View style={{ gap: 8, marginVertical: 10 }}>
+              <TouchableOpacity 
+                style={[styles.authGoogleButton, { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0' }]}
+                onPress={handleLoginGoogle}
+                disabled={authLoading}
+                activeOpacity={0.85}
+              >
+                {authLoading ? (
+                  <ActivityIndicator size="small" color="#0F172A" />
+                ) : (
+                  <>
+                    <Ionicons name="logo-google" size={16} color="#0F172A" style={{ marginRight: 8 }} />
+                    <Text style={[styles.authGoogleButtonText, { color: '#0F172A' }]}>Trocar Conta Google</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={[styles.authGoogleButton, { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECDD3' }]}
+                onPress={async () => {
+                  handleClose();
+                  await logoutUser();
+                  showAlert({
+                    title: "Conta Desconectada",
+                    message: "Você foi desconectado da sua conta Google.",
+                    type: "info"
+                  });
+                }}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="log-out-outline" size={16} color="#EF4444" style={{ marginRight: 8 }} />
+                <Text style={[styles.authGoogleButtonText, { color: '#EF4444' }]}>Desconectar Conta Google</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity 
+              style={styles.authGoogleButton}
+              onPress={handleLoginGoogle}
+              disabled={authLoading}
+              activeOpacity={0.85}
+            >
+              {authLoading ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <>
+                  <Ionicons name="logo-google" size={16} color="#FFFFFF" style={{ marginRight: 8 }} />
+                  <Text style={styles.authGoogleButtonText}>Continuar com o Google</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )}
 
           {/* Seção Importante: Notificações no Aparelho */}
           <View style={styles.authNotifBanner}>
@@ -4374,11 +5049,55 @@ function AuthTutorialModal({ visible, onClose }) {
 // ASSISTENTE DE CRIAÇÃO DE RADAR EM 3 ETAPAS (FULL SCREEN WIZARD)
 // =====================================================================
 function CreateMonitorScreen({ navigation, route }) {
-  const { currentOwnerId, onRefresh, showAlert } = useContext(RadarContext);
+  const { currentOwnerId, onRefresh, showAlert, setLastCreatedRadarId } = useContext(RadarContext);
   const editando = route?.params?.monitor;
+  const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+  // Animação de entrada e saída deslizante (Slide from bottom / Slide to bottom)
+  const modalTranslateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+
+  const backdropOpacity = modalTranslateY.interpolate({
+    inputRange: [0, SCREEN_HEIGHT],
+    outputRange: [0.45, 0],
+    extrapolate: 'clamp',
+  });
+
+  useEffect(() => {
+    Animated.timing(modalTranslateY, {
+      toValue: 0,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  const fecharModal = useCallback(() => {
+    Animated.timing(modalTranslateY, {
+      toValue: SCREEN_HEIGHT,
+      duration: 240,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true,
+    }).start(() => {
+      navigation.goBack();
+    });
+  }, [navigation]);
 
   // Etapa Atual do Assistente (1: Lojas, 2: Produto & Estratégia, 3: Frequência & Ativação)
   const [etapa, setEtapa] = useState(1);
+
+  // Intercepta botão voltar do hardware no Android para deslizar suavemente para baixo
+  useEffect(() => {
+    const backAction = () => {
+      if (etapa > 1) {
+        mudarEtapa(etapa - 1);
+        return true;
+      }
+      fecharModal();
+      return true;
+    };
+    const handler = BackHandler.addEventListener('hardwareBackPress', backAction);
+    return () => handler.remove();
+  }, [etapa, fecharModal]);
 
   // Etapa 1: Plataformas (Inicia com ZERO lojas selecionadas a menos que esteja editando)
   const [selectedPlatforms, setSelectedPlatforms] = useState(() => {
@@ -4493,9 +5212,70 @@ function CreateMonitorScreen({ navigation, route }) {
     });
   };
 
+  // Teclado dinâmico e auto-scroll inteligente
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const etapa2ScrollRef = useRef(null);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      (e) => {
+        setKeyboardHeight(e?.endCoordinates?.height || 280);
+      }
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => {
+        setKeyboardHeight(0);
+      }
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  // Transições direcionais suaves e elegantes em duas fases entre as 3 etapas do assistente
+  const stepTranslateX = useRef(new Animated.Value(0)).current;
+  const stepOpacity = useRef(new Animated.Value(1)).current;
+
   const mudarEtapa = (novaEtapa) => {
-    try { Vibration.vibrate(25); } catch (e) {}
-    setEtapa(novaEtapa);
+    if (novaEtapa === etapa) return;
+    try { Vibration.vibrate(15); } catch (e) {}
+
+    const forward = novaEtapa > etapa;
+    // Fase 1: Desliza suavemente a etapa atual para fora (90ms)
+    Animated.parallel([
+      Animated.timing(stepTranslateX, {
+        toValue: forward ? -30 : 30,
+        duration: 90,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(stepOpacity, {
+        toValue: 0,
+        duration: 90,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setEtapa(novaEtapa);
+      stepTranslateX.setValue(forward ? 30 : -30);
+      // Fase 2: Entrada suave e elegante da nova etapa (220ms)
+      Animated.parallel([
+        Animated.timing(stepTranslateX, {
+          toValue: 0,
+          duration: 220,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(stepOpacity, {
+          toValue: 1,
+          duration: 220,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start();
+    });
   };
 
   const montarUrlPorPlataforma = (platKey, termo) => {
@@ -4582,11 +5362,14 @@ function CreateMonitorScreen({ navigation, route }) {
       if (editando) {
         await RadarAPI.updateMonitor(editando.id, payload);
       } else {
-        await RadarAPI.createMonitor(payload);
+        const resMonitor = await RadarAPI.createMonitor(payload);
+        if (resMonitor?.id && setLastCreatedRadarId) {
+          setLastCreatedRadarId(resMonitor.id);
+        }
       }
 
-      // Registra o interesse local do usuário (peso 5)
-      RecommendationEngine.registrarPesquisaOuRadar(produto.trim(), currentOwnerId);
+      // Registra o interesse local do usuário (peso 20)
+      RecommendationEngine.registrarRadar(produto.trim(), currentOwnerId);
 
       if (onRefresh) onRefresh();
 
@@ -4595,7 +5378,7 @@ function CreateMonitorScreen({ navigation, route }) {
         message: `Seu radar para "${produto.trim()}" está ativo e buscando ofertas nas ${selectedPlatforms.length} lojas selecionadas.`,
         type: "success",
         icon: "checkmark-circle",
-        onConfirm: () => navigation.goBack()
+        onConfirm: () => fecharModal()
       });
     } catch (e) {
       console.log("[CreateMonitor] Erro ao salvar radar:", e);
@@ -4612,15 +5395,23 @@ function CreateMonitorScreen({ navigation, route }) {
   const primeiraLoja = selectedPlatforms[0] ? (THEME.platforms[selectedPlatforms[0]]?.nome || selectedPlatforms[0]) : 'loja';
 
   return (
-    <View style={styles.screen}>
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+    <View style={{ flex: 1, backgroundColor: 'transparent' }}>
+      <Animated.View 
+        style={[
+          StyleSheet.absoluteFillObject, 
+          { backgroundColor: '#000000', opacity: backdropOpacity }
+        ]} 
+        pointerEvents="none"
+      />
+      <Animated.View style={[styles.screen, { backgroundColor: '#FFFFFF', transform: [{ translateY: modalTranslateY }] }]}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
       {/* Header com Barra de Progresso das 3 Etapas */}
       <View style={styles.wizardHeader}>
         <TouchableOpacity 
           onPress={() => {
             if (etapa > 1) mudarEtapa(etapa - 1);
-            else navigation.goBack();
+            else fecharModal();
           }} 
           style={styles.wizardBackBtn}
         >
@@ -4640,7 +5431,8 @@ function CreateMonitorScreen({ navigation, route }) {
         <View style={[styles.wizardProgressBar, { width: `${(etapa / 3) * 100}%` }]} />
       </View>
 
-      {/* ETAPA 1: SELEÇÃO DE PLATAFORMAS EM CÍRCULOS (GRID 3x4 RESPONSIVO) */}
+      {/* Conteúdo das Etapas com Transição Direcional Fluida */}
+      <Animated.View style={{ flex: 1, opacity: stepOpacity, transform: [{ translateX: stepTranslateX }] }}>
       {etapa === 1 && (
         <View style={{ flex: 1 }}>
           <ScrollView 
@@ -4696,7 +5488,11 @@ function CreateMonitorScreen({ navigation, route }) {
           keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
         >
           <ScrollView 
-            contentContainerStyle={styles.wizardStepContent} 
+            ref={etapa2ScrollRef}
+            contentContainerStyle={[
+              styles.wizardStepContent, 
+              { paddingBottom: keyboardHeight > 0 ? keyboardHeight + 80 : 40 }
+            ]} 
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
           >
@@ -4714,6 +5510,9 @@ function CreateMonitorScreen({ navigation, route }) {
                 value={produto}
                 onChangeText={setProduto}
                 autoFocus={!produto}
+                onFocus={() => {
+                  etapa2ScrollRef.current?.scrollTo({ y: 0, animated: true });
+                }}
               />
             </View>
 
@@ -4744,7 +5543,12 @@ function CreateMonitorScreen({ navigation, route }) {
               {/* Opção 2: Preço Alvo */}
               <TouchableOpacity
                 style={[styles.wizardStrategyCard, estrategia === 'preco_alvo' && styles.wizardStrategyCardActive]}
-                onPress={() => setEstrategia('preco_alvo')}
+                onPress={() => {
+                  setEstrategia('preco_alvo');
+                  setTimeout(() => {
+                    etapa2ScrollRef.current?.scrollTo({ y: 280, animated: true });
+                  }, 120);
+                }}
                 activeOpacity={0.85}
               >
                 <View style={[styles.wizardRadio, estrategia === 'preco_alvo' && styles.wizardRadioActive]}>
@@ -4770,6 +5574,11 @@ function CreateMonitorScreen({ navigation, route }) {
                     keyboardType="numeric"
                     value={precoAlvo}
                     onChangeText={handleChangePrecoAlvo}
+                    onFocus={() => {
+                      setTimeout(() => {
+                        etapa2ScrollRef.current?.scrollTo({ y: 340, animated: true });
+                      }, 150);
+                    }}
                   />
                 </View>
               )}
@@ -4802,14 +5611,13 @@ function CreateMonitorScreen({ navigation, route }) {
                 activeOpacity={0.85}
               >
                 <View style={{ flex: 1, marginRight: 10 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <Ionicons name="git-branch-outline" size={16} color="#FF5722" style={{ marginRight: 6 }} />
-                    <Text style={styles.wizardToggleTitle}>Notificar por Loja Separadamente</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>                  
+                    <Text style={styles.wizardToggleTitle}>Quantidade de produtos por rastreio</Text>
                   </View>
                   <Text style={styles.wizardToggleDesc}>
                     {notificarPorLoja
-                      ? "1 resultado individual para cada loja monitorada."
-                      : "1 única notificação consolidada com o melhor preço geral."}
+                      ? "Um produto para cada loja selecionada."
+                      : "Um único produto entre todas as lojas selecionadas."}
                   </Text>
                 </View>
                 <Switch
@@ -4999,6 +5807,7 @@ function CreateMonitorScreen({ navigation, route }) {
           </View>
         </View>
       )}
+      </Animated.View>
 
 
       {/* Modais Seletores de Localização para OLX e Facebook */}
@@ -5051,25 +5860,197 @@ function CreateMonitorScreen({ navigation, route }) {
         }}
         onClose={() => setModalFbCidadeVisible(false)}
       />
+      </Animated.View>
     </View>
   );
 }
 
 // =====================================================================
-// 5. NAVEGAÇÃO POR TABS - 100% VETORIAL (ESTILO PECHINCHOU)
+// 5. NAVEGAÇÃO POR TABS - 100% VETORIAL COM ANIMAÇÃO DINÂMICA
 // =====================================================================
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
-function MainTabs() {
-  const insets = useSafeAreaInsets();
-  const bottomInset = Math.max(insets.bottom, Platform.OS === 'android' ? 12 : 20);
+function AnimatedTabButton({ focused, iconName, iconOutlineName, color = THEME.primary }) {
+  const scaleAnim = useRef(new Animated.Value(focused ? 1.15 : 1)).current;
+  const indicatorAnim = useRef(new Animated.Value(focused ? 1 : 0)).current;
+
+  useEffect(() => {
+    if (focused) {
+      Animated.parallel([
+        Animated.spring(scaleAnim, {
+          toValue: 1.18,
+          friction: 4,
+          tension: 110,
+          useNativeDriver: true,
+        }),
+        Animated.timing(indicatorAnim, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    } else {
+      Animated.parallel([
+        Animated.spring(scaleAnim, {
+          toValue: 1,
+          friction: 6,
+          tension: 90,
+          useNativeDriver: true,
+        }),
+        Animated.timing(indicatorAnim, {
+          toValue: 0,
+          duration: 140,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [focused]);
 
   return (
-    <Tab.Navigator
+    <View style={styles.pechTabItemWrap}>
+      <Animated.View style={{ transform: [{ scale: scaleAnim }], alignItems: 'center', justifyContent: 'center' }}>
+        <Ionicons 
+          name={focused ? iconName : iconOutlineName} 
+          size={23} 
+          color={focused ? color : '#94A3B8'} 
+        />
+      </Animated.View>
+      <Animated.View 
+        style={[
+          styles.pechTabActiveIndicator, 
+          { 
+            backgroundColor: color,
+            opacity: indicatorAnim,
+            transform: [{ scaleX: indicatorAnim }] 
+          }
+        ]} 
+      />
+    </View>
+  );
+}
+
+function CentralVideoTabButton({ focused }) {
+  const pulseScale = useRef(new Animated.Value(1)).current;
+  const glowOpacity = useRef(new Animated.Value(0.35)).current;
+  const glowScale = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    // Animação permanente contínua de respiração/pulsação (convite permanente para assistir)
+    const anim = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(pulseScale, {
+            toValue: 1.12,
+            duration: 900,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(glowOpacity, {
+            toValue: 0.75,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+          Animated.timing(glowScale, {
+            toValue: 1.35,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.parallel([
+          Animated.timing(pulseScale, {
+            toValue: 1,
+            duration: 900,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(glowOpacity, {
+            toValue: 0.3,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+          Animated.timing(glowScale, {
+            toValue: 1,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+        ]),
+      ])
+    );
+    anim.start();
+    return () => anim.stop();
+  }, []);
+
+  return (
+    <View style={[styles.pechTabItemWrap, { overflow: 'visible' }]}>
+      {/* Halo brilhante pulsante contínuo */}
+      <Animated.View 
+        style={[
+          styles.centralVideoHalo,
+          {
+            opacity: glowOpacity,
+            transform: [{ scale: glowScale }],
+            backgroundColor: focused ? 'rgba(238, 77, 45, 0.45)' : 'rgba(255, 87, 34, 0.28)',
+          }
+        ]} 
+      />
+
+      <Animated.View 
+        style={[
+          styles.centralVideoBtnBadge,
+          {
+            backgroundColor: focused ? '#EE4D2D' : '#FF5722',
+            transform: [{ scale: pulseScale }],
+          }
+        ]}
+      >
+        <Ionicons 
+          name={focused ? "play" : "play-outline"} 
+          size={18} 
+          color="#FFFFFF" 
+          style={{ marginLeft: 2 }}
+        />
+      </Animated.View>
+
+      {focused && <View style={[styles.pechTabActiveIndicator, { backgroundColor: '#EE4D2D', bottom: -2 }]} />}
+    </View>
+  );
+}
+
+function MainTabs() {
+  const { user, userProfile, openSettings, openNotif, unreadNotifCount, openAuthModal } = useContext(RadarContext);
+  const insets = useSafeAreaInsets();
+  const bottomInset = Math.max(insets.bottom, Platform.OS === 'android' ? 12 : 20);
+  const [currentTab, setCurrentTab] = useState('HomeTab');
+
+  const showHeader = currentTab !== 'VideosTab';
+
+  return (
+    <View style={{ flex: 1, backgroundColor: '#F8FAFC' }}>
+      {/* HEADER ESTÁTICO E PERSISTENTE (ACHÔAI TOP BAR): NUNCA PISCA ENTRE ABAS */}
+      {showHeader && (
+        <AppTopHeader 
+          user={user} 
+          userProfile={userProfile}
+          onPressProfile={() => user ? openSettings() : openAuthModal()}
+          onOpenNotif={openNotif} 
+          onOpenSettings={openSettings} 
+          unreadCount={unreadNotifCount} 
+        />
+      )}
+      <Tab.Navigator
+        screenListeners={{
+          state: (e) => {
+            const activeRoute = e.data?.state?.routes?.[e.data?.state?.index]?.name;
+            if (activeRoute && activeRoute !== currentTab) {
+              setCurrentTab(activeRoute);
+            }
+          }
+        }}
         screenOptions={{
           headerShown: false,
           tabBarShowLabel: false,
+          animation: 'none', // 🛡️ Zero ghosting, zero sobreposição, zero artefatos de elevação
           tabBarStyle: [
             styles.pechBottomTabBar,
             {
@@ -5087,14 +6068,12 @@ function MainTabs() {
           component={HomePromotionsScreen}
           options={{
             tabBarIcon: ({ focused }) => (
-              <View style={styles.pechTabItemWrap}>
-                <Ionicons 
-                  name={focused ? "home" : "home-outline"} 
-                  size={23} 
-                  color={focused ? THEME.primary : '#94A3B8'} 
-                />
-                {focused && <View style={styles.pechTabActiveIndicator} />}
-              </View>
+              <AnimatedTabButton 
+                focused={focused} 
+                iconName="home" 
+                iconOutlineName="home-outline" 
+                color={THEME.primary} 
+              />
             )
           }}
         />
@@ -5105,32 +6084,34 @@ function MainTabs() {
           component={RadarsScreen}
           options={{
             tabBarIcon: ({ focused }) => (
-              <View style={styles.pechTabItemWrap}>
-                <Ionicons 
-                  name={focused ? "radio" : "radio-outline"} 
-                  size={23} 
-                  color={focused ? THEME.primary : '#94A3B8'} 
-                />
-                {focused && <View style={styles.pechTabActiveIndicator} />}
-              </View>
+              <AnimatedTabButton 
+                focused={focused} 
+                iconName="radio" 
+                iconOutlineName="radio-outline" 
+                color={THEME.primary} 
+              />
             )
           }}
         />
 
-        {/* 3. Cupons de Desconto */}
+        {/* 3. Achôdinhos (Reels / Shorts 9:16) */}
         <Tab.Screen 
-          name="CouponsTab" 
-          component={CouponsScreen}
+          name="VideosTab" 
+          component={VideosScreen}
           options={{
+            lazy: true,
+            tabBarLabel: 'Achôdinhos',
+            tabBarStyle: [
+              styles.pechBottomTabBar,
+              {
+                height: 56 + bottomInset,
+                paddingBottom: bottomInset,
+                backgroundColor: '#000000',
+                borderTopColor: '#1E293B',
+              }
+            ],
             tabBarIcon: ({ focused }) => (
-              <View style={styles.pechTabItemWrap}>
-                <Ionicons 
-                  name={focused ? "ticket" : "ticket-outline"} 
-                  size={23} 
-                  color={focused ? THEME.primary : '#94A3B8'} 
-                />
-                {focused && <View style={styles.pechTabActiveIndicator} />}
-              </View>
+              <CentralVideoTabButton focused={focused} />
             )
           }}
         />
@@ -5141,36 +6122,33 @@ function MainTabs() {
           component={RecommendationsFeedScreen}
           options={{
             tabBarIcon: ({ focused }) => (
-              <View style={styles.pechTabItemWrap}>
-                <Ionicons 
-                  name={focused ? "sparkles" : "sparkles-outline"} 
-                  size={23} 
-                  color={focused ? THEME.primary : '#94A3B8'} 
-                />
-                {focused && <View style={styles.pechTabActiveIndicator} />}
-              </View>
+              <AnimatedTabButton 
+                focused={focused} 
+                iconName="sparkles" 
+                iconOutlineName="sparkles-outline" 
+                color={THEME.primary} 
+              />
             )
           }}
         />
 
-        {/* 5. Pesquisar */}
+        {/* 5. Pesquisar Inteligente */}
         <Tab.Screen 
           name="SearchTab" 
           component={SearchScreen}
           options={{
             tabBarIcon: ({ focused }) => (
-              <View style={styles.pechTabItemWrap}>
-                <Ionicons 
-                  name={focused ? "search" : "search-outline"} 
-                  size={23} 
-                  color={focused ? THEME.primary : '#94A3B8'} 
-                />
-                {focused && <View style={styles.pechTabActiveIndicator} />}
-              </View>
+              <AnimatedTabButton 
+                focused={focused} 
+                iconName="search" 
+                iconOutlineName="search-outline" 
+                color={THEME.primary} 
+              />
             )
           }}
         />
       </Tab.Navigator>
+    </View>
   );
 }
 
@@ -5195,7 +6173,9 @@ export default function App() {
             headerStyle: { backgroundColor: '#FFFFFF' }, 
             headerTintColor: THEME.primary,
             headerShadowVisible: false,
-            headerTitleStyle: { fontWeight: 'bold', fontSize: 16 }
+            headerTitleStyle: { fontWeight: 'bold', fontSize: 16 },
+            animation: 'slide_from_right',
+            animationDuration: 280,
           }}>
             <Stack.Screen name="Main" component={MainTabs} options={{ headerShown: false }} />
             <Stack.Screen 
@@ -5203,8 +6183,9 @@ export default function App() {
               component={CreateMonitorScreen} 
               options={{ 
                 headerShown: false,
-                presentation: 'modal',
-                animation: 'slide_from_bottom' 
+                presentation: 'transparentModal',
+                animation: 'none',
+                contentStyle: { backgroundColor: 'transparent' },
               }} 
             />
           </Stack.Navigator>
@@ -6285,47 +7266,168 @@ const styles = StyleSheet.create({
   },
   smartCategoryCard: {
     width: '48%',
-    borderRadius: 16,
-    padding: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
+    height: 110,
+    borderRadius: 14,
+    overflow: 'hidden',
     borderWidth: 1.5,
     borderColor: '#E2E8F0',
-    position: 'relative',
-    minHeight: 100,
+    backgroundColor: '#0F172A',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 4,
   },
   smartCategoryCardActive: {
     borderColor: '#FF5722',
-    backgroundColor: '#FFF7ED',
+    borderWidth: 2.5,
+    elevation: 6,
+    shadowColor: '#FF5722',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+  },
+  smartCategoryCardBg: {
+    width: '100%',
+    height: '100%',
+  },
+  smartCategoryCardBgImg: {
+    borderRadius: 13,
+  },
+  smartCategoryOverlay: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  smartCategoryOverlayActive: {
+    backgroundColor: 'rgba(234, 88, 12, 0.35)',
+  },
+  smartCategoryPill: {
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
+    maxWidth: '92%',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  smartCategoryTitleCenter: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    textAlign: 'center',
+    lineHeight: 16,
+    letterSpacing: 0.1,
+  },
+  smartCategoryActiveIndicatorPill: {
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+    backgroundColor: '#FF5722',
+  },
+  smartCategoryActiveIndicatorText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    textTransform: 'uppercase',
+  },
+  // Sub-Products Drawer / Section
+  smartSubSection: {
+    marginTop: 18,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1.5,
+    borderColor: '#FFEDD5',
     elevation: 4,
     shadowColor: '#FF5722',
     shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
   },
-  smartCategoryIconBox: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
+  smartSubHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
   },
-  smartCategoryLabel: {
-    fontSize: 12,
+  smartSubBadgeDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+    alignSelf: 'center',
+  },
+  smartSubTitle: {
+    fontSize: 16,
     fontWeight: '800',
     color: '#0F172A',
-    textAlign: 'center',
   },
-  smartCategoryLabelActive: {
+  smartSubSubtitle: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#64748B',
+    marginTop: 3,
+  },
+  smartSubCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  smartSubGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  smartSubCard: {
+    width: '48%',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 4,
+  },
+  smartSubCardImg: {
+    width: '100%',
+    height: 95,
+    backgroundColor: '#E2E8F0',
+  },
+  smartSubCardBody: {
+    padding: 8,
+    justifyContent: 'space-between',
+    minHeight: 64,
+  },
+  smartSubCardTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1E293B',
+    lineHeight: 16,
+  },
+  smartSubCardAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  smartSubCardActionText: {
+    fontSize: 11,
+    fontWeight: '800',
     color: '#FF5722',
-    fontWeight: '900',
-  },
-  smartCategoryActiveIndicator: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
   },
     // Smart Search Modern Styles
   smartSearchInstructionText: {
@@ -6923,6 +8025,71 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontSize: 13,
     color: '#64748B',
+  },
+  notifEmptyCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 20,
+    paddingVertical: 32,
+    paddingHorizontal: 22,
+    alignItems: 'center',
+    marginTop: 8,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  notifEmptyIconOuter: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  notifEmptyIconInner: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notifEmptyTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  notifEmptySub: {
+    fontSize: 13,
+    lineHeight: 20,
+    color: '#64748B',
+    textAlign: 'center',
+    marginBottom: 18,
+    maxWidth: 290,
+  },
+  notifEmptyActiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  notifEmptyActiveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#10B981',
+    marginRight: 6,
+  },
+  notifEmptyActiveText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#047857',
   },
   notifItemRow: {
     flexDirection: 'row',
@@ -7529,5 +8696,266 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     color: '#94A3B8',
+  },
+
+  // Estilos da Gaveta Lateral Menu (Inspirado no App E-commerce)
+  drawerUserCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  drawerAvatarCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#FFF7ED',
+    borderWidth: 2,
+    borderColor: '#FED7AA',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  drawerAvatarImg: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  drawerUserName: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  drawerUserSub: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#64748B',
+    marginTop: 2,
+  },
+  drawerSectionTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#94A3B8',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginTop: 8,
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  drawerGroupCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 14,
+    overflow: 'hidden',
+  },
+  drawerMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+  },
+  drawerMenuIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  drawerMenuLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  drawerMenuSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 1,
+  },
+  drawerMenuBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    marginRight: 6,
+  },
+  drawerMenuBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  drawerDivider: {
+    height: 1,
+    backgroundColor: '#F1F5F9',
+    marginLeft: 62,
+  },
+  drawerFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 10,
+    marginBottom: 6,
+  },
+  drawerFooterLink: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  drawerFooterDot: {
+    fontSize: 11,
+    color: '#CBD5E1',
+  },
+
+  // Estilos da Animação do Botão Central de Vídeos (Achôdinhos)
+  centralVideoHalo: {
+    position: 'absolute',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  centralVideoBtnBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    shadowColor: '#FF5722',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+
+  // Estilos do Modal Meus Favoritos
+  favModalContainer: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+  },
+  favModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  favModalIconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFE4E6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  favModalTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  favModalSubtitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  favModalCloseBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  favEmptyStateContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  favEmptyIconBox: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: '#FFF1F2',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  favEmptyTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0F172A',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  favEmptyDesc: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#64748B',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  favEmptyCtaBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#E11D48',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 14,
+    elevation: 2,
+  },
+  favEmptyCtaBtnText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+
+  // Estilos do Card Conectado no Modal de Autenticação
+  authConnectedProfileBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    marginBottom: 12,
+  },
+  authConnectedAvatarCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#DCFCE7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  authConnectedAvatarImg: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+  },
+  authConnectedName: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  authConnectedEmail: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+    marginTop: 1,
+  },
+  authConnectedStatus: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#00A650',
+    marginTop: 2,
   },
 });

@@ -113,8 +113,9 @@ export const AppTopHeader = ({
               onPress={onOpenSettings}
               activeOpacity={0.7}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Menu lateral"
             >
-              <Ionicons name="settings-outline" size={22} color="#0F172A" />
+              <Ionicons name="menu-outline" size={24} color="#0F172A" />
             </TouchableOpacity>
           )}
         </View>
@@ -345,11 +346,14 @@ export const parseShopeeInfo = (title = '', url = '') => {
   }
 
   // Desconto no formato "• -xx%" ou "• -xx% OFF" ou "(-xx% OFF)" ou "[-xx%OFF]"
-  const discMatch = cleanTitle.match(/•?\s*(-?\d+%\s*OFF|-?\d+%\s*off|-?\d+%|\[-\d+%\s*OFF\])/i);
+  const discMatch = cleanTitle.match(/•?\s*(-\d+%\s*(?:OFF|off)?|\d+%\s*(?:OFF|off)|\[-\d+%\s*OFF\])/i);
   if (discMatch) {
     const raw = discMatch[1].replace(/off/i, '').replace('-', '').replace('[', '').replace(']', '').trim();
-    desconto = raw;
-    cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+    const val = parseInt(raw, 10);
+    if (val > 0 && val < 90) {
+      desconto = raw;
+      cleanTitle = cleanTitle.replace(discMatch[0], '').trim();
+    }
   }
 
   cleanTitle = cleanTitle.replace(/\s*•\s*$/, '').trim();
@@ -1135,17 +1139,34 @@ export const ProductDealCard = React.memo(({
   item, 
   onPress, 
   onToggleFavorite,
+  isFavorite: isFavoriteProp,
   style 
 }) => {
   const [imgError, setImgError] = useState(false);
-  const [isFavorited, setIsFavorited] = useState(false);
+  const [internalFav, setInternalFav] = useState(false);
+  const isFavorited = isFavoriteProp !== undefined ? isFavoriteProp : internalFav;
 
-  const precoFormatado = item?.preco 
-    ? `R$ ${parseFloat(item.preco).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
+  const precoNum = parseFloat(item?.preco || item?.price) || 0;
+  const precoOrigNum = parseFloat(item?.preco_original) || 0;
+
+  // Validação matemática estrita do desconto: elimina falsos positivos (ex: 100% de "100% original")
+  const finalDescontoPct = useMemo(() => {
+    let d = parseInt(item?.desconto_pct, 10);
+    if (precoOrigNum > precoNum && precoNum > 0) {
+      const calc = Math.round(((precoOrigNum - precoNum) / precoOrigNum) * 100);
+      if (calc > 0 && calc < 90) return calc;
+      return 0;
+    }
+    if (!isNaN(d) && d > 0 && d < 90) return d;
+    return 0;
+  }, [item?.desconto_pct, precoOrigNum, precoNum]);
+
+  const precoFormatado = precoNum > 0
+    ? `R$ ${precoNum.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
     : 'Sob Consulta';
 
-  const precoOrigFormatado = item?.preco_original 
-    ? `R$ ${parseFloat(item.preco_original).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
+  const precoOrigFormatado = (finalDescontoPct > 0 && precoOrigNum > precoNum) 
+    ? `R$ ${precoOrigNum.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
     : null;
 
   const lojaNome = item?.loja || 'Loja Parceira';
@@ -1387,7 +1408,7 @@ export const ProductDealCard = React.memo(({
           {showDestaqueBadge && (
             <View style={styles.pechCardDestaqueBadge}>
               <Ionicons name="star" size={10} color="#FFFFFF" style={{ marginRight: 3 }} />
-              <Text style={styles.pechCardDestaqueBadgeText}>DESTAQUE</Text>
+              <Text style={styles.pechCardDestaqueBadgeText}>MELHOR OFERTA</Text>
             </View>
           )}
 
@@ -1415,9 +1436,9 @@ export const ProductDealCard = React.memo(({
             {precoOrigFormatado && (
               <Text style={styles.pechCardOrigPrice}>{precoOrigFormatado}</Text>
             )}
-            {item?.desconto_pct > 0 && (
+            {finalDescontoPct > 0 && (
               <View style={[styles.pechCardDiscountPill, { marginLeft: 6 }]}>
-                <Text style={styles.pechCardDiscountText}>-{item.desconto_pct}%</Text>
+                <Text style={styles.pechCardDiscountText}>-{finalDescontoPct}%</Text>
               </View>
             )}
           </View>
@@ -1452,25 +1473,34 @@ export const ProductDealCard = React.memo(({
         </View>
       </View>
 
-      {/* Rodapé: Apenas Coração de Favorito + Botão Acessar Oferta */}
+      {/* Rodapé: Coração de Favorito + Badge Abaixou de Preço + Botão Acessar Oferta */}
       <View style={styles.pechCardFooterRow}>
-        <TouchableOpacity 
-          style={styles.pechCardFavBtn}
-          onPress={(e) => {
-            e.stopPropagation();
-            try { Vibration.vibrate(20); } catch(err) {}
-            setIsFavorited(!isFavorited);
-            if (onToggleFavorite) onToggleFavorite(item);
-          }}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          activeOpacity={0.7}
-        >
-          <Ionicons 
-            name={isFavorited ? "heart" : "heart-outline"} 
-            size={20} 
-            color={isFavorited ? (item?.is_recomendacao ? "#E11D48" : "#FF5722") : "#94A3B8"} 
-          />
-        </TouchableOpacity>
+        <View style={styles.pechCardFooterLeft}>
+          <TouchableOpacity 
+            style={styles.pechCardFavBtn}
+            onPress={(e) => {
+              e.stopPropagation();
+              try { Vibration.vibrate(20); } catch(err) {}
+              setInternalFav(!isFavorited);
+              if (onToggleFavorite) onToggleFavorite(item);
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            activeOpacity={0.7}
+          >
+            <Ionicons 
+              name={isFavorited ? "heart" : "heart-outline"} 
+              size={20} 
+              color={isFavorited ? (item?.is_recomendacao ? "#E11D48" : "#FF5722") : "#94A3B8"} 
+            />
+          </TouchableOpacity>
+
+          {Boolean(item?.preco_abaixou) && (
+            <View style={styles.pechCardPrecoBaixouBadge}>
+              <Ionicons name="trending-down" size={11} color="#059669" style={{ marginRight: 3 }} />
+              <Text style={styles.pechCardPrecoBaixouText}> Preço abaixou ainda mais</Text>
+            </View>
+          )}
+        </View>
 
         <TouchableOpacity 
           style={[styles.pechCardVerMaisBtn, item?.is_recomendacao && { borderColor: '#FECDD3', backgroundColor: '#FFF1F2' }]}
@@ -1478,7 +1508,7 @@ export const ProductDealCard = React.memo(({
           activeOpacity={0.8}
         >
           <Text style={[styles.pechCardVerMaisBtnText, item?.is_recomendacao && { color: '#E11D48' }]}>
-            {item?.is_recomendacao ? "Ver recomendação" : "Acessar oferta"}
+            {item?.is_recomendacao ? "Acessar recomendação" : "Acessar oferta"}
           </Text>
           <Ionicons 
             name="chevron-forward" 
@@ -2856,10 +2886,31 @@ const styles = StyleSheet.create({
     borderTopColor: '#F8FAFC',
     marginTop: 1,
   },
+  pechCardFooterLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 1,
+  },
+  pechCardPrecoBaixouBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    borderColor: '#6EE7B7',
+    borderWidth: 1,
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: 12,
+    marginLeft: 6,
+  },
+  pechCardPrecoBaixouText: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    color: '#047857',
+    letterSpacing: -0.2,
+  },
   pechCardFavBtn: {
     padding: 4,
-    borderRadius: 8,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2904,16 +2955,11 @@ const styles = StyleSheet.create({
     borderColor: '#E2E8F0',
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 2,
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
   },
   platformCircleBubbleSelected: {
     borderColor: '#FF5722',
     backgroundColor: '#FFF7ED',
-    borderWidth: 2.5,
+    borderWidth: 2,
   },
   platformCircleCheck: {
     position: 'absolute',
