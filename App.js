@@ -44,6 +44,8 @@ import {
 } from './FreemiumModals';
 import { CustomAlertModal } from './CustomAlertModal';
 import { PriceHistoryModal, normalizarNomeProdutoJS } from './PriceHistoryModal';
+import { AdminLogsModal } from './AdminLogsModal';
+import { AdminServicesModal } from './AdminServicesModal';
 import VideosScreen from './VideosScreen';
 import { VideoService } from './videoService';
 import { DEPARTAMENTOS_PESQUISA } from './categoryData';
@@ -227,6 +229,8 @@ function RadarProvider({ children }) {
   const [authModalVisible, setAuthModalVisible] = useState(false);
   const [priceHistoryModalVisible, setPriceHistoryModalVisible] = useState(false);
   const [priceHistoryItem, setPriceHistoryItem] = useState(null);
+  const [adminLogsModalVisible, setAdminLogsModalVisible] = useState(false);
+  const [adminServicesModalVisible, setAdminServicesModalVisible] = useState(false);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const [userProfile, setUserProfile] = useState(null);
   const notifInitializedRef = useRef(false);
@@ -1153,7 +1157,15 @@ function RadarProvider({ children }) {
       openFavoritesModal, closeFavoritesModal, favoritesModalVisible,
       unreadNotifCount, limparNotificacoes,
       userProfile, setUserProfile,
-      lastCreatedRadarId, setLastCreatedRadarId
+      lastCreatedRadarId, setLastCreatedRadarId,
+      // Admin Logs & Serviços (Exclusivo para administradores)
+      openAdminLogsModal: () => setAdminLogsModalVisible(true),
+      closeAdminLogsModal: () => setAdminLogsModalVisible(false),
+      adminLogsModalVisible,
+      openAdminServicesModal: () => setAdminServicesModalVisible(true),
+      closeAdminServicesModal: () => setAdminServicesModalVisible(false),
+      adminServicesModalVisible,
+      isAdmin: Boolean(tierState?.tier === 'admin' || tier === 'admin' || userProfile?.plano === 'admin' || userProfile?.tipo_usuario === 'admin')
     }}>
       {children}
       <FreemiumModal 
@@ -1245,6 +1257,16 @@ function RadarProvider({ children }) {
           setPriceHistoryItem(null);
           handleOpenAd({ url });
         }}
+      />
+      <AdminLogsModal
+        visible={adminLogsModalVisible}
+        onClose={() => setAdminLogsModalVisible(false)}
+        isAdmin={Boolean(tierState?.tier === 'admin' || tier === 'admin' || userProfile?.plano === 'admin' || userProfile?.tipo_usuario === 'admin')}
+      />
+      <AdminServicesModal
+        visible={adminServicesModalVisible}
+        onClose={() => setAdminServicesModalVisible(false)}
+        isAdmin={Boolean(tierState?.tier === 'admin' || tier === 'admin' || userProfile?.plano === 'admin' || userProfile?.tipo_usuario === 'admin')}
       />
     </RadarContext.Provider>
   );
@@ -4435,7 +4457,8 @@ function SettingsDrawerModal({ visible, onClose }) {
     activatingTrial, subscribing, handleActivateTrial, handleSubscribePremium, 
     logoutUser, linkAccount, notificacoesAtivas, alternarNotificacoes, 
     testLocalNotification, showAlert, onRefresh, openAuthModal, openCoupons, openNotif,
-    userProfile, resultados, unreadNotifCount, openFavoritesModal, favoritosCount
+    userProfile, resultados, unreadNotifCount, openFavoritesModal, favoritosCount,
+    openAdminLogsModal, openAdminServicesModal
   } = useContext(RadarContext);
 
   const [authLoading, setAuthLoading] = useState(false);
@@ -4506,8 +4529,8 @@ function SettingsDrawerModal({ visible, onClose }) {
   const currentTier = tierState?.tier || tier || 'free';
   const isTrialActive = currentTier === 'premium_lite';
   const isPremium = currentTier === 'premium';
-  const isAdmin = currentTier === 'admin';
-  const isFree = currentTier === 'free';
+  const isAdmin = currentTier === 'admin' || userProfile?.plano === 'admin' || userProfile?.tipo_usuario === 'admin';
+  const isFree = currentTier === 'free' && !isAdmin;
 
   const tierBadgeInfo = useMemo(() => {
     if (isAdmin) {
@@ -4746,6 +4769,58 @@ function SettingsDrawerModal({ visible, onClose }) {
                 <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
               </TouchableOpacity>
             </View>
+
+            {/* SEÇÃO EXCLUSIVA ADMIN: LOGS DO SISTEMA & MONITORAMENTO */}
+            {isAdmin && (
+              <>
+                <Text style={styles.drawerSectionTitle}>Administração & Backend</Text>
+                <View style={styles.drawerGroupCard}>
+                  <TouchableOpacity 
+                    style={styles.drawerMenuItem}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      handleClose();
+                      setTimeout(() => openAdminLogsModal(), 200);
+                    }}
+                  >
+                    <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#FEF3C7' }]}>
+                      <Ionicons name="terminal-outline" size={19} color="#B45309" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.drawerMenuLabel}>Logs do Sistema</Text>
+                      <Text style={styles.drawerMenuSub}>Scrapers, atualizadores e diagnósticos</Text>
+                    </View>
+                    <View style={[styles.drawerMenuBadge, { backgroundColor: '#FEF3C7' }]}>
+                      <Text style={[styles.drawerMenuBadgeText, { color: '#B45309' }]}>ADMIN</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+                  </TouchableOpacity>
+
+                  <View style={styles.drawerDivider} />
+
+                  <TouchableOpacity 
+                    style={styles.drawerMenuItem}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      handleClose();
+                      setTimeout(() => openAdminServicesModal(), 200);
+                    }}
+                  >
+                    <View style={[styles.drawerMenuIconWrap, { backgroundColor: '#ECFDF5' }]}>
+                      <Ionicons name="hardware-chip-outline" size={19} color="#059669" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.drawerMenuLabel}>Robôs & Serviços</Text>
+                      <Text style={styles.drawerMenuSub}>Status, varreduras e processos no Moto G9 Play</Text>
+                    </View>
+                    <View style={[styles.drawerMenuBadge, { backgroundColor: '#ECFDF5' }]}>
+                      <Text style={[styles.drawerMenuBadgeText, { color: '#059669' }]}>AO VIVO</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color="#CBD5E1" />
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
 
             {/* SEÇÃO: CONFIGURAÇÕES DO APLICATIVO */}
             <Text style={styles.drawerSectionTitle}>Preferências & Conta</Text>

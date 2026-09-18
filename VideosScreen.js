@@ -16,6 +16,7 @@ import {
   Platform
 } from 'react-native';
 import YoutubePlayer from 'react-native-youtube-iframe';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -24,12 +25,121 @@ import * as WebBrowser from 'expo-web-browser';
 import { VideoService } from './videoService';
 import { formatarUrlAfiliado } from './affiliateUtils';
 import { RecommendationEngine } from './recommendationService';
+import { StoreLogoBadge } from './components';
 
 const { width: WINDOW_WIDTH, height: WINDOW_HEIGHT } = Dimensions.get('window');
 
-// Janela deslizante de pré-carregamento dos vídeos em standby (Zero delay na troca)
-const PRELOAD_AHEAD = 4;
+// Janela deslizante de pré-carregamento dos vídeos em standby (Zero delay na troca e baixo consumo de GPU)
+const PRELOAD_AHEAD = 2;
 const PRELOAD_BEHIND = 1;
+
+/**
+ * Retorna metadados visuais completos da plataforma (nome, cores oficiais e chave do logo)
+ */
+function getInfoPlataforma(plataforma, produtoUrl) {
+  let p = (plataforma || '').trim();
+  if (!p && produtoUrl) {
+    const u = String(produtoUrl).toLowerCase();
+    if (u.includes('mercadolivre') || u.includes('mercadolibre')) p = 'Mercado Livre';
+    else if (u.includes('amazon')) p = 'Amazon';
+    else if (u.includes('magazineluiza') || u.includes('magalu')) p = 'Magalu';
+    else if (u.includes('shopee')) p = 'Shopee';
+    else if (u.includes('kabum')) p = 'KaBuM!';
+    else if (u.includes('casasbahia')) p = 'Casas Bahia';
+    else if (u.includes('shein')) p = 'SHEIN';
+    else if (u.includes('carrefour')) p = 'Carrefour';
+    else if (u.includes('fastshop')) p = 'Fast Shop';
+    else if (u.includes('americanas')) p = 'Americanas';
+  }
+  if (!p) p = 'Shopee';
+
+  const pUpper = p.toUpperCase();
+  if (pUpper.includes('MERCADO') || pUpper.includes('MELI')) {
+    return { nome: 'Mercado Livre', cor: '#FFE600', corTexto: '#2D3277', storeKey: 'MERCADO_LIVRE' };
+  }
+  if (pUpper.includes('AMAZON')) {
+    return { nome: 'Amazon', cor: '#FF9900', corTexto: '#111827', storeKey: 'AMAZON' };
+  }
+  if (pUpper.includes('MAGALU') || pUpper.includes('MAGAZINE')) {
+    return { nome: 'Magalu', cor: '#0086FF', corTexto: '#FFFFFF', storeKey: 'MAGALU' };
+  }
+  if (pUpper.includes('KABUM')) {
+    return { nome: 'KaBuM!', cor: '#FF6500', corTexto: '#FFFFFF', storeKey: 'KABUM' };
+  }
+  if (pUpper.includes('CASAS') || pUpper.includes('BAHIA')) {
+    return { nome: 'Casas Bahia', cor: '#0033C6', corTexto: '#FFFFFF', storeKey: 'CASASBAHIA' };
+  }
+  if (pUpper.includes('SHEIN')) {
+    return { nome: 'SHEIN', cor: '#000000', corTexto: '#FFFFFF', storeKey: 'SHEIN' };
+  }
+  if (pUpper.includes('CARREFOUR')) {
+    return { nome: 'Carrefour', cor: '#003882', corTexto: '#FFFFFF', storeKey: 'CARREFOUR' };
+  }
+  if (pUpper.includes('FAST')) {
+    return { nome: 'Fast Shop', cor: '#D00000', corTexto: '#FFFFFF', storeKey: 'FASTSHOP' };
+  }
+  if (pUpper.includes('AMERICANAS')) {
+    return { nome: 'Americanas', cor: '#E60014', corTexto: '#FFFFFF', storeKey: 'AMERICANAS' };
+  }
+  // Padrão: Shopee
+  return { nome: 'Shopee', cor: '#EE4D2D', corTexto: '#FFFFFF', storeKey: 'SHOPEE' };
+}
+
+/**
+ * Formata o título do produto removendo hashtags para exibição visual limpa
+ */
+function formatarTituloProduto(titulo) {
+  if (!titulo) return 'Achadinho em Destaque';
+  const limpo = titulo
+    .replace(/#[\w\d_-]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return limpo.length >= 3 ? limpo : titulo;
+}
+
+/**
+ * Player Nativo de Vídeos Verticais via expo-video (ExoPlayer / AVPlayer)
+ * Montado apenas quando o item está dentro da janela visível (isMounted)
+ */
+function NativeVideoPlayer({ videoUrl, isActive, isScreenFocused, isMuted, userPaused }) {
+  const player = useVideoPlayer(videoUrl, (p) => {
+    p.loop = true;
+    p.muted = isMuted;
+    if (isActive && isScreenFocused && !userPaused) {
+      p.play();
+    }
+  });
+
+  // Sincroniza estado de som instantaneamente
+  useEffect(() => {
+    if (player) {
+      player.muted = isMuted;
+    }
+  }, [player, isMuted]);
+
+  // Sincroniza Play / Pause com visibilidade e rolagem
+  useEffect(() => {
+    if (!player) return;
+    const shouldPlay = isActive && isScreenFocused && !userPaused;
+    if (shouldPlay) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [player, isActive, isScreenFocused, userPaused]);
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <VideoView
+        style={StyleSheet.absoluteFill}
+        player={player}
+        contentFit="cover"
+        nativeControls={false}
+        surfaceType="textureView"
+      />
+    </View>
+  );
+}
 
 // CSS com fundo transparente (evita tela preta) e oculta 100% dos spinners/emojis/botões do YouTube
 const VERTICAL_PLAYER_CSS = [
@@ -291,9 +401,10 @@ function VideoFeedItem({
       try {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       } catch (e) {}
-      const msg = `Olha esse achadinho que encontrei no AchôAI: ${item.produto_titulo}\\nConfira aqui: ${item.produto_url}`;
+      const tituloFormatado = formatarTituloProduto(item.produto_titulo);
+      const msg = `Olha esse achadinho que encontrei no AchôAI: ${tituloFormatado}\nConfira aqui: ${item.produto_url}`;
       await Share.share({
-        title: item.produto_titulo,
+        title: tituloFormatado,
         message: msg,
         url: item.produto_url
       });
@@ -307,9 +418,13 @@ function VideoFeedItem({
     onToggleLike(item.id);
   };
 
-  const isShopee = (item.plataforma || '').toLowerCase().includes('shopee');
-  const corPlataforma = isShopee ? '#EE4D2D' : '#FFE600';
-  const corTextoPlataforma = isShopee ? '#FFFFFF' : '#2D3277';
+  const infoPlat = useMemo(
+    () => getInfoPlataforma(item.plataforma, item.produto_url),
+    [item.plataforma, item.produto_url]
+  );
+  const corPlataforma = infoPlat.cor;
+  const corTextoPlataforma = infoPlat.corTexto;
+  const isShopee = infoPlat.storeKey === 'SHOPEE';
 
   return (
     <View style={[styles.itemContainer, { height: itemHeight }]}>
@@ -363,6 +478,17 @@ function VideoFeedItem({
             </View>
           ) : null}
 
+          {/* Player Nativo Expo-Video (.mp4 Shopee / CDN): Mantido montado na janela deslizante */}
+          {isMounted && !youtubeId && item?.video_url ? (
+            <NativeVideoPlayer
+              videoUrl={item.video_url}
+              isActive={isActive}
+              isScreenFocused={isScreenFocused}
+              isMuted={isMuted}
+              userPaused={userPaused}
+            />
+          ) : null}
+
           {/* Indicador de Pausa: Exibe APENAS o botão Play sutil no centro quando pausado pelo usuário */}
           {userPaused && (
             <View style={styles.pauseOverlayCenter} pointerEvents="none">
@@ -407,22 +533,18 @@ function VideoFeedItem({
           <View style={styles.liveDot} />
         </View>
 
-        <View style={[styles.badgeLojaMini, { backgroundColor: corPlataforma }]}>
-          <Text style={[styles.badgeLojaMiniText, { color: corTextoPlataforma }]}>
-            {item.plataforma || 'Shopee'}
+        <View style={[styles.badgeLojaMini, { backgroundColor: infoPlat.cor }]}>
+          <Text style={[styles.badgeLojaMiniText, { color: infoPlat.corTexto }]}>
+            {infoPlat.nome}
           </Text>
         </View>
       </View>
 
       {/* 3. BARRA LATERAL DIREITA DE AÇÕES (CURTIR, COMPARTILHAR, MUDO) */}
       <View style={[styles.rightSideBar, { bottom: insets.bottom + 155 }]} pointerEvents="box-none">
-        {/* Selo Oficial da Plataforma */}
-        <View style={[styles.platformBadgeWrap, { borderColor: corPlataforma }]}>
-          <Ionicons
-            name={isShopee ? "bag-handle" : "cart"}
-            size={22}
-            color={corPlataforma}
-          />
+        {/* Selo Oficial da Plataforma com Logo Oficial dos Assets */}
+        <View style={[styles.platformBadgeWrap, { borderColor: infoPlat.cor }]}>
+          <StoreLogoBadge storeKey={infoPlat.storeKey} size={28} />
         </View>
 
         {/* Botão de Curtir com Contador iniciando rigorosamente em 0 */}
@@ -483,7 +605,7 @@ function VideoFeedItem({
         <View style={styles.authorRow}>
           <Ionicons name="sparkles" size={14} color="#F59E0B" style={{ marginRight: 5 }} />
           <Text style={styles.authorName} numberOfLines={1}>
-            Achadinho Exclusivo • {item.plataforma || 'Shopee'}
+            Achadinho Exclusivo • {infoPlat.nome}
           </Text>
         </View>
 
@@ -500,7 +622,7 @@ function VideoFeedItem({
 
           <View style={styles.productInfo}>
             <Text style={styles.productTitle} numberOfLines={2}>
-              {item.produto_titulo}
+              {formatarTituloProduto(item.produto_titulo)}
             </Text>
 
             <View style={styles.priceRow}>
@@ -526,14 +648,14 @@ function VideoFeedItem({
                   </Text>
                 </View>
               ) : (
-                <Text style={styles.storeNameText}>{item.plataforma}</Text>
+                <Text style={styles.storeNameText}>{infoPlat.nome}</Text>
               )}
             </View>
           </View>
 
           {/* Botão de Ver Produto */}
           <TouchableOpacity
-            style={[styles.buyBtn, { backgroundColor: isShopee ? '#EE4D2D' : '#2D3277' }]}
+            style={[styles.buyBtn, { backgroundColor: infoPlat.cor === '#FFE600' ? '#2D3277' : infoPlat.cor }]}
             activeOpacity={0.7}
             onPress={handleAbrirProduto}
           >
@@ -554,9 +676,14 @@ export default function VideosScreen({ navigation }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [carregandoMais, setCarregandoMais] = useState(false);
   const [activeVideoIndex, setActiveVideoIndex] = useState(0);
   const [likedVideoIds, setLikedVideoIds] = useState(new Set());
   const [containerHeight, setContainerHeight] = useState(WINDOW_HEIGHT);
+
+  const carregandoRef = useRef(false);
+  const videosLengthRef = useRef(0);
+  videosLengthRef.current = videos.length;
 
   // ESTADO GLOBAL DE SOM: Inicia LIGADO (false = desmutado) e persiste por todas as rolagens!
   const [isGlobalMuted, setIsGlobalMuted] = useState(false);
@@ -566,21 +693,61 @@ export default function VideosScreen({ navigation }) {
 
   const flatListRef = useRef(null);
 
-  // Carrega vídeos de forma randomizada e curtidas do usuário
+  // Carrega feed inicial (com suporte a cache instantâneo de 0ms + busca de dados atualizados)
   const carregarFeed = useCallback(async (force = false) => {
     try {
-      if (force) setRefreshing(true);
-      const [listaVideos, idsCurtidos] = await Promise.all([
-        VideoService.carregarVideos(force),
+      if (force) {
+        setRefreshing(true);
+      } else {
+        // Exibe imediatamente o cache inicial se existir para não ficar em tela de espera
+        const cache = await VideoService.obterCacheInicial();
+        if (cache && cache.length > 0) {
+          setVideos(cache);
+          setLoading(false);
+        }
+      }
+
+      const [novoLote, idsCurtidos] = await Promise.all([
+        VideoService.carregarLoteVideos({ isInitial: true }),
         VideoService.getVideosCurtidosIds()
       ]);
-      setVideos(listaVideos);
+
+      if (Array.isArray(novoLote) && novoLote.length > 0) {
+        setVideos(novoLote);
+      }
       setLikedVideoIds(idsCurtidos);
     } catch (e) {
       console.warn('[VideosScreen] Erro ao carregar feed:', e);
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  }, []);
+
+  // Carrega o próximo lote de vídeos de forma contínua e sem duplicatas
+  const handleCarregarMais = useCallback(async () => {
+    if (carregandoRef.current) return;
+    carregandoRef.current = true;
+    setCarregandoMais(true);
+
+    try {
+      const novoLote = await VideoService.carregarLoteVideos({ isInitial: false });
+      if (Array.isArray(novoLote) && novoLote.length > 0) {
+        setVideos((prevVideos) => {
+          const idsExistentes = new Set(prevVideos.map((v) => v.id));
+          const urlsExistentes = new Set(prevVideos.map((v) => v.video_url).filter(Boolean));
+          const novosFiltrados = novoLote.filter(
+            (v) => !idsExistentes.has(v.id) && (!v.video_url || !urlsExistentes.has(v.video_url))
+          );
+          if (novosFiltrados.length === 0) return prevVideos;
+          return [...prevVideos, ...novosFiltrados];
+        });
+      }
+    } catch (err) {
+      console.warn('[VideosScreen] Erro ao carregar mais vídeos:', err);
+    } finally {
+      carregandoRef.current = false;
+      setCarregandoMais(false);
     }
   }, []);
 
@@ -640,7 +807,12 @@ export default function VideosScreen({ navigation }) {
     if (viewableItems && viewableItems.length > 0) {
       const firstVisible = viewableItems[0];
       if (firstVisible && typeof firstVisible.index === 'number') {
-        setActiveVideoIndex(firstVisible.index);
+        const idx = firstVisible.index;
+        setActiveVideoIndex(idx);
+        // Dispara busca do próximo lote antes de atingir o final da lista
+        if (idx >= videosLengthRef.current - 5 && !carregandoRef.current) {
+          handleCarregarMais();
+        }
       }
     }
   }).current;
@@ -709,13 +881,23 @@ export default function VideosScreen({ navigation }) {
           decelerationRate="fast"
           disableIntervalMomentum={true}
           showsVerticalScrollIndicator={false}
-          overScrollMode="never"
-          bounces={false}
+          overScrollMode="always"
+          bounces={true}
           onViewableItemsChanged={onViewableItemsChanged}
           viewabilityConfig={viewabilityConfig}
           getItemLayout={getItemLayout}
           refreshing={refreshing}
           onRefresh={() => carregarFeed(true)}
+          onEndReached={handleCarregarMais}
+          onEndReachedThreshold={0.8}
+          ListFooterComponent={
+            carregandoMais ? (
+              <View style={[styles.footerLoader, { height: containerHeight }]}>
+                <ActivityIndicator size="large" color="#EE4D2D" />
+                <Text style={styles.footerLoaderText}>Buscando mais achadinhos...</Text>
+              </View>
+            ) : null
+          }
           initialNumToRender={5}
           maxToRenderPerBatch={5}
           windowSize={9}
@@ -879,11 +1061,17 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
     marginBottom: 4,
+    overflow: 'hidden',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
   },
   actionButton: {
     alignItems: 'center',
@@ -1003,5 +1191,17 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '800',
     fontSize: 12,
+  },
+  footerLoader: {
+    width: WINDOW_WIDTH,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#000000',
+    gap: 12,
+  },
+  footerLoaderText: {
+    color: '#94A3B8',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

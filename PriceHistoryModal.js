@@ -23,21 +23,16 @@ import { supabase } from './supabase';
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 /**
- * Normaliza o título para agrupar variações do mesmo produto
- * (mesma regra do backend Python).
+ * Normaliza o título para agrupar variações mantendo modelo e especificações específicas.
  */
 export function normalizarNomeProdutoJS(titulo) {
   if (!titulo) return '';
-  const STOPWORDS = new Set([
-    'de', 'da', 'do', 'em', 'para', 'com', 'sem', 'por', 'uma', 'um', 'os', 'as',
-    'novo', 'nova', 'original', 'lacrado', 'garantia', 'frete', 'gratis', 'promocao',
-    'oferta', 'barato', 'entrega', 'rapida', 'brasil', 'oficial'
-  ]);
-  const txt = titulo.toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9\s]/g, ' ');
-  const words = txt.split(/\s+/).filter(w => w.length > 1 && !STOPWORDS.has(w));
-  return words.slice(0, 6).join(' ');
+  let t = String(titulo).trim();
+  t = t.replace(/#[\w\d_-]+/g, ' ');
+  t = t.replace(/[*_~`]+/g, ' ');
+  t = t.replace(/\b(compre aqui:?|veja aqui:?|clique aqui:?|link na bio:?|confira:?)\b/gi, ' ');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t;
 }
 
 /**
@@ -83,6 +78,63 @@ export const PriceHistoryModal = ({
   const [historyPoints, setHistoryPoints] = useState([]);
   const [storeOffers, setStoreOffers] = useState([]);
   const [selectedPointIndex, setSelectedPointIndex] = useState(null);
+  const [imgError, setImgError] = useState(false);
+  const [useProxyFallback, setUseProxyFallback] = useState(false);
+
+  useEffect(() => {
+    setImgError(false);
+    setUseProxyFallback(false);
+  }, [item?.imagem_url, item?.image, item?.foto, item?.thumbnail, item?.produto_imagem]);
+
+  const imagemResolvida = useMemo(() => {
+    let u = (item?.imagem_url || item?.image || item?.foto || item?.thumbnail || item?.produto_imagem || '').trim();
+    if (!u) return null;
+    if (u.startsWith('//')) {
+      u = 'https:' + u;
+    } else if (u.startsWith('http://')) {
+      u = 'https://' + u.slice(7);
+    }
+    if (u.includes('{w}x{h}')) {
+      u = u.replace('{w}x{h}', '800x560');
+    }
+    if (u.includes('proxy.duckduckgo.com')) {
+      try {
+        const match = u.match(/[?&]u=([^&]+)/);
+        if (match && match[1]) {
+          u = decodeURIComponent(match[1]);
+        }
+      } catch (e) {}
+    }
+    return u;
+  }, [item?.imagem_url, item?.image, item?.foto, item?.thumbnail, item?.produto_imagem]);
+
+  const imageSource = useMemo(() => {
+    if (!imagemResolvida) return null;
+    const isCasasBahia = imagemResolvida.includes('casasbahia') || imagemResolvida.includes('extra.com') || imagemResolvida.includes('pontofrio');
+    if (useProxyFallback && isCasasBahia) {
+      return { uri: `https://proxy.duckduckgo.com/iu/?u=${encodeURIComponent(imagemResolvida)}` };
+    }
+    if (isCasasBahia) {
+      return {
+        uri: imagemResolvida,
+        headers: {
+          Referer: 'https://www.casasbahia.com.br/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        }
+      };
+    }
+    return { uri: imagemResolvida };
+  }, [imagemResolvida, useProxyFallback]);
+
+  const handleImageError = () => {
+    const isCasasBahia = imagemResolvida && (imagemResolvida.includes('casasbahia') || imagemResolvida.includes('extra.com') || imagemResolvida.includes('pontofrio'));
+    if (isCasasBahia && !useProxyFallback) {
+      setUseProxyFallback(true);
+    } else {
+      setImgError(true);
+    }
+  };
 
   const isClosingRef = useRef(false);
 
@@ -173,33 +225,50 @@ export const PriceHistoryModal = ({
     }
 
     try {
-      const tituloOriginal = item?.titulo || item?.title || '';
-      const norm = normalizarNomeProdutoJS(tituloOriginal);
-      const palavrasNorm = norm.split(' ').filter(p => p.length > 2);
+      const tituloOriginal = item?.titulo || item?.title || item?.produto_titulo || '';
+      const cleanTitle = normalizarNomeProdutoJS(tituloOriginal);
+      const precoAtual = parseFloat(item?.preco || item?.price || item?.produto_preco) || 0;
+      const cleanUrl = (item?.url || item?.url_produto || item?.produto_url || '').split('?')[0].replace(/\/$/, '');
 
       let pontosEvolucao = [];
       let ofertasLojas = [];
 
-      // 1. Tenta buscar evolução diária agrupada na view
+      // 1. Tenta buscar evolução diária agrupada na view com correspondência estrita
       try {
         let queryView = supabase
           .from('view_evolucao_precos_diaria')
           .select('*')
           .order('dia_referencia', { ascending: true })
-          .limit(30);
+          .limit(40);
 
-        if (norm) {
-          queryView = queryView.or(`produto_nome.ilike.%${norm.slice(0, 30)}%,produto_nome.ilike.%${palavrasNorm[0] || ''}%`);
-        } else if (palavrasNorm.length > 0) {
-          queryView = queryView.ilike('produto_nome', `%${palavrasNorm[0]}%`);
+        if (cleanTitle.length >= 10) {
+          const prefixo = cleanTitle.slice(0, 40);
+          if (cleanUrl.length > 15) {
+            queryView = queryView.or(`produto_nome.ilike.%${prefixo}%,url_melhor_oferta.ilike.%${cleanUrl.slice(-30)}%`);
+          } else {
+            queryView = queryView.ilike('produto_nome', `%${prefixo}%`);
+          }
+        } else if (cleanUrl.length > 15) {
+          queryView = queryView.ilike('url_melhor_oferta', `%${cleanUrl.slice(-30)}%`);
         }
 
         const { data: viewData, error: viewError } = await queryView;
         if (!viewError && Array.isArray(viewData) && viewData.length > 0) {
-          pontosEvolucao = viewData.map(r => ({
-            ...r,
-            data_registro: r.dia_referencia || r.data_registro,
-          }));
+          // Filtra outliers absurdos (preço de acessório/capinha não pode contaminar produto caro)
+          const dadosValidos = viewData.filter((r) => {
+            const pMed = parseFloat(r.preco_medio_dia) || parseFloat(r.menor_preco_dia) || 0;
+            if (precoAtual > 50 && (pMed < precoAtual * 0.35 || pMed > precoAtual * 3.0)) {
+              return false;
+            }
+            return true;
+          });
+
+          if (dadosValidos.length > 0) {
+            pontosEvolucao = dadosValidos.map((r) => ({
+              ...r,
+              data_registro: r.dia_referencia || r.data_registro,
+            }));
+          }
         }
       } catch (eView) {
         console.warn('Erro ao consultar view_evolucao_precos_diaria:', eView);
@@ -213,22 +282,36 @@ export const PriceHistoryModal = ({
           .order('dia_referencia', { ascending: true })
           .limit(60);
 
-        if (norm) {
-          queryHist = queryHist.or(`produto_nome.ilike.%${norm.slice(0, 30)}%,titulo_anuncio.ilike.%${palavrasNorm[0] || norm.slice(0, 15)}%`);
-        } else if (tituloOriginal) {
-          queryHist = queryHist.ilike('titulo_anuncio', `%${tituloOriginal.slice(0, 25)}%`);
+        if (cleanTitle.length >= 10) {
+          const prefixo = cleanTitle.slice(0, 40);
+          if (cleanUrl.length > 15) {
+            queryHist = queryHist.or(`produto_nome.ilike.%${prefixo}%,url_produto.ilike.%${cleanUrl.slice(-30)}%`);
+          } else {
+            queryHist = queryHist.ilike('produto_nome', `%${prefixo}%`);
+          }
+        } else if (cleanUrl.length > 15) {
+          queryHist = queryHist.ilike('url_produto', `%${cleanUrl.slice(-30)}%`);
         }
 
         const { data: histData, error: histError } = await queryHist;
 
         if (!histError && Array.isArray(histData) && histData.length > 0) {
+          // Filtra outliers de acessórios
+          const histValidos = histData.filter((row) => {
+            const p = parseFloat(row.preco) || 0;
+            if (p <= 5.0) return false;
+            if (precoAtual > 50 && (p < precoAtual * 0.35 || p > precoAtual * 3.0)) {
+              return false;
+            }
+            return true;
+          });
+
           // Se não havia dados da view, monta agrupamento diário
-          if (pontosEvolucao.length === 0) {
+          if (pontosEvolucao.length === 0 && histValidos.length > 0) {
             const agrupadoPorData = {};
-            histData.forEach((row) => {
+            histValidos.forEach((row) => {
               const dt = row.dia_referencia || (row.data_coleta ? row.data_coleta.split('T')[0] : (row.created_at ? row.created_at.split('T')[0] : 'Hoje'));
               const preco = parseFloat(row.preco) || 0;
-              if (preco <= 0) return;
 
               if (!agrupadoPorData[dt]) {
                 agrupadoPorData[dt] = {
@@ -273,10 +356,9 @@ export const PriceHistoryModal = ({
 
           // Agrupa as melhores ofertas atuais por loja para o Comparativo
           const lojasMap = {};
-          histData.forEach((row) => {
+          histValidos.forEach((row) => {
             const loja = row.loja || 'Loja Parceira';
             const preco = parseFloat(row.preco) || 0;
-            if (preco <= 0) return;
 
             if (!lojasMap[loja] || preco < lojasMap[loja].preco) {
               lojasMap[loja] = {
@@ -294,21 +376,18 @@ export const PriceHistoryModal = ({
         console.warn('Erro ao consultar historico_precos:', eHist);
       }
 
-      // Se ainda tiver menos de 2 pontos históricos, mas temos o item atual,
-      // inclui o ponto atual para tentar complementar caso tenha registro prévio
-      const precoAtual = parseFloat(item?.preco || item?.price) || 0;
-      if (precoAtual > 0 && pontosEvolucao.length === 1) {
+      // Se nenhum ponto histórico foi retornado, cria o ponto de referência com o preço real atual
+      if (precoAtual > 0 && pontosEvolucao.length === 0) {
         const hojeIso = new Date().toISOString().split('T')[0];
-        if (pontosEvolucao[0].data_registro !== hojeIso) {
-          pontosEvolucao.push({
-            data_registro: hojeIso,
-            menor_preco_dia: precoAtual,
-            maior_preco_dia: precoAtual,
-            preco_medio_dia: precoAtual,
-            melhor_loja_dia: item?.loja || 'AchôAI',
-            url_melhor_oferta: item?.url,
-          });
-        }
+        pontosEvolucao.push({
+          data_registro: hojeIso,
+          menor_preco_dia: precoAtual,
+          maior_preco_dia: precoAtual,
+          preco_medio_dia: precoAtual,
+          total_ofertas_dia: 1,
+          melhor_loja_dia: item?.loja || 'AchôAI',
+          url_melhor_oferta: item?.url || item?.url_produto,
+        });
       }
 
       setHistoryPoints(pontosEvolucao);
@@ -504,11 +583,12 @@ export const PriceHistoryModal = ({
             {/* Card Resumo do Produto Selecionado */}
             <View style={styles.productSummaryCard}>
               <View style={styles.productThumbBox}>
-                {item?.imagem_url ? (
+                {imageSource && !imgError ? (
                   <Image
-                    source={{ uri: item.imagem_url }}
+                    source={imageSource}
                     style={styles.productThumb}
                     resizeMode="contain"
+                    onError={handleImageError}
                   />
                 ) : (
                   <StoreLogoBadge storeKey={lojaAtual} size={36} />
